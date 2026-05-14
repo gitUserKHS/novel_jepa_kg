@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from src.embedding.vector_store import retrieve_by_text, retrieve_by_vector
 from src.generation.consistency import allowed_name_instruction, build_beat_card, repair_name_consistency
@@ -63,6 +63,7 @@ def generate_chat_turn(
     session: dict[str, Any],
     user_instruction: str,
     mode: str,
+    stream_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     if mode not in CHAT_MODES:
         raise ValueError(f"Unknown chat generation mode: {mode}")
@@ -88,6 +89,7 @@ def generate_chat_turn(
         system="당신은 장편 한국어 웹소설을 세션 메모리와 설정에 맞춰 이어 쓰는 작가입니다.",
         temperature=config.generation.temperature,
         max_tokens=config.generation.max_tokens,
+        stream_callback=stream_callback,
     ).strip()
     assistant_text = repair_name_consistency(
         config,

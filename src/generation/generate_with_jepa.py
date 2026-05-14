@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 from src.embedding.vector_store import retrieve_by_vector
 from src.generation.consistency import allowed_name_instruction, build_beat_card, repair_name_consistency
 from src.llm.ollama_client import OllamaClient
@@ -14,6 +16,7 @@ def generate_with_jepa(
     world: str,
     characters: str,
     previous_scene: str,
+    stream_callback: Callable[[str], None] | None = None,
 ) -> str:
     predicted = predict_next_embedding(config, client, previous_scene)
     retrieved = retrieve_by_vector(config, predicted, config.generation.top_k)
@@ -40,5 +43,6 @@ def generate_with_jepa(
         system="당신은 한국어 장편 웹소설 작가입니다.",
         temperature=config.generation.temperature,
         max_tokens=config.generation.max_tokens,
+        stream_callback=stream_callback,
     )
     return repair_name_consistency(config, client, text, world, characters, previous_scene)

@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from types import SimpleNamespace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 import plotly.express as px
@@ -249,6 +249,17 @@ def cache_summary(label: str, data: dict[str, Any]) -> str:
     return " | ".join(parts)
 
 
+def make_stream_callback(placeholder: Any) -> Callable[[str], None]:
+    buffer: list[str] = []
+
+    def on_chunk(chunk: str) -> None:
+        for char in chunk:
+            buffer.append(char)
+            placeholder.markdown("".join(buffer) + "▌")
+
+    return on_chunk
+
+
 def make_client(config: AppConfig, dry_run: bool) -> OllamaClient:
     return OllamaClient(
         base_url=config.ollama.base_url,
@@ -365,11 +376,34 @@ def run_generation_bundle(
     world: str,
     characters: str,
     previous_scene: str,
+    stream_callbacks: dict[str, Callable[[str], None]] | None = None,
 ) -> dict[str, str]:
+    stream_callbacks = stream_callbacks or {}
     return {
-        "llm_only": generate_llm_only(config, client, world, characters, previous_scene),
-        "rag": generate_with_rag(config, client, world, characters, previous_scene),
-        "jepa": generate_with_jepa(config, client, world, characters, previous_scene),
+        "llm_only": generate_llm_only(
+            config,
+            client,
+            world,
+            characters,
+            previous_scene,
+            stream_callback=stream_callbacks.get("llm_only"),
+        ),
+        "rag": generate_with_rag(
+            config,
+            client,
+            world,
+            characters,
+            previous_scene,
+            stream_callback=stream_callbacks.get("rag"),
+        ),
+        "jepa": generate_with_jepa(
+            config,
+            client,
+            world,
+            characters,
+            previous_scene,
+            stream_callback=stream_callbacks.get("jepa"),
+        ),
     }
 
 
@@ -447,8 +481,17 @@ def render_chat_session(config: AppConfig, client: OllamaClient) -> None:
         )
         if st.button("Generate next scene", type="primary", key=f"generate_{session_id}"):
             try:
+                live_output = st.empty()
                 with st.status("Generating next scene and updating memory", expanded=True) as status:
-                    result = generate_chat_turn(config, client, session, user_instruction, mode)
+                    result = generate_chat_turn(
+                        config,
+                        client,
+                        session,
+                        user_instruction,
+                        mode,
+                        stream_callback=make_stream_callback(live_output),
+                    )
+                    live_output.markdown(result["assistant_text"])
                     status.update(label="Saved scene, summary, and memory", state="complete")
                 st.success(
                     f"Generated {len(result['assistant_text'])} chars. "
@@ -526,6 +569,11 @@ def main() -> None:
         st.write("합성 서사 데이터 생성부터 평가 리포트까지 작은 샘플로 실행합니다.")
         genre = genre_selector("Genre", "한국형 SF 미스터리", "project_genre")
         sample_count = st.number_input("Samples", min_value=2, max_value=100, value=8, step=1)
+        fresh_dataset = st.checkbox(
+            "Create fresh dataset for this run",
+            value=False,
+            help="Ignore the synthetic sample cache for the full pipeline run and overwrite generated/filtered JSONL.",
+        )
         previous_scene = st.text_area(
             "Previous scene",
             "주인공은 폐쇄된 연구동에서 사라진 동생의 이름이 적힌 실험 기록을 발견한다.",
@@ -536,6 +584,9 @@ def main() -> None:
         st.caption("Artifact snapshot")
         st.dataframe(artifact_status(config), hide_index=True, width="stretch")
         if st.button("Run Full Pipeline", type="primary"):
+            original_reuse_existing = config.data.reuse_existing
+            if fresh_dataset:
+                config.data.reuse_existing = False
             progress = st.progress(0)
             stage_rows = initial_stage_rows()
             stage_table = st.empty()
@@ -546,9 +597,11 @@ def main() -> None:
             render_stage_table(stage_table, stage_rows)
             artifact_table.dataframe(artifact_status(config), hide_index=True, width="stretch")
             try:
-                update_stage(stage_rows, stage_table, 0, "running", "Generating or reusing samples")
+                dataset_mode = "Generating fresh samples" if fresh_dataset else "Generating or reusing samples"
+                update_stage(stage_rows, stage_table, 0, "running", dataset_mode)
                 current_step.info("Step 1/6: Dataset generation and validation")
                 dataset_result = run_dataset_stage(config, client, genre, int(sample_count))
+                run_summary["fresh_dataset"] = fresh_dataset
                 run_summary["dataset"] = dataset_result
                 dataset_detail = (
                     f"{cache_summary('samples', dataset_result['generated'])} | "
@@ -613,7 +666,27 @@ def main() -> None:
 
                 update_stage(stage_rows, stage_table, 4, "running", "Generating comparison outputs")
                 current_step.info("Step 5/6: LLM-only, RAG, and JEPA generation")
-                outputs = run_generation_bundle(config, client, world, characters, previous_scene)
+                generation_views = st.tabs(["LLM only live", "RAG live", "JEPA live"])
+                generation_placeholders = {}
+                with generation_views[0]:
+                    generation_placeholders["llm_only"] = st.empty()
+                with generation_views[1]:
+                    generation_placeholders["rag"] = st.empty()
+                with generation_views[2]:
+                    generation_placeholders["jepa"] = st.empty()
+                outputs = run_generation_bundle(
+                    config,
+                    client,
+                    world,
+                    characters,
+                    previous_scene,
+                    stream_callbacks={
+                        key: make_stream_callback(placeholder)
+                        for key, placeholder in generation_placeholders.items()
+                    },
+                )
+                for key, output in outputs.items():
+                    generation_placeholders[key].markdown(output or "(empty)")
                 run_summary["generation"] = {key: len(value) for key, value in outputs.items()}
                 update_stage(stage_rows, stage_table, 4, "done", " / ".join(f"{key}={len(value)} chars" for key, value in outputs.items()))
                 progress.progress(88)
@@ -638,6 +711,8 @@ def main() -> None:
             except Exception as exc:  # noqa: BLE001 - Streamlit should show readable errors.
                 current_step.error("Pipeline failed")
                 show_error("Pipeline failed", exc)
+            finally:
+                config.data.reuse_existing = original_reuse_existing
 
     with tabs[1]:
         render_chat_session(config, client)
@@ -776,13 +851,36 @@ def main() -> None:
         mode = st.radio("Mode", ["LLM only", "RAG + LLM", "JEPA Planner + RAG + LLM"], horizontal=True)
         if st.button("Generate prose"):
             try:
+                live_output = st.empty()
+                stream_callback = make_stream_callback(live_output)
                 if mode == "LLM only":
-                    output = generate_llm_only(config, client, world, characters, previous_scene)
+                    output = generate_llm_only(
+                        config,
+                        client,
+                        world,
+                        characters,
+                        previous_scene,
+                        stream_callback=stream_callback,
+                    )
                 elif mode == "RAG + LLM":
-                    output = generate_with_rag(config, client, world, characters, previous_scene)
+                    output = generate_with_rag(
+                        config,
+                        client,
+                        world,
+                        characters,
+                        previous_scene,
+                        stream_callback=stream_callback,
+                    )
                 else:
-                    output = generate_with_jepa(config, client, world, characters, previous_scene)
-                st.markdown(output)
+                    output = generate_with_jepa(
+                        config,
+                        client,
+                        world,
+                        characters,
+                        previous_scene,
+                        stream_callback=stream_callback,
+                    )
+                live_output.markdown(output)
             except Exception as exc:  # noqa: BLE001
                 show_error("Generation failed", exc)
 

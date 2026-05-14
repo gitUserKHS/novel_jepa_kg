@@ -122,8 +122,9 @@ Open the `Project` tab.
 
 1. Pick a genre preset, or choose `직접 입력` and enter your own genre.
 2. Set `Samples` to `8` to `20` for a first real test.
-3. Fill in world, characters, and previous scene.
-4. Click `Run Full Pipeline`.
+3. Turn on `Create fresh dataset for this run` when you want to ignore the synthetic sample cache and make a new dataset.
+4. Fill in world, characters, and previous scene.
+5. Click `Run Full Pipeline`.
 
 The app runs:
 
@@ -214,6 +215,7 @@ Keep `Reuse cached data` on. The first run is slower; later runs reuse samples a
 - AMP is optional and disabled by default because the small predictor usually does not benefit enough to justify CUDA compatibility risk.
 - Evaluation reports include mode ranking, embedding continuity, repetition profile, keyword consistency, novelty from previous scene, lexical diversity, length fit, progression score, dialogue ratio, sentence stats, contradiction checks, and pairwise output diversity.
 - The full pipeline view shows a live stage table, current step message, artifact snapshot, cache reuse counts, and live training loss/cosine charts while training runs.
+- The full pipeline and Generate tab stream prose output while Ollama is generating, then replace the live text with the final consistency-checked text.
 - Chat sessions are stored as JSON files under `data/sessions/` and keep messages, scene summaries, a long-term memory summary, story state, and a knowledge graph.
 - Long-form generation uses hybrid context compression: recent messages + accumulated summary + graph nodes/edges + optional RAG/JEPA retrieval.
 - The Chat tab can compress memory on demand, rebuild the graph, show graph nodes/edges plus Mermaid text, and export a session Markdown file.

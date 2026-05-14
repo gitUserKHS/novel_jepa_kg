@@ -48,6 +48,7 @@
 - [x] Add beat-card grounded prompting for RAG/JEPA generation.
 - [x] Limit retrieved examples injected into prompts.
 - [x] Add optional name consistency repair after generation.
+- [x] Stream generated prose into the UI during generation.
 
 ## Phase 4.5 - Chat Memory
 
@@ -74,6 +75,7 @@
 - [x] Add sample dataset via dry-run pipeline.
 - [x] Add clear error handling.
 - [x] Add intuitive pipeline progress, artifact status, cache counters, and live training progress.
+- [x] Add a full-pipeline fresh dataset option.
 - [x] Add Ollama partial-offload controls and runtime VRAM visibility.
 - [x] Store JEPA predictor training metadata with the checkpoint.
 - [x] Add final demo report.

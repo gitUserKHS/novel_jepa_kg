@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from typing import Callable
+
+from src.generation.consistency import allowed_name_instruction, build_beat_card, repair_name_consistency
 from src.llm.ollama_client import OllamaClient
 from src.llm.prompts import prose_prompt
-from src.generation.consistency import allowed_name_instruction, build_beat_card, repair_name_consistency
 from src.utils.config import AppConfig
 
 
@@ -12,6 +14,7 @@ def generate_llm_only(
     world: str,
     characters: str,
     previous_scene: str,
+    stream_callback: Callable[[str], None] | None = None,
 ) -> str:
     prompt = prose_prompt(
         world,
@@ -26,5 +29,6 @@ def generate_llm_only(
         system="당신은 한국어 장편 웹소설 작가입니다.",
         temperature=config.generation.temperature,
         max_tokens=config.generation.max_tokens,
+        stream_callback=stream_callback,
     )
     return repair_name_consistency(config, client, text, world, characters, previous_scene)

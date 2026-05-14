@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 from src.embedding.vector_store import retrieve_by_text
 from src.generation.consistency import allowed_name_instruction, build_beat_card, repair_name_consistency
 from src.llm.ollama_client import OllamaClient
@@ -13,6 +15,7 @@ def generate_with_rag(
     world: str,
     characters: str,
     previous_scene: str,
+    stream_callback: Callable[[str], None] | None = None,
 ) -> str:
     retrieved = retrieve_by_text(config, client, previous_scene, config.generation.top_k)
     examples = [item["sample"]["scene_t_plus_1"]["summary"] for item in retrieved[: config.generation.rag_context_limit]]
@@ -32,5 +35,6 @@ def generate_with_rag(
         system="당신은 한국어 장편 웹소설 작가입니다.",
         temperature=config.generation.temperature,
         max_tokens=config.generation.max_tokens,
+        stream_callback=stream_callback,
     )
     return repair_name_consistency(config, client, text, world, characters, previous_scene)

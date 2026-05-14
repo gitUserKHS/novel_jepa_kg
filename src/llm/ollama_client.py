@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import requests
@@ -78,9 +78,14 @@ class OllamaClient:
         temperature: float = 0.7,
         max_tokens: int = 1200,
         json_mode: bool = False,
+        stream_callback: Callable[[str], None] | None = None,
     ) -> str:
         if self.dry_run:
-            return self._dry_chat(prompt)
+            text = self._dry_chat(prompt)
+            if stream_callback is not None:
+                for char in text:
+                    stream_callback(char)
+            return text
         if self.manage_vram and self.embed_model and self.embed_model != self.chat_model:
             self.unload_model(self.embed_model)
         messages = []
@@ -97,7 +102,7 @@ class OllamaClient:
         body = {
             "model": self.chat_model,
             "messages": messages,
-            "stream": False,
+            "stream": stream_callback is not None,
             "think": False,
             "options": options,
         }
@@ -110,16 +115,20 @@ class OllamaClient:
                 f"{self.base_url}/api/chat",
                 json=body,
                 timeout=self.timeout_sec,
+                stream=stream_callback is not None,
             )
             self._raise_for_status(response, "/api/chat", self.chat_model)
-            payload = response.json()
+            if stream_callback is not None:
+                content, payload = self._read_streaming_chat(response, stream_callback)
+            else:
+                payload = response.json()
+                content = payload.get("message", {}).get("content", "")
         except requests.RequestException as exc:
             raise RuntimeError(f"Could not reach Ollama /api/chat at {self.base_url}: {exc}") from exc
         except ValueError as exc:
             raise RuntimeError("Ollama /api/chat returned invalid JSON.") from exc
 
         message = payload.get("message", {})
-        content = message.get("content", "")
         if not content.strip():
             done_reason = payload.get("done_reason", "unknown")
             thinking = message.get("thinking", "")
@@ -131,6 +140,26 @@ class OllamaClient:
                 "Try a larger max token value or a non-thinking chat model."
             )
         return content
+
+    def _read_streaming_chat(
+        self,
+        response: requests.Response,
+        stream_callback: Callable[[str], None],
+    ) -> tuple[str, dict[str, Any]]:
+        chunks: list[str] = []
+        last_payload: dict[str, Any] = {}
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            payload = json.loads(line)
+            last_payload = payload
+            chunk = payload.get("message", {}).get("content", "")
+            if chunk:
+                chunks.append(chunk)
+                stream_callback(chunk)
+            if payload.get("done"):
+                break
+        return "".join(chunks), last_payload
 
     def embed(self, texts: list[str]) -> np.ndarray:
         if self.dry_run:
