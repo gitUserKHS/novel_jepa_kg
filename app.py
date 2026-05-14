@@ -180,8 +180,11 @@ def main() -> None:
         try:
             import torch
 
-            device_label = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
-            st.info(f"Training device: {device_label}")
+            if torch.cuda.is_available():
+                device_label = torch.cuda.get_device_name(0)
+                st.info(f"Training device: {device_label} | torch {torch.__version__} | CUDA {torch.version.cuda}")
+            else:
+                st.info(f"Training device: CPU | torch {torch.__version__}")
         except Exception as exc:  # noqa: BLE001
             st.warning(f"Could not inspect torch device: {exc}")
         config.training.epochs = int(st.number_input("Epochs", min_value=1, max_value=500, value=config.training.epochs))
