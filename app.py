@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,15 @@ from src.utils.paths import ensure_project_dirs, resolve_path
 
 
 st.set_page_config(page_title="Novel JEPA Lab", layout="wide")
+
+PIPELINE_STAGES = [
+    {"stage": "Dataset", "work": "Generate or reuse samples, then validate/filter JSONL"},
+    {"stage": "Embedding", "work": "Reuse or create scene embeddings, then prepare vectors"},
+    {"stage": "Index", "work": "Reuse or build FAISS next-scene index"},
+    {"stage": "Train", "work": "Train residual predictor and save best checkpoint"},
+    {"stage": "Generate", "work": "Create LLM-only, RAG, and JEPA outputs"},
+    {"stage": "Evaluate", "work": "Score outputs and write Markdown report"},
+]
 
 
 def show_error(message: str, exc: Exception | None = None) -> None:
@@ -59,6 +69,98 @@ def flatten_samples(samples: list[dict[str, Any]]) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def format_size(path: Path) -> str:
+    if not path.exists():
+        return "-"
+    size = path.stat().st_size
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
+
+
+def artifact_status(config: AppConfig) -> pd.DataFrame:
+    artifacts = [
+        ("Synthetic JSONL", config.data.synthetic_path),
+        ("Filtered JSONL", config.data.filtered_path),
+        ("Sample cache", config.data.sample_cache_path),
+        ("Embeddings", config.data.embeddings_path),
+        ("Embedding cache", config.data.embedding_cache_path),
+        ("FAISS index", config.data.faiss_index_path),
+        ("Predictor checkpoint", config.training.checkpoint_path),
+        ("Train history", "reports/runs/latest_train_history.json"),
+    ]
+    rows = []
+    for name, relative_path in artifacts:
+        path = resolve_path(config, relative_path)
+        modified = "-"
+        if path.exists():
+            modified = datetime.fromtimestamp(path.stat().st_mtime).strftime("%H:%M:%S")
+        rows.append(
+            {
+                "artifact": name,
+                "status": "ready" if path.exists() else "missing",
+                "size": format_size(path),
+                "updated": modified,
+                "path": str(path),
+            }
+        )
+
+    report_dir = resolve_path(config, config.evaluation.report_dir)
+    reports = sorted(report_dir.glob("comparison_*.md")) if report_dir.exists() else []
+    if reports:
+        latest = reports[-1]
+        rows.append(
+            {
+                "artifact": "Latest report",
+                "status": "ready",
+                "size": format_size(latest),
+                "updated": datetime.fromtimestamp(latest.stat().st_mtime).strftime("%H:%M:%S"),
+                "path": str(latest),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def initial_stage_rows() -> list[dict[str, str]]:
+    return [
+        {"stage": item["stage"], "status": "waiting", "detail": item["work"]}
+        for item in PIPELINE_STAGES
+    ]
+
+
+def render_stage_table(placeholder: Any, rows: list[dict[str, str]]) -> None:
+    placeholder.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
+def update_stage(
+    rows: list[dict[str, str]],
+    placeholder: Any,
+    stage_index: int,
+    status: str,
+    detail: str,
+) -> None:
+    rows[stage_index]["status"] = status
+    rows[stage_index]["detail"] = detail
+    render_stage_table(placeholder, rows)
+
+
+def cache_summary(label: str, data: dict[str, Any]) -> str:
+    parts = [label]
+    if "generated" in data:
+        parts.append(f"new={data.get('generated', 0)}")
+    if "reused" in data:
+        parts.append(f"reused={data.get('reused', 0)}")
+    if "new_vectors" in data:
+        parts.append(f"new_vectors={data.get('new_vectors', 0)}")
+    if "reused_vectors" in data:
+        parts.append(f"cached_vectors={data.get('reused_vectors', 0)}")
+    if data.get("reused_file"):
+        parts.append("file=reused")
+    return " | ".join(parts)
 
 
 def make_client(config: AppConfig, dry_run: bool) -> OllamaClient:
@@ -128,28 +230,103 @@ def main() -> None:
         )
         world = st.text_area("World setting", "기억이 물리적 흔적으로 남는 근미래 서울.", height=80)
         characters = st.text_area("Characters", "서윤: 동생을 찾는 기록 복원가. 민재: 진실을 숨긴 연구원.", height=80)
+        st.caption("Artifact snapshot")
+        st.dataframe(artifact_status(config), hide_index=True, use_container_width=True)
         if st.button("Run Full Pipeline", type="primary"):
             progress = st.progress(0)
+            stage_rows = initial_stage_rows()
+            stage_table = st.empty()
+            current_step = st.empty()
+            artifact_table = st.empty()
+            train_chart = st.empty()
+            run_summary: dict[str, Any] = {}
+            render_stage_table(stage_table, stage_rows)
+            artifact_table.dataframe(artifact_status(config), hide_index=True, use_container_width=True)
             try:
-                with st.status("Generating and filtering dataset"):
-                    run_dataset_stage(config, client, genre, int(sample_count))
-                progress.progress(20)
-                with st.status("Embedding scenes"):
-                    embed_dataset(config, client)
-                    build_next_scene_index(config)
-                progress.progress(45)
-                with st.status("Training predictor"):
-                    history = train_predictor(config)
+                update_stage(stage_rows, stage_table, 0, "running", "Generating or reusing samples")
+                current_step.info("Step 1/6: Dataset generation and validation")
+                dataset_result = run_dataset_stage(config, client, genre, int(sample_count))
+                run_summary["dataset"] = dataset_result
+                dataset_detail = (
+                    f"{cache_summary('samples', dataset_result['generated'])} | "
+                    f"kept={dataset_result['filtered']['kept']} | rejected={dataset_result['filtered']['rejected']}"
+                )
+                update_stage(stage_rows, stage_table, 0, "done", dataset_detail)
+                artifact_table.dataframe(artifact_status(config), hide_index=True, use_container_width=True)
+                progress.progress(16)
+
+                update_stage(stage_rows, stage_table, 1, "running", "Embedding only missing vectors")
+                current_step.info("Step 2/6: Scene embeddings")
+                embed_result = embed_dataset(config, client)
+                run_summary["embedding"] = embed_result
+                update_stage(stage_rows, stage_table, 1, "done", cache_summary("embeddings", embed_result))
+                artifact_table.dataframe(artifact_status(config), hide_index=True, use_container_width=True)
+                progress.progress(32)
+
+                update_stage(stage_rows, stage_table, 2, "running", "Checking FAISS index freshness")
+                current_step.info("Step 3/6: Vector index")
+                index_path = build_next_scene_index(config)
+                run_summary["index"] = str(index_path)
+                update_stage(stage_rows, stage_table, 2, "done", f"index={index_path}")
+                artifact_table.dataframe(artifact_status(config), hide_index=True, use_container_width=True)
+                progress.progress(48)
+
+                train_points: list[dict[str, Any]] = []
+
+                def on_train_epoch(row: dict[str, Any]) -> None:
+                    train_points.append(row)
+                    epoch = int(row["epoch"])
+                    total = int(row["total_epochs"])
+                    progress.progress(48 + int(22 * epoch / max(1, total)))
+                    update_stage(
+                        stage_rows,
+                        stage_table,
+                        3,
+                        "running",
+                        f"epoch={epoch}/{total} | val_cosine={row['val_cosine']:.4f} | best={row['best_val_cosine']:.4f}",
+                    )
+                    train_df = pd.DataFrame(train_points)
+                    train_chart.line_chart(train_df.set_index("epoch")[["train_loss", "val_loss", "val_cosine"]])
+
+                update_stage(stage_rows, stage_table, 3, "running", "Training predictor")
+                current_step.info("Step 4/6: Predictor training")
+                history = train_predictor(config, progress_callback=on_train_epoch)
+                run_summary["training"] = {
+                    "device": history.get("device"),
+                    "parameter_count": history.get("parameter_count"),
+                    "best_val_cosine": history.get("best_val_cosine"),
+                    "epochs": len(history.get("epochs", [])),
+                }
+                update_stage(
+                    stage_rows,
+                    stage_table,
+                    3,
+                    "done",
+                    f"device={history.get('device')} | params={history.get('parameter_count', 0):,} | "
+                    f"best_val_cosine={history.get('best_val_cosine', 0):.4f}",
+                )
+                artifact_table.dataframe(artifact_status(config), hide_index=True, use_container_width=True)
                 progress.progress(70)
-                with st.status("Generating comparison outputs"):
-                    outputs = run_generation_bundle(config, client, world, characters, previous_scene)
-                progress.progress(90)
-                with st.status("Writing evaluation report"):
-                    report_path = evaluate_and_write_report(config, client, previous_scene, outputs)
+
+                update_stage(stage_rows, stage_table, 4, "running", "Generating comparison outputs")
+                current_step.info("Step 5/6: LLM-only, RAG, and JEPA generation")
+                outputs = run_generation_bundle(config, client, world, characters, previous_scene)
+                run_summary["generation"] = {key: len(value) for key, value in outputs.items()}
+                update_stage(stage_rows, stage_table, 4, "done", " / ".join(f"{key}={len(value)} chars" for key, value in outputs.items()))
+                progress.progress(88)
+
+                update_stage(stage_rows, stage_table, 5, "running", "Scoring outputs and writing report")
+                current_step.info("Step 6/6: Evaluation report")
+                report_path = evaluate_and_write_report(config, client, previous_scene, outputs)
+                run_summary["report"] = report_path
+                update_stage(stage_rows, stage_table, 5, "done", f"report={report_path}")
+                artifact_table.dataframe(artifact_status(config), hide_index=True, use_container_width=True)
                 progress.progress(100)
+                current_step.success("Pipeline completed")
                 st.success(f"Pipeline completed. Report saved to {report_path}")
-                st.json({"history": history, "outputs": outputs})
+                st.json(run_summary)
             except Exception as exc:  # noqa: BLE001 - Streamlit should show readable errors.
+                current_step.error("Pipeline failed")
                 show_error("Pipeline failed", exc)
 
     with tabs[1]:
@@ -160,6 +337,11 @@ def main() -> None:
             try:
                 result = run_dataset_stage(config, client, genre, int(count))
                 generated = result["generated"]
+                cols = st.columns(4)
+                cols[0].metric("written", generated["written"])
+                cols[1].metric("new", generated.get("generated", 0))
+                cols[2].metric("reused", generated.get("reused", 0))
+                cols[3].metric("kept", result["filtered"]["kept"])
                 st.success(
                     "Generated "
                     f"{generated['written']} samples "
@@ -177,6 +359,11 @@ def main() -> None:
             try:
                 result = embed_dataset(config, client)
                 index_path = build_next_scene_index(config)
+                cols = st.columns(4)
+                cols[0].metric("pairs", result["count"])
+                cols[1].metric("new vectors", result.get("new_vectors", 0))
+                cols[2].metric("cached vectors", result.get("reused_vectors", 0))
+                cols[3].metric("file reused", "yes" if result.get("reused_file") else "no")
                 cache_note = (
                     "reused existing embedding file"
                     if result.get("reused_file")
@@ -232,7 +419,25 @@ def main() -> None:
             config.training.use_amp = st.checkbox("Use AMP on CUDA", value=config.training.use_amp)
         if st.button("Train predictor"):
             try:
-                history = train_predictor(config)
+                train_progress = st.progress(0)
+                train_status = st.empty()
+                live_chart = st.empty()
+                train_points: list[dict[str, Any]] = []
+
+                def on_train_epoch(row: dict[str, Any]) -> None:
+                    train_points.append(row)
+                    epoch = int(row["epoch"])
+                    total = int(row["total_epochs"])
+                    train_progress.progress(int(100 * epoch / max(1, total)))
+                    train_status.info(
+                        f"epoch={epoch}/{total} | val_cosine={row['val_cosine']:.4f} | "
+                        f"best={row['best_val_cosine']:.4f}"
+                    )
+                    train_df = pd.DataFrame(train_points)
+                    live_chart.line_chart(train_df.set_index("epoch")[["train_loss", "val_loss", "val_cosine"]])
+
+                history = train_predictor(config, progress_callback=on_train_epoch)
+                train_status.success("Training completed")
                 st.success(
                     f"Best checkpoint saved to {resolve_path(config, config.training.checkpoint_path)} "
                     f"({history.get('parameter_count', 0):,} params, device={history.get('device')})"

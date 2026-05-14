@@ -58,5 +58,6 @@
 - [x] Add dry-run mode.
 - [x] Add sample dataset via dry-run pipeline.
 - [x] Add clear error handling.
+- [x] Add intuitive pipeline progress, artifact status, cache counters, and live training progress.
 - [x] Add final demo report.
 - [x] Commit stable version.

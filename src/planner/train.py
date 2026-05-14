@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import random
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -44,7 +44,10 @@ def _make_model(dim: int, config_dict: dict[str, Any]) -> MLPPredictor:
     )
 
 
-def train_predictor(config: AppConfig) -> dict:
+ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+def train_predictor(config: AppConfig, progress_callback: ProgressCallback | None = None) -> dict:
     torch.manual_seed(config.project.seed)
     random.seed(config.project.seed)
     np.random.seed(config.project.seed)
@@ -137,6 +140,16 @@ def train_predictor(config: AppConfig) -> dict:
             "val_cosine": float(val_cosine),
         }
         epochs.append(row)
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    **row,
+                    "total_epochs": config.training.epochs,
+                    "best_val_cosine": max(best_val, float(val_cosine)),
+                    "parameter_count": param_count,
+                    "device": str(device),
+                }
+            )
         if val_cosine > best_val:
             best_val = float(val_cosine)
             stale_epochs = 0
