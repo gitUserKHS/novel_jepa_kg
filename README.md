@@ -58,6 +58,127 @@ On Windows, you can also double-click:
 run_server.bat
 ```
 
+## Beginner Quickstart
+
+### 1. Start Ollama and install models
+
+Make sure Ollama is running. Install the default chat and embedding models:
+
+```powershell
+ollama pull gemma4:e4b
+ollama pull embeddinggemma
+```
+
+### 2. Launch the app
+
+Double-click:
+
+```text
+run_server.bat
+```
+
+Or run from PowerShell:
+
+```powershell
+cd C:\프로그래밍_프로젝트\novel_jepa_lab
+.\run_server.bat
+```
+
+Open:
+
+```text
+http://127.0.0.1:8501
+```
+
+### 3. Test with dry-run mode first
+
+In the left sidebar:
+
+```text
+Dry-run mode: on
+Reuse cached data: on
+```
+
+Dry-run mode checks the UI and pipeline flow without calling Ollama.
+
+### 4. Use real local models
+
+When dry-run works, turn it off:
+
+```text
+Dry-run mode: off
+Ollama base URL: http://localhost:11434
+Chat model: gemma4:e4b
+Embedding model: embeddinggemma
+```
+
+### 5. Run the full experiment
+
+Open the `Project` tab.
+
+1. Enter a genre.
+2. Set `Samples` to `8` to `20` for a first real test.
+3. Fill in world, characters, and previous scene.
+4. Click `Run Full Pipeline`.
+
+The app runs:
+
+```text
+generate synthetic data
+-> filter JSONL
+-> embed summaries
+-> build FAISS index
+-> train JEPA-inspired predictor
+-> generate LLM/RAG/JEPA outputs
+-> write evaluation report
+```
+
+### 6. Write a long-form story
+
+Open the `Chat` tab.
+
+1. Create a new session.
+2. Fill in title, world setting, and characters.
+3. Choose `JEPA Planner + RAG + LLM` for the default long-form mode.
+4. Write a next-scene instruction.
+5. Click `Generate next scene`.
+
+Example instruction:
+
+```text
+이전 장면의 감정선을 이어서 다음 장면을 써 주세요.
+새 단서와 선택 압박을 포함해 주세요.
+```
+
+The right-side Memory panel shows:
+
+- message count
+- scene summaries
+- compressed memory summary
+- knowledge graph nodes and edges
+- Mermaid graph text
+
+Useful buttons:
+
+- `Compress now`: update the long-term memory summary.
+- `Rebuild graph`: rebuild the knowledge graph from the session.
+- `Export MD`: export the session to Markdown.
+- `Delete`: delete the current session.
+
+### 7. Recommended first workflow
+
+```text
+1. Start with Dry-run mode on.
+2. Confirm the app works.
+3. Turn Dry-run mode off.
+4. Generate 20 samples in Dataset or Project.
+5. Run Embedding.
+6. Train the predictor.
+7. Use Chat with JEPA Planner + RAG + LLM.
+```
+
+Keep `Reuse cached data` on. The first run is slower; later runs reuse samples and embeddings.
+
 ## Streamlit Tabs
 
 - Project: one-click dry-run or Ollama-backed full pipeline
