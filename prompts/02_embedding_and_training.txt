@@ -1,0 +1,20 @@
+Implement embeddings and JEPA-inspired predictor training.
+
+Requirements:
+- Use Ollama /api/embed for embeddings.
+- Embed scene_t.summary and scene_t_plus_1.summary.
+- Save embeddings as data/embeddings/scenes.npz with arrays:
+  - current_embeddings
+  - next_embeddings
+  - sample_ids
+- Implement a PyTorch MLP predictor:
+  input: current scene embedding
+  output: next scene embedding
+- Loss: 1 - cosine_similarity(pred, target).
+- Add train/validation split.
+- Save checkpoint to checkpoints/predictor/best.pt.
+- Save training history to reports/runs/latest_train_history.json.
+- Add Streamlit tabs:
+  Embedding tab with embed button.
+  Train tab with epoch, batch size, learning rate controls.
+  Show training loss and validation cosine similarity charts.

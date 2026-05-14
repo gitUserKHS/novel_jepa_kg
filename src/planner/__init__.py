@@ -1,0 +1,1 @@
+"""JEPA-inspired latent predictor."""

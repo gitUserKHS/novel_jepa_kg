@@ -1,0 +1,42 @@
+Create a Python project named jepa_novel_lab.
+
+Goal:
+Build a Streamlit web GUI for a JEPA-inspired latent planner + local LLM novel generation system.
+
+Requirements:
+- Use Python 3.11+.
+- Use Streamlit for GUI.
+- Use PyTorch for the predictor model.
+- Use FAISS for vector search.
+- Use Ollama HTTP API for local LLM and embeddings.
+- Store synthetic data as JSONL.
+- Store configs in YAML.
+- Add clear folder structure under src/.
+- Add README.md, AGENTS.md, TASKS.md, .env.example, and requirements.txt.
+- Add placeholder modules with docstrings and TODOs.
+- Do not implement everything yet. Scaffold the project cleanly.
+
+Create:
+app.py
+configs/default.yaml
+src/llm/ollama_client.py
+src/llm/prompts.py
+src/data/generate_synthetic.py
+src/data/scene_schema.py
+src/data/validate_jsonl.py
+src/data/filter_dataset.py
+src/embedding/embed_scenes.py
+src/embedding/vector_store.py
+src/planner/dataset.py
+src/planner/model.py
+src/planner/train.py
+src/planner/predict.py
+src/generation/generate_baseline.py
+src/generation/generate_with_rag.py
+src/generation/generate_with_jepa.py
+src/evaluation/metrics.py
+src/evaluation/judge.py
+src/evaluation/report.py
+src/utils/config.py
+src/utils/logging.py
+src/utils/paths.py

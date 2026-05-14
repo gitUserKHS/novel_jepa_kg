@@ -1,0 +1,22 @@
+Make the Streamlit GUI feel like a one-click experiment dashboard.
+
+Requirements:
+- Sidebar project settings:
+  - Ollama base URL
+  - chat model name
+  - embedding model name
+  - output directory
+- Main tabs:
+  1. Project
+  2. Dataset
+  3. Embedding
+  4. Train
+  5. Generate
+  6. Evaluate
+  7. Reports
+- Add a 'Run Full Pipeline' button that runs:
+  generate dataset -> validate/filter -> embed -> train -> build FAISS -> generate sample -> evaluate.
+- Every stage must save artifacts and be restartable.
+- Show progress bars, status messages, and error boxes.
+- Never silently fail. Catch exceptions and display readable messages.
+- Add a dry-run mode for quick UI testing.

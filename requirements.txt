@@ -1,0 +1,12 @@
+streamlit
+pydantic
+pyyaml
+requests
+numpy
+pandas
+torch
+faiss-cpu
+scikit-learn
+tqdm
+plotly
+python-dotenv

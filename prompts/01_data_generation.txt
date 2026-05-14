@@ -1,0 +1,24 @@
+Implement the synthetic narrative dataset generation pipeline.
+
+Requirements:
+- Use Ollama local chat API.
+- Generate JSONL samples with fields: world, characters, scene_t, scene_t_plus_1.
+- scene_t and scene_t_plus_1 must include: summary, emotion, conflict, state, plot_function.
+- Add robust JSON parsing and retry logic.
+- Add validation using pydantic.
+- Add a quality filter that removes:
+  - invalid JSON
+  - empty summaries
+  - identical scene_t and scene_t_plus_1
+  - samples with missing character goals
+  - samples that mention copyrighted franchise names
+- Add a Streamlit Dataset tab:
+  - genre input
+  - number of samples
+  - model name
+  - generate button
+  - progress bar
+  - preview table
+- Save output to data/synthetic/generated.jsonl.
+- Save filtered output to data/filtered/filtered.jsonl.
+- Use Korean prompts and Korean outputs by default.

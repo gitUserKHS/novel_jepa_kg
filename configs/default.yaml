@@ -1,0 +1,38 @@
+project:
+  name: "Novel JEPA Lab"
+  language: "ko"
+  seed: 42
+
+ollama:
+  base_url: "http://localhost:11434"
+  chat_model: "gemma4:e4b"
+  embed_model: "embeddinggemma"
+  timeout_sec: 120
+
+data:
+  synthetic_path: "data/synthetic/generated.jsonl"
+  filtered_path: "data/filtered/filtered.jsonl"
+  embeddings_path: "data/embeddings/scenes.npz"
+  faiss_index_path: "data/indexes/next_scene.faiss"
+  min_summary_chars: 20
+  max_retries: 3
+
+training:
+  model_type: "mlp"
+  input_window: 1
+  epochs: 20
+  batch_size: 32
+  learning_rate: 0.0001
+  val_ratio: 0.15
+  checkpoint_path: "checkpoints/predictor/best.pt"
+
+generation:
+  top_k: 5
+  max_tokens: 1600
+  temperature: 0.8
+  style: "한국어 웹소설 문체. 감정선은 선명하게, 장면 전환은 자연스럽게."
+
+evaluation:
+  use_llm_judge: false
+  repetition_ngram: 4
+  report_dir: "reports/runs"

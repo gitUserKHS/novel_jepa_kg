@@ -1,0 +1,1 @@
+"""Novel JEPA Lab package."""

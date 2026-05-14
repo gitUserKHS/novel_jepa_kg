@@ -1,0 +1,30 @@
+Implement story generation and evaluation.
+
+Requirements:
+Given a user story context and previous scene summary:
+1. Embed the previous scene.
+2. Predict next scene embedding using the trained predictor.
+3. Retrieve top-k similar scene_t_plus_1 examples from FAISS.
+4. Build a prompt containing:
+   - user world setting
+   - character settings
+   - previous scene
+   - predicted next scene direction
+   - retrieved examples
+   - style constraints
+5. Call Ollama local LLM to generate Korean web novel prose.
+
+Add three generation modes:
+- LLM only
+- RAG + LLM
+- JEPA Planner + RAG + LLM
+
+Add evaluation metrics:
+- repetition rate
+- embedding continuity score
+- keyword consistency score
+- simple contradiction checklist
+- optional LLM judge prompt
+
+Add Streamlit Generate and Evaluate tabs.
+Generate a Markdown report under reports/runs/.

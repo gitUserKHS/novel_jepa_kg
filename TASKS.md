@@ -1,0 +1,56 @@
+# TASKS.md
+
+## Phase 0 - Project Scaffold
+
+- [x] Create folder structure.
+- [x] Add Streamlit app skeleton.
+- [x] Add YAML config loader.
+- [x] Add Ollama client wrapper.
+- [x] Add sample data directory.
+
+## Phase 1 - Synthetic Data
+
+- [x] Generate JSONL scene transition samples.
+- [x] Validate JSON with pydantic.
+- [x] Filter invalid or low-quality samples.
+- [x] Add preview table in Streamlit.
+
+## Phase 2 - Embeddings
+
+- [x] Embed scene_t.summary.
+- [x] Embed scene_t_plus_1.summary.
+- [x] Save embeddings as .npz.
+- [x] Build FAISS index for next-scene examples.
+
+## Phase 3 - Latent Predictor
+
+- [x] Implement MLP predictor.
+- [x] Add cosine loss.
+- [x] Add train/validation split.
+- [x] Save best checkpoint.
+- [x] Show loss chart in GUI.
+
+## Phase 4 - Generation
+
+- [x] Implement LLM-only mode.
+- [x] Implement RAG + LLM mode.
+- [x] Implement JEPA Planner + RAG + LLM mode.
+- [x] Display predicted next-scene direction via retrieved examples.
+- [x] Display retrieved examples through generated prompts and reports.
+
+## Phase 5 - Evaluation
+
+- [x] Repetition rate.
+- [x] Embedding continuity score.
+- [x] Keyword consistency score.
+- [x] Simple contradiction checklist.
+- [ ] Optional LLM judge.
+- [x] Markdown report export.
+
+## Phase 6 - Demo Hardening
+
+- [x] Add dry-run mode.
+- [x] Add sample dataset via dry-run pipeline.
+- [x] Add clear error handling.
+- [x] Add final demo report.
+- [x] Commit stable version.

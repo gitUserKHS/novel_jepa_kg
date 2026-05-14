@@ -1,0 +1,1 @@
+"""Novel generation modes."""

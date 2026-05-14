@@ -1,0 +1,20 @@
+Harden the project for a graduation-project demo.
+
+Requirements:
+- Add logging to reports/runs/<timestamp>/run.log.
+- Add config snapshot saving.
+- Add sample input data so the GUI can demo without generating thousands of samples.
+- Add README screenshots placeholders and usage instructions.
+- Add tests for JSON validation and metric functions.
+- Add a report generator that compares:
+  - LLM-only
+  - RAG + LLM
+  - JEPA Planner + RAG + LLM
+- Report should include:
+  - configuration
+  - dataset count
+  - training loss chart path
+  - evaluation table
+  - generated examples
+  - limitations
+- Keep implementation simple and robust for Windows.
