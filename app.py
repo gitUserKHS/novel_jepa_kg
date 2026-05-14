@@ -162,7 +162,7 @@ def initial_stage_rows() -> list[dict[str, str]]:
 
 
 def render_stage_table(placeholder: Any, rows: list[dict[str, str]]) -> None:
-    placeholder.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    placeholder.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 
 def update_stage(
@@ -360,14 +360,14 @@ def render_chat_session(config: AppConfig, client: OllamaClient) -> None:
             {"index": scene.get("index"), "mode": scene.get("mode"), "summary": scene.get("summary")}
             for scene in session.get("scene_summaries", [])
         ]
-        st.dataframe(pd.DataFrame(scene_rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(scene_rows), hide_index=True, width="stretch")
 
         nodes_df, edges_df = graph_tables(session.get("knowledge_graph", {}))
         graph_tabs = st.tabs(["Nodes", "Edges", "Mermaid"])
         with graph_tabs[0]:
-            st.dataframe(nodes_df, hide_index=True, use_container_width=True)
+            st.dataframe(nodes_df, hide_index=True, width="stretch")
         with graph_tabs[1]:
-            st.dataframe(edges_df, hide_index=True, use_container_width=True)
+            st.dataframe(edges_df, hide_index=True, width="stretch")
         with graph_tabs[2]:
             st.code(graph_to_mermaid(session.get("knowledge_graph", {})), language="mermaid")
 
@@ -397,7 +397,7 @@ def main() -> None:
         world = st.text_area("World setting", "기억이 물리적 흔적으로 남는 근미래 서울.", height=80)
         characters = st.text_area("Characters", "서윤: 동생을 찾는 기록 복원가. 민재: 진실을 숨긴 연구원.", height=80)
         st.caption("Artifact snapshot")
-        st.dataframe(artifact_status(config), hide_index=True, use_container_width=True)
+        st.dataframe(artifact_status(config), hide_index=True, width="stretch")
         if st.button("Run Full Pipeline", type="primary"):
             progress = st.progress(0)
             stage_rows = initial_stage_rows()
@@ -407,7 +407,7 @@ def main() -> None:
             train_chart = st.empty()
             run_summary: dict[str, Any] = {}
             render_stage_table(stage_table, stage_rows)
-            artifact_table.dataframe(artifact_status(config), hide_index=True, use_container_width=True)
+            artifact_table.dataframe(artifact_status(config), hide_index=True, width="stretch")
             try:
                 update_stage(stage_rows, stage_table, 0, "running", "Generating or reusing samples")
                 current_step.info("Step 1/6: Dataset generation and validation")
@@ -418,7 +418,7 @@ def main() -> None:
                     f"kept={dataset_result['filtered']['kept']} | rejected={dataset_result['filtered']['rejected']}"
                 )
                 update_stage(stage_rows, stage_table, 0, "done", dataset_detail)
-                artifact_table.dataframe(artifact_status(config), hide_index=True, use_container_width=True)
+                artifact_table.dataframe(artifact_status(config), hide_index=True, width="stretch")
                 progress.progress(16)
 
                 update_stage(stage_rows, stage_table, 1, "running", "Embedding only missing vectors")
@@ -426,7 +426,7 @@ def main() -> None:
                 embed_result = embed_dataset(config, client)
                 run_summary["embedding"] = embed_result
                 update_stage(stage_rows, stage_table, 1, "done", cache_summary("embeddings", embed_result))
-                artifact_table.dataframe(artifact_status(config), hide_index=True, use_container_width=True)
+                artifact_table.dataframe(artifact_status(config), hide_index=True, width="stretch")
                 progress.progress(32)
 
                 update_stage(stage_rows, stage_table, 2, "running", "Checking FAISS index freshness")
@@ -434,7 +434,7 @@ def main() -> None:
                 index_path = build_next_scene_index(config)
                 run_summary["index"] = str(index_path)
                 update_stage(stage_rows, stage_table, 2, "done", f"index={index_path}")
-                artifact_table.dataframe(artifact_status(config), hide_index=True, use_container_width=True)
+                artifact_table.dataframe(artifact_status(config), hide_index=True, width="stretch")
                 progress.progress(48)
 
                 train_points: list[dict[str, Any]] = []
@@ -471,7 +471,7 @@ def main() -> None:
                     f"device={history.get('device')} | params={history.get('parameter_count', 0):,} | "
                     f"best_val_cosine={history.get('best_val_cosine', 0):.4f}",
                 )
-                artifact_table.dataframe(artifact_status(config), hide_index=True, use_container_width=True)
+                artifact_table.dataframe(artifact_status(config), hide_index=True, width="stretch")
                 progress.progress(70)
 
                 update_stage(stage_rows, stage_table, 4, "running", "Generating comparison outputs")
@@ -486,7 +486,7 @@ def main() -> None:
                 report_path = evaluate_and_write_report(config, client, previous_scene, outputs)
                 run_summary["report"] = report_path
                 update_stage(stage_rows, stage_table, 5, "done", f"report={report_path}")
-                artifact_table.dataframe(artifact_status(config), hide_index=True, use_container_width=True)
+                artifact_table.dataframe(artifact_status(config), hide_index=True, width="stretch")
                 progress.progress(100)
                 current_step.success("Pipeline completed")
                 st.success(f"Pipeline completed. Report saved to {report_path}")
@@ -520,7 +520,7 @@ def main() -> None:
             except Exception as exc:  # noqa: BLE001
                 show_error("Dataset generation failed", exc)
         samples = read_jsonl(str(resolve_path(config, config.data.filtered_path)))
-        st.dataframe(flatten_samples(samples), use_container_width=True)
+        st.dataframe(flatten_samples(samples), width="stretch")
 
     with tabs[3]:
         st.subheader("Embedding")
@@ -614,7 +614,7 @@ def main() -> None:
                 history_df = pd.DataFrame(history["epochs"])
                 st.plotly_chart(
                     px.line(history_df, x="epoch", y=["train_loss", "val_loss", "val_cosine"]),
-                    use_container_width=True,
+                    width="stretch",
                 )
             except Exception as exc:  # noqa: BLE001
                 show_error("Training failed", exc)
