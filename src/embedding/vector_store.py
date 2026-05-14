@@ -24,6 +24,8 @@ def build_next_scene_index(config: AppConfig) -> Path:
     ensure_parent(index_path)
     if not embeddings_path.exists():
         raise FileNotFoundError(f"Embeddings file not found: {embeddings_path}")
+    if config.data.reuse_existing and index_path.exists() and index_path.stat().st_mtime >= embeddings_path.stat().st_mtime:
+        return index_path
     data = np.load(embeddings_path)
     next_embeddings = _normalize(data["next_embeddings"])
     try:

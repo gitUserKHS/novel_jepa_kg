@@ -78,6 +78,7 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
     config.ollama.embed_model = st.sidebar.text_input("Embedding model", config.ollama.embed_model)
     output_root = st.sidebar.text_input("Output directory", ".")
     dry_run = st.sidebar.checkbox("Dry-run mode", value=True)
+    config.data.reuse_existing = st.sidebar.checkbox("Reuse cached data", value=config.data.reuse_existing)
     if output_root.strip() and output_root.strip() != ".":
         config.output_root = output_root.strip()
     return config, dry_run
@@ -158,7 +159,13 @@ def main() -> None:
         if st.button("Generate dataset"):
             try:
                 result = run_dataset_stage(config, client, genre, int(count))
-                st.success(f"Generated {result['generated']['written']} samples, kept {result['filtered']['kept']}.")
+                generated = result["generated"]
+                st.success(
+                    "Generated "
+                    f"{generated['written']} samples "
+                    f"({generated.get('generated', 0)} new, {generated.get('reused', 0)} reused), "
+                    f"kept {result['filtered']['kept']}."
+                )
             except Exception as exc:  # noqa: BLE001
                 show_error("Dataset generation failed", exc)
         samples = read_jsonl(str(resolve_path(config, config.data.filtered_path)))
@@ -170,7 +177,12 @@ def main() -> None:
             try:
                 result = embed_dataset(config, client)
                 index_path = build_next_scene_index(config)
-                st.success(f"Saved {result['count']} embedding pairs and FAISS index to {index_path}.")
+                cache_note = (
+                    "reused existing embedding file"
+                    if result.get("reused_file")
+                    else f"{result.get('new_vectors', 0)} new vectors, {result.get('reused_vectors', 0)} cached vectors"
+                )
+                st.success(f"Saved {result['count']} embedding pairs ({cache_note}) and FAISS index to {index_path}.")
             except Exception as exc:  # noqa: BLE001
                 show_error("Embedding failed", exc)
         st.code(str(resolve_path(config, config.data.embeddings_path)))
@@ -194,12 +206,42 @@ def main() -> None:
         config.training.learning_rate = float(
             st.number_input("Learning rate", min_value=1e-6, max_value=1e-1, value=config.training.learning_rate, format="%0.6f")
         )
+        col_a, col_b = st.columns(2)
+        with col_a:
+            config.training.hidden_dim = int(
+                st.number_input("Hidden dim", min_value=128, max_value=4096, value=config.training.hidden_dim, step=128)
+            )
+            config.training.num_layers = int(
+                st.number_input("Layers", min_value=2, max_value=12, value=config.training.num_layers, step=1)
+            )
+            config.training.dropout = float(
+                st.number_input("Dropout", min_value=0.0, max_value=0.8, value=config.training.dropout, step=0.05)
+            )
+        with col_b:
+            config.training.weight_decay = float(
+                st.number_input("Weight decay", min_value=0.0, max_value=0.2, value=config.training.weight_decay, format="%0.4f")
+            )
+            config.training.early_stopping_patience = int(
+                st.number_input(
+                    "Early stop patience",
+                    min_value=0,
+                    max_value=100,
+                    value=config.training.early_stopping_patience,
+                )
+            )
+            config.training.use_amp = st.checkbox("Use AMP on CUDA", value=config.training.use_amp)
         if st.button("Train predictor"):
             try:
                 history = train_predictor(config)
-                st.success(f"Best checkpoint saved to {resolve_path(config, config.training.checkpoint_path)}")
+                st.success(
+                    f"Best checkpoint saved to {resolve_path(config, config.training.checkpoint_path)} "
+                    f"({history.get('parameter_count', 0):,} params, device={history.get('device')})"
+                )
                 history_df = pd.DataFrame(history["epochs"])
-                st.plotly_chart(px.line(history_df, x="epoch", y=["train_loss", "val_cosine"]), use_container_width=True)
+                st.plotly_chart(
+                    px.line(history_df, x="epoch", y=["train_loss", "val_loss", "val_cosine"]),
+                    use_container_width=True,
+                )
             except Exception as exc:  # noqa: BLE001
                 show_error("Training failed", exc)
 

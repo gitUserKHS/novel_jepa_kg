@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from pathlib import Path
 
 import numpy as np
 
@@ -12,7 +14,80 @@ from src.utils.paths import ensure_parent, resolve_path
 logger = get_logger(__name__)
 
 
-def embed_dataset(config: AppConfig, client: OllamaClient) -> dict[str, int]:
+def _text_key(model: str, text: str) -> str:
+    payload = json.dumps({"model": model, "text": text}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _load_embedding_cache(path: Path) -> dict[str, list[float]]:
+    if not path.exists():
+        return {}
+    cache: dict[str, list[float]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+            key = row.get("key")
+            vector = row.get("vector")
+            if key and isinstance(vector, list):
+                cache[key] = vector
+        except json.JSONDecodeError:
+            continue
+    return cache
+
+
+def _write_embedding_cache(path: Path, cache: dict[str, list[float]]) -> None:
+    ensure_parent(path)
+    with path.open("w", encoding="utf-8") as f:
+        for key, vector in cache.items():
+            f.write(json.dumps({"key": key, "vector": vector}, ensure_ascii=False) + "\n")
+
+
+def _texts_hash(model: str, texts: list[str]) -> np.ndarray:
+    return np.asarray([_text_key(model, text) for text in texts], dtype="<U64")
+
+
+def _can_reuse_embeddings(path: Path, model: str, current_texts: list[str], next_texts: list[str]) -> bool:
+    if not path.exists():
+        return False
+    try:
+        data = np.load(path)
+        if "current_text_hashes" not in data or "next_text_hashes" not in data or "embed_model" not in data:
+            return False
+        saved_model = str(data["embed_model"])
+        return (
+            saved_model == model
+            and np.array_equal(data["current_text_hashes"], _texts_hash(model, current_texts))
+            and np.array_equal(data["next_text_hashes"], _texts_hash(model, next_texts))
+        )
+    except Exception:
+        return False
+
+
+def _embed_with_cache(config: AppConfig, client: OllamaClient, texts: list[str]) -> tuple[np.ndarray, int, int]:
+    cache_path = resolve_path(config, config.data.embedding_cache_path)
+    cache = _load_embedding_cache(cache_path) if config.data.reuse_existing else {}
+    keys = [_text_key(config.ollama.embed_model, text) for text in texts]
+    missing_texts: list[str] = []
+    missing_keys: list[str] = []
+    for key, text in zip(keys, texts):
+        if key not in cache:
+            missing_keys.append(key)
+            missing_texts.append(text)
+
+    if missing_texts:
+        vectors = client.embed(missing_texts)
+        for key, vector in zip(missing_keys, vectors):
+            cache[key] = vector.astype("float32").tolist()
+        if config.data.reuse_existing:
+            _write_embedding_cache(cache_path, cache)
+
+    embeddings = np.asarray([cache[key] for key in keys], dtype="float32")
+    return embeddings, len(keys) - len(missing_keys), len(missing_keys)
+
+
+def embed_dataset(config: AppConfig, client: OllamaClient) -> dict[str, int | bool]:
     input_path = resolve_path(config, config.data.filtered_path)
     output_path = resolve_path(config, config.data.embeddings_path)
     ensure_parent(output_path)
@@ -25,14 +100,27 @@ def embed_dataset(config: AppConfig, client: OllamaClient) -> dict[str, int]:
 
     current_texts = [sample["scene_t"]["summary"] for sample in samples]
     next_texts = [sample["scene_t_plus_1"]["summary"] for sample in samples]
+    if config.data.reuse_existing and _can_reuse_embeddings(output_path, config.ollama.embed_model, current_texts, next_texts):
+        data = np.load(output_path)
+        return {"count": len(samples), "dim": int(data["current_embeddings"].shape[1]), "reused_file": True}
+
     logger.info("Embedding %s scene pairs", len(samples))
-    current_embeddings = client.embed(current_texts)
-    next_embeddings = client.embed(next_texts)
+    current_embeddings, current_reused, current_new = _embed_with_cache(config, client, current_texts)
+    next_embeddings, next_reused, next_new = _embed_with_cache(config, client, next_texts)
     sample_ids = np.asarray([sample.get("id", idx) for idx, sample in enumerate(samples)], dtype="int64")
     np.savez_compressed(
         output_path,
         current_embeddings=current_embeddings.astype("float32"),
         next_embeddings=next_embeddings.astype("float32"),
         sample_ids=sample_ids,
+        current_text_hashes=_texts_hash(config.ollama.embed_model, current_texts),
+        next_text_hashes=_texts_hash(config.ollama.embed_model, next_texts),
+        embed_model=np.asarray(config.ollama.embed_model),
     )
-    return {"count": len(samples), "dim": int(current_embeddings.shape[1])}
+    return {
+        "count": len(samples),
+        "dim": int(current_embeddings.shape[1]),
+        "reused_vectors": current_reused + next_reused,
+        "new_vectors": current_new + next_new,
+        "reused_file": False,
+    }

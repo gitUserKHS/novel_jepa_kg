@@ -14,6 +14,8 @@
 - [x] Validate JSON with pydantic.
 - [x] Filter invalid or low-quality samples.
 - [x] Add preview table in Streamlit.
+- [x] Diversify samples with rotating narrative plans.
+- [x] Reuse cached samples by dataset key.
 
 ## Phase 2 - Embeddings
 
@@ -21,6 +23,7 @@
 - [x] Embed scene_t_plus_1.summary.
 - [x] Save embeddings as .npz.
 - [x] Build FAISS index for next-scene examples.
+- [x] Reuse cached embeddings and unchanged FAISS index.
 
 ## Phase 3 - Latent Predictor
 
@@ -29,6 +32,8 @@
 - [x] Add train/validation split.
 - [x] Save best checkpoint.
 - [x] Show loss chart in GUI.
+- [x] Add practical residual MLP sizing and CUDA FP32 training.
+- [x] Add dropout, weight decay, gradient clipping, and early stopping.
 
 ## Phase 4 - Generation
 
@@ -44,6 +49,7 @@
 - [x] Embedding continuity score.
 - [x] Keyword consistency score.
 - [x] Simple contradiction checklist.
+- [x] Add lexical diversity, novelty, progression, length fit, dialogue ratio, sentence stats, ranking, and pairwise output diversity.
 - [ ] Optional LLM judge.
 - [x] Markdown report export.
 

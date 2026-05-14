@@ -40,6 +40,8 @@ class Scene(BaseModel):
 
 
 class SceneTransition(BaseModel):
+    id: int | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
     world: World
     characters: list[Character]
     scene_t: Scene
@@ -52,4 +54,6 @@ class SceneTransition(BaseModel):
             data = self.dict()
         if sample_id is not None:
             data["id"] = sample_id
+        if data.get("id") is None:
+            data.pop("id", None)
         return data

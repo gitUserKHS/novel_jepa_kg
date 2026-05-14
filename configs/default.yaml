@@ -12,19 +12,30 @@ ollama:
 data:
   synthetic_path: "data/synthetic/generated.jsonl"
   filtered_path: "data/filtered/filtered.jsonl"
+  sample_cache_path: "data/synthetic/sample_cache.jsonl"
   embeddings_path: "data/embeddings/scenes.npz"
+  embedding_cache_path: "data/embeddings/embedding_cache.jsonl"
   faiss_index_path: "data/indexes/next_scene.faiss"
   min_summary_chars: 20
   max_retries: 3
+  reuse_existing: true
+  diversity_buckets: 12
 
 training:
-  model_type: "mlp"
+  model_type: "residual_mlp"
   input_window: 1
-  epochs: 20
+  epochs: 30
   batch_size: 32
   learning_rate: 0.0001
   val_ratio: 0.15
   checkpoint_path: "checkpoints/predictor/best.pt"
+  hidden_dim: 1024
+  num_layers: 4
+  dropout: 0.1
+  weight_decay: 0.01
+  early_stopping_patience: 8
+  gradient_clip_norm: 1.0
+  use_amp: false
 
 generation:
   top_k: 5
@@ -36,3 +47,5 @@ evaluation:
   use_llm_judge: false
   repetition_ngram: 4
   report_dir: "reports/runs"
+  target_min_chars: 600
+  target_max_chars: 1600

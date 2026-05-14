@@ -62,43 +62,55 @@ class OllamaClient:
 
     def _dry_chat(self, prompt: str) -> str:
         if "JSON" in prompt.upper() or "json" in prompt:
+            from src.llm.prompts import diversity_plan
+
             idx_match = re.search(r"sample\s*#?(\d+)", prompt, flags=re.IGNORECASE)
             idx = int(idx_match.group(1)) if idx_match else 1
+            plan = diversity_plan(idx)
+            names = [
+                ("서윤", "기억 복원가"),
+                ("이린", "궁중 기록관"),
+                ("도하", "오컬트 팟캐스터"),
+                ("하린", "법의학 사진가"),
+                ("무겸", "몰락 문파의 제자"),
+                ("연우", "배급국 견습 관리"),
+            ]
+            name, role = names[(idx - 1) % len(names)]
             sample = {
                 "world": {
-                    "genre": "한국형 SF 미스터리",
-                    "premise": "기억의 잔향이 도시의 물건에 남는 근미래 서울",
-                    "rules": ["강한 감정은 장소에 흔적으로 남는다", "흔적을 읽으면 대가로 자신의 기억이 흐려진다"],
+                    "genre": plan["subgenre"],
+                    "premise": f"{plan['motif']}가 사건의 방향을 바꾸는 한국형 장편 서사",
+                    "rules": [plan["conflict"], "선택의 대가는 다음 장면의 관계와 상태에 남는다"],
                 },
                 "characters": [
                     {
-                        "name": "서윤",
-                        "role": "기억 복원가",
-                        "goal": "사라진 동생의 마지막 동선을 찾는다",
-                        "fear": "동생을 잊어버리는 것",
-                        "relationship": "민재를 믿고 싶지만 연구소와의 관계를 의심한다",
+                        "name": name,
+                        "role": role,
+                        "goal": f"{plan['plot_function']}을 통해 숨겨진 진실에 접근한다",
+                        "fear": "잘못된 선택으로 소중한 사람을 잃는 것",
+                        "relationship": plan["relationship"],
                     },
                     {
                         "name": "민재",
-                        "role": "전직 연구원",
-                        "goal": "연구소가 숨긴 사고 기록을 공개한다",
+                        "role": "비밀을 아는 협력자",
+                        "goal": "자신이 숨긴 과거를 덮으면서도 더 큰 위기를 막는다",
                         "fear": "자신의 죄가 드러나는 것",
-                        "relationship": "서윤에게 협력하지만 핵심 사실을 숨긴다",
+                        "relationship": "주인공에게 협력하지만 핵심 사실을 숨긴다",
                     },
                 ],
                 "scene_t": {
-                    "summary": f"서윤은 폐쇄된 역무실에서 동생의 이름이 적힌 파손된 기록 장치를 발견한다 {idx}.",
-                    "emotion": "불안과 기대",
-                    "conflict": "장치를 읽으면 자신의 기억 일부를 잃을 수 있다.",
-                    "state": ["폐쇄 역무실", "파손된 장치", "동생의 흔적"],
-                    "plot_function": "단서 발견",
+                    "summary": f"{name}은 {plan['motif']}와 연결된 첫 단서를 발견하지만, 그 단서가 협력자의 거짓말과 맞물린다는 사실을 눈치챈다 {idx}.",
+                    "emotion": plan["emotion_arc"].split("에서")[0],
+                    "conflict": plan["conflict"],
+                    "state": [plan["motif"], "숨겨진 목표", "관계 균열"],
+                    "plot_function": plan["plot_function"],
                 },
                 "scene_t_plus_1": {
-                    "summary": f"장치 속 잔향은 동생이 자발적으로 연구소 심층 구역에 들어갔다는 장면을 보여준다 {idx}.",
-                    "emotion": "충격에서 결심으로",
-                    "conflict": "동생이 피해자인지 공모자인지 판단할 수 없다.",
-                    "state": ["심층 구역 좌표", "흐려진 어린 시절 기억", "새 목표"],
-                    "plot_function": "목표 강화",
+                    "summary": f"다음 장면에서 {name}은 {plan['conflict']}는 압박 속에서 새 증거를 얻고, 협력자와의 관계를 재정의하는 선택을 한다 {idx}.",
+                    "emotion": plan["emotion_arc"],
+                    "conflict": f"{plan['conflict']}는 선택이 더 큰 대가를 부른다.",
+                    "state": ["새 증거 확보", "선택 압박", plan["relationship"]],
+                    "plot_function": "상태 변화",
                 },
             }
             return json.dumps(sample, ensure_ascii=False)

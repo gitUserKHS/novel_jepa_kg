@@ -68,11 +68,24 @@ run_server.bat
 - Evaluate: write a Markdown comparison report
 - Reports: view saved reports
 
+## Current Pipeline Behavior
+
+- Synthetic samples are diversified with rotating scene plans: subgenre, plot function, emotion arc, conflict, motif, and relationship tension.
+- `data/synthetic/sample_cache.jsonl` stores generated samples by model, genre, sample id, and diversity plan. Re-running the same request reuses matching samples instead of calling Ollama again.
+- `data/embeddings/embedding_cache.jsonl` stores text embeddings by embedding model and text hash. The embedding stage only calls Ollama for missing vectors.
+- `data/embeddings/scenes.npz` is reused when the filtered dataset and embedding model are unchanged.
+- The FAISS index is reused when it is newer than the embedding file.
+- The predictor defaults to a practical residual MLP: hidden dim 1024, 4 layers, dropout, weight decay, early stopping, gradient clipping, and CUDA FP32 when available.
+- AMP is optional and disabled by default because the small predictor usually does not benefit enough to justify CUDA compatibility risk.
+- Evaluation reports include mode ranking, embedding continuity, repetition profile, keyword consistency, novelty from previous scene, lexical diversity, length fit, progression score, dialogue ratio, sentence stats, contradiction checks, and pairwise output diversity.
+
 ## Artifacts
 
 - `data/synthetic/generated.jsonl`
+- `data/synthetic/sample_cache.jsonl`
 - `data/filtered/filtered.jsonl`
 - `data/embeddings/scenes.npz`
+- `data/embeddings/embedding_cache.jsonl`
 - `data/indexes/next_scene.faiss`
 - `checkpoints/predictor/best.pt`
 - `reports/runs/latest_train_history.json`

@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import random
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from src.planner.model import MLPPredictor
+from src.planner.model import MLPPredictor, count_parameters
 from src.utils.config import AppConfig
 from src.utils.logging import get_logger
 from src.utils.paths import ensure_parent, resolve_path
@@ -16,8 +17,31 @@ from src.utils.paths import ensure_parent, resolve_path
 logger = get_logger(__name__)
 
 
-def cosine_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    return 1 - torch.nn.functional.cosine_similarity(pred, target, dim=1).mean()
+def _training_config_dict(config: AppConfig) -> dict[str, Any]:
+    if hasattr(config.training, "model_dump"):
+        return config.training.model_dump()
+    return config.training.dict()
+
+
+def predictor_loss(pred: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    cosine_component = 1 - torch.nn.functional.cosine_similarity(pred, target, dim=1).mean()
+    mse_component = torch.nn.functional.mse_loss(
+        torch.nn.functional.normalize(pred, dim=1),
+        torch.nn.functional.normalize(target, dim=1),
+    )
+    return cosine_component + 0.05 * mse_component, cosine_component, mse_component
+
+
+def _make_model(dim: int, config_dict: dict[str, Any]) -> MLPPredictor:
+    model_type = str(config_dict.get("model_type", "mlp"))
+    residual = model_type == "residual_mlp" or int(config_dict.get("num_layers", 2)) > 2
+    return MLPPredictor(
+        dim=dim,
+        hidden_dim=config_dict.get("hidden_dim"),
+        num_layers=int(config_dict.get("num_layers", 2)),
+        dropout=float(config_dict.get("dropout", 0.0)),
+        residual=residual,
+    )
 
 
 def train_predictor(config: AppConfig) -> dict:
@@ -49,46 +73,96 @@ def train_predictor(config: AppConfig) -> dict:
         train_idx = indices[:1]
         val_idx = indices[1:] if len(indices) > 1 else indices[:1]
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader = DataLoader(
         TensorDataset(x[train_idx], y[train_idx]),
         batch_size=config.training.batch_size,
         shuffle=True,
+        pin_memory=device.type == "cuda",
     )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     val_x = x[val_idx].to(device)
     val_y = y[val_idx].to(device)
 
-    model = MLPPredictor(dim=x.shape[1]).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.learning_rate)
+    train_config = _training_config_dict(config)
+    model = _make_model(dim=x.shape[1], config_dict=train_config).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config.training.learning_rate,
+        weight_decay=config.training.weight_decay,
+    )
+    amp_enabled = device.type == "cuda" and config.training.use_amp
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     best_val = -1.0
+    stale_epochs = 0
     epochs = []
-    logger.info("Training predictor for %s epochs on %s", config.training.epochs, device)
+    param_count = count_parameters(model)
+    logger.info("Training predictor for %s epochs on %s with %s params", config.training.epochs, device, param_count)
+
     for epoch in range(1, config.training.epochs + 1):
         model.train()
         losses = []
+        cosine_losses = []
+        mse_losses = []
         for batch_x, batch_y in train_loader:
-            batch_x = batch_x.to(device)
-            batch_y = batch_y.to(device)
-            optimizer.zero_grad()
-            pred = model(batch_x)
-            loss = cosine_loss(pred, batch_y)
-            loss.backward()
-            optimizer.step()
+            batch_x = batch_x.to(device, non_blocking=True)
+            batch_y = batch_y.to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            with torch.amp.autocast("cuda", enabled=amp_enabled):
+                pred = model(batch_x)
+                loss, cosine_component, mse_component = predictor_loss(pred, batch_y)
+            scaler.scale(loss).backward()
+            if config.training.gradient_clip_norm > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.gradient_clip_norm)
+            scaler.step(optimizer)
+            scaler.update()
             losses.append(float(loss.detach().cpu()))
+            cosine_losses.append(float(cosine_component.detach().cpu()))
+            mse_losses.append(float(mse_component.detach().cpu()))
+
         model.eval()
         with torch.no_grad():
             val_pred = model(val_x)
+            val_loss, val_cosine_loss, val_mse = predictor_loss(val_pred, val_y)
             val_cosine = torch.nn.functional.cosine_similarity(val_pred, val_y, dim=1).mean().item()
         train_loss = float(np.mean(losses)) if losses else 0.0
-        row = {"epoch": epoch, "train_loss": train_loss, "val_cosine": float(val_cosine)}
+        row = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "train_cosine_loss": float(np.mean(cosine_losses)) if cosine_losses else 0.0,
+            "train_norm_mse": float(np.mean(mse_losses)) if mse_losses else 0.0,
+            "val_loss": float(val_loss.detach().cpu()),
+            "val_cosine_loss": float(val_cosine_loss.detach().cpu()),
+            "val_norm_mse": float(val_mse.detach().cpu()),
+            "val_cosine": float(val_cosine),
+        }
         epochs.append(row)
         if val_cosine > best_val:
             best_val = float(val_cosine)
+            stale_epochs = 0
+            cpu_state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
             torch.save(
-                {"model_state": model.state_dict(), "dim": int(x.shape[1]), "config": config.training.dict()},
+                {
+                    "model_state": cpu_state,
+                    "dim": int(x.shape[1]),
+                    "config": train_config,
+                    "parameter_count": param_count,
+                    "best_val_cosine": best_val,
+                },
                 checkpoint_path,
             )
-    history = {"best_val_cosine": best_val, "device": str(device), "epochs": epochs}
+        else:
+            stale_epochs += 1
+            if config.training.early_stopping_patience > 0 and stale_epochs >= config.training.early_stopping_patience:
+                break
+
+    history = {
+        "best_val_cosine": best_val,
+        "device": str(device),
+        "amp_enabled": amp_enabled,
+        "parameter_count": param_count,
+        "epochs": epochs,
+    }
     history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
     return history
 
@@ -97,7 +171,8 @@ def load_predictor(checkpoint_path: Path) -> MLPPredictor:
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Predictor checkpoint not found: {checkpoint_path}")
     payload = torch.load(checkpoint_path, map_location="cpu")
-    model = MLPPredictor(dim=int(payload["dim"]))
+    config_dict = payload.get("config", {})
+    model = _make_model(dim=int(payload["dim"]), config_dict=config_dict)
     model.load_state_dict(payload["model_state"])
     model.eval()
     return model
