@@ -7,7 +7,8 @@ if /i "%~1"=="--help" (
     echo Usage:
     echo   run_server.bat
     echo.
-    echo Starts Novel JEPA Lab at http://127.0.0.1:8501
+    echo Stops any existing Novel JEPA Lab server on port 8501,
+    echo then starts a fresh server at http://127.0.0.1:8501
     exit /b 0
 )
 
@@ -29,10 +30,16 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo Starting Novel JEPA Lab...
+echo Stopping any existing server on port 8501...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$owners = Get-NetTCPConnection -LocalPort 8501 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($owner in $owners) { if ($owner -gt 0) { Stop-Process -Id $owner -Force -ErrorAction SilentlyContinue } }"
+timeout /t 1 /nobreak >nul
+
+set PYTHONUTF8=1
+
+echo Starting Novel JEPA Lab with the current project files...
 echo URL: http://127.0.0.1:8501
 start "" "http://127.0.0.1:8501"
 
-".venv\Scripts\python.exe" -m streamlit run app.py --server.headless true --server.port 8501
+".venv\Scripts\python.exe" -m streamlit run app.py --server.headless true --server.port 8501 --server.runOnSave true
 
 pause
