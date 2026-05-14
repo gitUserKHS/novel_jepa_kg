@@ -109,10 +109,12 @@ When dry-run works, turn it off:
 Dry-run mode: off
 Ollama base URL: http://localhost:11434
 Chat model: gemma4:e4b
-Embedding model: embeddinggemma
+Embedding model: embeddinggemma:latest
 ```
 
 If Ollama is reachable, the sidebar shows installed models as dropdowns. You can still choose `직접 입력` when you want to type a model name manually.
+The default chat model is `gemma4:e4b`. On the target RTX 4060 8GB setup this model should be treated as a partial-offload model, not a full-VRAM model. The app sends controlled Ollama options by default: `num_gpu=40`, `num_ctx=4096`, `num_batch=128`, and `keep_alive=30s`.
+Use the sidebar `Ollama runtime` expander to check loaded models, approximate GPU residency, VRAM size, and context length. If `model runner has unexpectedly stopped` appears, lower `Ollama GPU layers`, `Ollama context length`, or `Ollama batch size`.
 
 ### 5. Run the full experiment
 
@@ -202,6 +204,8 @@ Keep `Reuse cached data` on. The first run is slower; later runs reuse samples a
 - `Prompt examples` limits how many retrieved examples enter the prompt, while `Retrieval top K` still controls the search pool.
 - Name consistency checks compare generated outputs against the character list and report unknown or likely misspelled names.
 - Optional auto-repair rewrites only detected name inconsistencies before the output is saved.
+- Ollama calls can unload the embedding model before chat calls, and unload the chat model before embedding calls, to keep VRAM pressure predictable.
+- The trained JEPA predictor checkpoint stores model weights plus training metadata/history; `checkpoints/predictor/model_card.json` mirrors the latest training summary for inspection.
 - `data/synthetic/sample_cache.jsonl` stores generated samples by model, genre, sample id, and diversity plan. Re-running the same request reuses matching samples instead of calling Ollama again.
 - `data/embeddings/embedding_cache.jsonl` stores text embeddings by embedding model and text hash. The embedding stage only calls Ollama for missing vectors.
 - `data/embeddings/scenes.npz` is reused when the filtered dataset and embedding model are unchanged.
@@ -224,6 +228,7 @@ Keep `Reuse cached data` on. The first run is slower; later runs reuse samples a
 - `data/indexes/next_scene.faiss`
 - `data/sessions/*.json`
 - `checkpoints/predictor/best.pt`
+- `checkpoints/predictor/model_card.json`
 - `reports/runs/latest_train_history.json`
 - `reports/runs/comparison_*.md`
 - `reports/runs/session_*.md`

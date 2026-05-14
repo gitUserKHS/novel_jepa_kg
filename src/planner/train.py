@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -55,8 +56,10 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
     embeddings_path = resolve_path(config, config.data.embeddings_path)
     checkpoint_path = resolve_path(config, config.training.checkpoint_path)
     history_path = resolve_path(config, "reports/runs/latest_train_history.json")
+    model_card_path = resolve_path(config, "checkpoints/predictor/model_card.json")
     ensure_parent(checkpoint_path)
     ensure_parent(history_path)
+    ensure_parent(model_card_path)
     if not embeddings_path.exists():
         raise FileNotFoundError(f"Embeddings file not found: {embeddings_path}")
 
@@ -96,6 +99,7 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
     amp_enabled = device.type == "cuda" and config.training.use_amp
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     best_val = -1.0
+    best_epoch = 0
     stale_epochs = 0
     epochs = []
     param_count = count_parameters(model)
@@ -152,15 +156,22 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
             )
         if val_cosine > best_val:
             best_val = float(val_cosine)
+            best_epoch = epoch
             stale_epochs = 0
             cpu_state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
             torch.save(
                 {
+                    "checkpoint_version": 2,
                     "model_state": cpu_state,
                     "dim": int(x.shape[1]),
                     "config": train_config,
                     "parameter_count": param_count,
                     "best_val_cosine": best_val,
+                    "best_epoch": best_epoch,
+                    "embedding_path": str(embeddings_path),
+                    "dataset_size": int(len(x)),
+                    "train_size": int(len(train_idx)),
+                    "val_size": int(len(val_idx)),
                 },
                 checkpoint_path,
             )
@@ -169,14 +180,35 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
             if config.training.early_stopping_patience > 0 and stale_epochs >= config.training.early_stopping_patience:
                 break
 
+    trained_at = datetime.now().isoformat(timespec="seconds")
     history = {
+        "trained_at": trained_at,
         "best_val_cosine": best_val,
+        "best_epoch": best_epoch,
         "device": str(device),
         "amp_enabled": amp_enabled,
         "parameter_count": param_count,
+        "checkpoint_path": str(checkpoint_path),
+        "embedding_path": str(embeddings_path),
+        "dataset_size": int(len(x)),
+        "train_size": int(len(train_idx)),
+        "val_size": int(len(val_idx)),
+        "training_config": train_config,
         "epochs": epochs,
     }
     history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    if checkpoint_path.exists():
+        payload = torch.load(checkpoint_path, map_location="cpu")
+        payload["training_history"] = history
+        payload["trained_at"] = trained_at
+        torch.save(payload, checkpoint_path)
+    model_card = {
+        key: value
+        for key, value in history.items()
+        if key not in {"epochs"}
+    }
+    model_card["epoch_count"] = len(epochs)
+    model_card_path.write_text(json.dumps(model_card, ensure_ascii=False, indent=2), encoding="utf-8")
     return history
 
 

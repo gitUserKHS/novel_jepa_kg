@@ -10,8 +10,13 @@ from pydantic import BaseModel, Field
 class OllamaConfig(BaseModel):
     base_url: str = "http://localhost:11434"
     chat_model: str = "gemma4:e4b"
-    embed_model: str = "embeddinggemma"
+    embed_model: str = "embeddinggemma:latest"
     timeout_sec: int = 120
+    num_ctx: int = 4096
+    num_gpu: int = 40
+    num_batch: int = 128
+    keep_alive: str = "30s"
+    manage_vram: bool = True
 
 
 class DataConfig(BaseModel):

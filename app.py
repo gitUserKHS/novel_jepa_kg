@@ -93,6 +93,11 @@ def available_ollama_models(base_url: str, timeout_sec: int) -> list[str]:
     return OllamaClient(base_url=base_url, chat_model="", embed_model="", timeout_sec=timeout_sec).list_models()
 
 
+@st.cache_data(ttl=5, show_spinner=False)
+def running_ollama_models(base_url: str, timeout_sec: int) -> list[dict[str, Any]]:
+    return OllamaClient(base_url=base_url, chat_model="", embed_model="", timeout_sec=timeout_sec).running_models()
+
+
 def model_selector(label: str, current: str, models: list[str], key: str) -> str:
     if not models:
         return st.sidebar.text_input(label, current, key=key)
@@ -171,6 +176,7 @@ def artifact_status(config: AppConfig) -> pd.DataFrame:
         ("FAISS index", config.data.faiss_index_path),
         ("Chat sessions", config.chat.session_dir),
         ("Predictor checkpoint", config.training.checkpoint_path),
+        ("Predictor metadata", "checkpoints/predictor/model_card.json"),
         ("Train history", "reports/runs/latest_train_history.json"),
     ]
     rows = []
@@ -249,6 +255,11 @@ def make_client(config: AppConfig, dry_run: bool) -> OllamaClient:
         chat_model=config.ollama.chat_model,
         embed_model=config.ollama.embed_model,
         timeout_sec=config.ollama.timeout_sec,
+        num_ctx=config.ollama.num_ctx,
+        num_gpu=config.ollama.num_gpu,
+        num_batch=config.ollama.num_batch,
+        keep_alive=config.ollama.keep_alive,
+        manage_vram=config.ollama.manage_vram,
         dry_run=dry_run,
     )
 
@@ -264,6 +275,55 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
         st.sidebar.warning(f"Could not load Ollama model list: {exc}")
     config.ollama.chat_model = model_selector("Chat model", config.ollama.chat_model, models, "chat_model")
     config.ollama.embed_model = model_selector("Embedding model", config.ollama.embed_model, models, "embed_model")
+    config.ollama.num_ctx = int(
+        st.sidebar.number_input("Ollama context length", min_value=1024, max_value=32768, value=config.ollama.num_ctx, step=1024)
+    )
+    config.ollama.num_gpu = int(
+        st.sidebar.number_input(
+            "Ollama GPU layers",
+            min_value=0,
+            max_value=99,
+            value=config.ollama.num_gpu,
+            step=1,
+            help="Lower this if gemma4:e4b runner stops. 40 was stable on the target RTX 4060 8GB with ctx 4096 and batch 128.",
+        )
+    )
+    config.ollama.num_batch = int(
+        st.sidebar.number_input(
+            "Ollama batch size",
+            min_value=32,
+            max_value=1024,
+            value=config.ollama.num_batch,
+            step=32,
+            help="Lower values reduce VRAM pressure during prompt processing.",
+        )
+    )
+    config.ollama.keep_alive = st.sidebar.text_input("Ollama keep alive", config.ollama.keep_alive)
+    config.ollama.manage_vram = st.sidebar.checkbox("Unload other Ollama model before calls", value=config.ollama.manage_vram)
+    with st.sidebar.expander("Ollama runtime", expanded=False):
+        try:
+            running = running_ollama_models(config.ollama.base_url, config.ollama.timeout_sec)
+            if running:
+                rows = []
+                for item in running:
+                    size = int(item.get("size", 0) or 0)
+                    size_vram = int(item.get("size_vram", 0) or 0)
+                    gpu_ratio = (size_vram / size * 100) if size else 0.0
+                    rows.append(
+                        {
+                            "model": item.get("name", ""),
+                            "gpu": f"{gpu_ratio:.0f}%",
+                            "size": f"{size / (1024 ** 3):.1f} GB" if size else "-",
+                            "vram": f"{size_vram / (1024 ** 3):.1f} GB" if size_vram else "-",
+                            "ctx": item.get("context_length", "-"),
+                        }
+                    )
+                st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+                st.caption("For gemma4:e4b on 8GB VRAM, partial CPU/GPU offload is expected. If runner 500 errors return, lower GPU layers or context length.")
+            else:
+                st.caption("No Ollama model is currently loaded.")
+        except Exception as exc:  # noqa: BLE001
+            st.caption(f"Runtime status unavailable: {exc}")
     output_root = st.sidebar.text_input("Output directory", ".")
     dry_run = st.sidebar.checkbox("Dry-run mode", value=True)
     config.data.reuse_existing = st.sidebar.checkbox("Reuse cached data", value=config.data.reuse_existing)

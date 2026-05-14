@@ -6,8 +6,13 @@ project:
 ollama:
   base_url: "http://localhost:11434"
   chat_model: "gemma4:e4b"
-  embed_model: "embeddinggemma"
+  embed_model: "embeddinggemma:latest"
   timeout_sec: 120
+  num_ctx: 4096
+  num_gpu: 40
+  num_batch: 128
+  keep_alive: "30s"
+  manage_vram: true
 
 data:
   synthetic_path: "data/synthetic/generated.jsonl"

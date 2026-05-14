@@ -16,12 +16,22 @@ class OllamaClient:
         chat_model: str,
         embed_model: str,
         timeout_sec: int = 120,
+        num_ctx: int | None = None,
+        num_gpu: int | None = None,
+        num_batch: int | None = None,
+        keep_alive: str | None = None,
+        manage_vram: bool = True,
         dry_run: bool = False,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.chat_model = chat_model
         self.embed_model = embed_model
         self.timeout_sec = timeout_sec
+        self.num_ctx = num_ctx
+        self.num_gpu = num_gpu
+        self.num_batch = num_batch
+        self.keep_alive = keep_alive
+        self.manage_vram = manage_vram
         self.dry_run = dry_run
 
     def list_models(self) -> list[str]:
@@ -36,6 +46,31 @@ class OllamaClient:
         names = [item.get("name") for item in payload.get("models", []) if item.get("name")]
         return sorted(names)
 
+    def running_models(self) -> list[dict[str, Any]]:
+        try:
+            response = requests.get(f"{self.base_url}/api/ps", timeout=min(self.timeout_sec, 5))
+            self._raise_for_status(response, "/api/ps")
+            payload = response.json()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Could not reach Ollama /api/ps at {self.base_url}: {exc}") from exc
+        except ValueError as exc:
+            raise RuntimeError("Ollama /api/ps returned invalid JSON.") from exc
+        return payload.get("models", [])
+
+    def unload_model(self, model: str) -> bool:
+        if self.dry_run or not model:
+            return False
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json={"model": model, "prompt": "", "keep_alive": 0},
+                timeout=min(self.timeout_sec, 30),
+            )
+            self._raise_for_status(response, "/api/generate", model)
+            return True
+        except Exception:
+            return False
+
     def chat(
         self,
         prompt: str,
@@ -46,17 +81,28 @@ class OllamaClient:
     ) -> str:
         if self.dry_run:
             return self._dry_chat(prompt)
+        if self.manage_vram and self.embed_model and self.embed_model != self.chat_model:
+            self.unload_model(self.embed_model)
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
+        options: dict[str, Any] = {"temperature": temperature, "num_predict": max_tokens}
+        if self.num_ctx:
+            options["num_ctx"] = self.num_ctx
+        if self.num_gpu is not None:
+            options["num_gpu"] = self.num_gpu
+        if self.num_batch:
+            options["num_batch"] = self.num_batch
         body = {
             "model": self.chat_model,
             "messages": messages,
             "stream": False,
             "think": False,
-            "options": {"temperature": temperature, "num_predict": max_tokens},
+            "options": options,
         }
+        if self.keep_alive:
+            body["keep_alive"] = self.keep_alive
         if json_mode:
             body["format"] = "json"
         try:
@@ -89,10 +135,15 @@ class OllamaClient:
     def embed(self, texts: list[str]) -> np.ndarray:
         if self.dry_run:
             return np.vstack([self._stable_embedding(text) for text in texts]).astype("float32")
+        if self.manage_vram and self.chat_model and self.chat_model != self.embed_model:
+            self.unload_model(self.chat_model)
+        body: dict[str, Any] = {"model": self.embed_model, "input": texts}
+        if self.keep_alive:
+            body["keep_alive"] = self.keep_alive
         try:
             response = requests.post(
                 f"{self.base_url}/api/embed",
-                json={"model": self.embed_model, "input": texts},
+                json=body,
                 timeout=self.timeout_sec,
             )
             self._raise_for_status(response, "/api/embed", self.embed_model)

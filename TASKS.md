@@ -74,5 +74,7 @@
 - [x] Add sample dataset via dry-run pipeline.
 - [x] Add clear error handling.
 - [x] Add intuitive pipeline progress, artifact status, cache counters, and live training progress.
+- [x] Add Ollama partial-offload controls and runtime VRAM visibility.
+- [x] Store JEPA predictor training metadata with the checkpoint.
 - [x] Add final demo report.
 - [x] Commit stable version.
