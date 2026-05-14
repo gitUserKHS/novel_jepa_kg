@@ -61,6 +61,7 @@ run_server.bat
 ## Streamlit Tabs
 
 - Project: one-click dry-run or Ollama-backed full pipeline
+- Chat: long-form writing session with compressed memory and knowledge graph
 - Dataset: generate and filter JSONL transition samples
 - Embedding: embed summaries and build the FAISS index
 - Train: train the JEPA-inspired MLP predictor
@@ -79,6 +80,9 @@ run_server.bat
 - AMP is optional and disabled by default because the small predictor usually does not benefit enough to justify CUDA compatibility risk.
 - Evaluation reports include mode ranking, embedding continuity, repetition profile, keyword consistency, novelty from previous scene, lexical diversity, length fit, progression score, dialogue ratio, sentence stats, contradiction checks, and pairwise output diversity.
 - The full pipeline view shows a live stage table, current step message, artifact snapshot, cache reuse counts, and live training loss/cosine charts while training runs.
+- Chat sessions are stored as JSON files under `data/sessions/` and keep messages, scene summaries, a long-term memory summary, story state, and a knowledge graph.
+- Long-form generation uses hybrid context compression: recent messages + accumulated summary + graph nodes/edges + optional RAG/JEPA retrieval.
+- The Chat tab can compress memory on demand, rebuild the graph, show graph nodes/edges plus Mermaid text, and export a session Markdown file.
 
 ## Artifacts
 
@@ -88,9 +92,11 @@ run_server.bat
 - `data/embeddings/scenes.npz`
 - `data/embeddings/embedding_cache.jsonl`
 - `data/indexes/next_scene.faiss`
+- `data/sessions/*.json`
 - `checkpoints/predictor/best.pt`
 - `reports/runs/latest_train_history.json`
 - `reports/runs/comparison_*.md`
+- `reports/runs/session_*.md`
 
 ## Notes
 

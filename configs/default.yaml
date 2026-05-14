@@ -49,3 +49,12 @@ evaluation:
   report_dir: "reports/runs"
   target_min_chars: 600
   target_max_chars: 1600
+
+chat:
+  session_dir: "data/sessions"
+  recent_messages: 8
+  compress_every_messages: 6
+  compress_over_chars: 12000
+  max_memory_chars: 5000
+  auto_update_graph: true
+  scene_summary_chars: 700

@@ -59,6 +59,16 @@ class EvaluationConfig(BaseModel):
     target_max_chars: int = 1600
 
 
+class ChatConfig(BaseModel):
+    session_dir: str = "data/sessions"
+    recent_messages: int = 8
+    compress_every_messages: int = 6
+    compress_over_chars: int = 12000
+    max_memory_chars: int = 5000
+    auto_update_graph: bool = True
+    scene_summary_chars: int = 700
+
+
 class ProjectConfig(BaseModel):
     name: str = "Novel JEPA Lab"
     language: str = "ko"
@@ -72,6 +82,7 @@ class AppConfig(BaseModel):
     training: TrainingConfig = Field(default_factory=TrainingConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
+    chat: ChatConfig = Field(default_factory=ChatConfig)
     output_root: str = "."
 
 

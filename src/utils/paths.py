@@ -27,6 +27,7 @@ def ensure_project_dirs(config: AppConfig) -> None:
         "data/filtered",
         "data/embeddings",
         "data/indexes",
+        config.chat.session_dir,
         "checkpoints/predictor",
         config.evaluation.report_dir,
     ]:

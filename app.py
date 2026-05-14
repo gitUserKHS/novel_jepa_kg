@@ -14,11 +14,21 @@ from src.data.generate_synthetic import generate_synthetic_dataset
 from src.embedding.embed_scenes import embed_dataset
 from src.embedding.vector_store import build_next_scene_index
 from src.evaluation.report import evaluate_and_write_report
+from src.generation.chat import CHAT_MODES, generate_chat_turn
 from src.generation.generate_baseline import generate_llm_only
 from src.generation.generate_with_jepa import generate_with_jepa
 from src.generation.generate_with_rag import generate_with_rag
 from src.llm.ollama_client import OllamaClient
+from src.memory.context import compress_session_memory, extract_knowledge_graph, graph_tables, graph_to_mermaid
 from src.planner.train import train_predictor
+from src.session.store import (
+    create_session,
+    delete_session,
+    export_session_markdown,
+    list_sessions,
+    load_session,
+    save_session,
+)
 from src.utils.config import AppConfig, load_config
 from src.utils.paths import ensure_project_dirs, resolve_path
 
@@ -90,6 +100,7 @@ def artifact_status(config: AppConfig) -> pd.DataFrame:
         ("Embeddings", config.data.embeddings_path),
         ("Embedding cache", config.data.embedding_cache_path),
         ("FAISS index", config.data.faiss_index_path),
+        ("Chat sessions", config.chat.session_dir),
         ("Predictor checkpoint", config.training.checkpoint_path),
         ("Train history", "reports/runs/latest_train_history.json"),
     ]
@@ -207,6 +218,142 @@ def run_generation_bundle(
     }
 
 
+def session_label(summary: dict[str, Any]) -> str:
+    title = summary.get("title", "Untitled session")
+    updated = summary.get("updated_at", "")
+    message_count = summary.get("message_count", 0)
+    scene_count = summary.get("scene_count", 0)
+    return f"{title} · {message_count} msgs · {scene_count} scenes · {updated}"
+
+
+def render_chat_session(config: AppConfig, client: OllamaClient) -> None:
+    st.subheader("Long-form Chat Session")
+    st.caption("장편 소설이 길어질 때 최근 대화, 누적 요약, 지식 그래프를 함께 사용해 컨텍스트를 압축합니다.")
+
+    with st.expander("Create new session", expanded=not list_sessions(config)):
+        new_title = st.text_input("Session title", "기억 잔향 연재 세션", key="new_chat_title")
+        new_world = st.text_area("World setting", "기억이 물리적 흔적으로 남는 근미래 서울.", height=90, key="new_chat_world")
+        new_characters = st.text_area(
+            "Characters",
+            "서윤: 동생을 찾는 기록 복원가. 민재: 진실을 숨긴 연구원.",
+            height=90,
+            key="new_chat_characters",
+        )
+        if st.button("Create session", type="primary"):
+            session = create_session(config, new_title, new_world, new_characters)
+            st.session_state["chat_session_id"] = session["session_id"]
+            st.rerun()
+
+    sessions = list_sessions(config)
+    if not sessions:
+        st.info("Create a session to start long-form generation.")
+        return
+
+    labels = [session_label(summary) for summary in sessions]
+    ids = [summary["session_id"] for summary in sessions]
+    selected_id = st.session_state.get("chat_session_id", ids[0])
+    selected_index = ids.index(selected_id) if selected_id in ids else 0
+    selected_label = st.selectbox("Session", labels, index=selected_index)
+    session_id = ids[labels.index(selected_label)]
+    st.session_state["chat_session_id"] = session_id
+    session = load_session(config, session_id)
+
+    left, right = st.columns([1.35, 1.0])
+
+    with left:
+        with st.expander("Session settings", expanded=False):
+            session["title"] = st.text_input("Title", session.get("title", ""), key=f"title_{session_id}")
+            session["world"] = st.text_area("World", session.get("world", ""), height=100, key=f"world_{session_id}")
+            session["characters"] = st.text_area(
+                "Characters",
+                session.get("characters", ""),
+                height=100,
+                key=f"characters_{session_id}",
+            )
+            if st.button("Save settings", key=f"save_settings_{session_id}"):
+                save_session(config, session)
+                st.success("Session settings saved.")
+
+        st.markdown("#### Chat")
+        for message in session.get("messages", []):
+            role = message.get("role", "assistant")
+            with st.chat_message("user" if role == "user" else "assistant"):
+                mode = message.get("mode")
+                if mode:
+                    st.caption(mode)
+                st.markdown(message.get("content", ""))
+
+        mode = st.radio("Generation mode", CHAT_MODES, index=2, horizontal=True, key=f"mode_{session_id}")
+        user_instruction = st.text_area(
+            "Next instruction",
+            "이전 장면의 감정선을 이어서 다음 장면을 써 주세요. 새 단서와 선택 압박을 포함해 주세요.",
+            height=110,
+            key=f"instruction_{session_id}",
+        )
+        if st.button("Generate next scene", type="primary", key=f"generate_{session_id}"):
+            try:
+                with st.status("Generating next scene and updating memory", expanded=True) as status:
+                    result = generate_chat_turn(config, client, session, user_instruction, mode)
+                    status.update(label="Saved scene, summary, and memory", state="complete")
+                st.success(
+                    f"Generated {len(result['assistant_text'])} chars. "
+                    f"Scene summary: {len(result['scene_summary'])} chars. "
+                    f"Compressed: {'yes' if result['compressed'] else 'no'}."
+                )
+                st.rerun()
+            except Exception as exc:  # noqa: BLE001
+                show_error("Chat generation failed", exc)
+
+    with right:
+        st.markdown("#### Memory")
+        metrics = st.columns(4)
+        metrics[0].metric("messages", len(session.get("messages", [])))
+        metrics[1].metric("scenes", len(session.get("scene_summaries", [])))
+        metrics[2].metric("nodes", len(session.get("knowledge_graph", {}).get("nodes", [])))
+        metrics[3].metric("edges", len(session.get("knowledge_graph", {}).get("edges", [])))
+
+        action_cols = st.columns(4)
+        if action_cols[0].button("Compress now", key=f"compress_{session_id}"):
+            compress_session_memory(config, client, session)
+            save_session(config, session)
+            st.success("Memory summary updated.")
+            st.rerun()
+        if action_cols[1].button("Rebuild graph", key=f"graph_{session_id}"):
+            all_text = "\n\n".join(
+                [session.get("memory_summary", "")]
+                + [scene.get("summary", "") for scene in session.get("scene_summaries", [])]
+                + [message.get("content", "") for message in session.get("messages", [])[-12:]]
+            )
+            session["knowledge_graph"] = {"nodes": [], "edges": []}
+            extract_knowledge_graph(config, client, session, all_text)
+            save_session(config, session)
+            st.success("Knowledge graph rebuilt.")
+            st.rerun()
+        if action_cols[2].button("Export MD", key=f"export_{session_id}"):
+            path = export_session_markdown(config, session)
+            st.success(f"Exported to {path}")
+        if action_cols[3].button("Delete", key=f"delete_{session_id}"):
+            delete_session(config, session_id)
+            st.session_state.pop("chat_session_id", None)
+            st.rerun()
+
+        st.text_area("Memory summary", session.get("memory_summary", ""), height=190, disabled=True)
+        scene_rows = [
+            {"index": scene.get("index"), "mode": scene.get("mode"), "summary": scene.get("summary")}
+            for scene in session.get("scene_summaries", [])
+        ]
+        st.dataframe(pd.DataFrame(scene_rows), hide_index=True, use_container_width=True)
+
+        nodes_df, edges_df = graph_tables(session.get("knowledge_graph", {}))
+        graph_tabs = st.tabs(["Nodes", "Edges", "Mermaid"])
+        with graph_tabs[0]:
+            st.dataframe(nodes_df, hide_index=True, use_container_width=True)
+        with graph_tabs[1]:
+            st.dataframe(edges_df, hide_index=True, use_container_width=True)
+        with graph_tabs[2]:
+            st.code(graph_to_mermaid(session.get("knowledge_graph", {})), language="mermaid")
+
+
 def main() -> None:
     config = load_config("configs/default.yaml")
     config, dry_run = sidebar_config(config)
@@ -216,7 +363,7 @@ def main() -> None:
     st.title("Novel JEPA Lab")
     st.caption("JEPA-inspired latent planner + local LLM Korean novel generation dashboard")
 
-    tabs = st.tabs(["Project", "Dataset", "Embedding", "Train", "Generate", "Evaluate", "Reports"])
+    tabs = st.tabs(["Project", "Chat", "Dataset", "Embedding", "Train", "Generate", "Evaluate", "Reports"])
 
     with tabs[0]:
         st.subheader("One-click experiment")
@@ -330,6 +477,9 @@ def main() -> None:
                 show_error("Pipeline failed", exc)
 
     with tabs[1]:
+        render_chat_session(config, client)
+
+    with tabs[2]:
         st.subheader("Dataset")
         genre = st.text_input("Dataset genre", "한국형 판타지 미스터리")
         count = st.number_input("Number of samples", min_value=1, max_value=500, value=10, step=1)
@@ -353,7 +503,7 @@ def main() -> None:
         samples = read_jsonl(str(resolve_path(config, config.data.filtered_path)))
         st.dataframe(flatten_samples(samples), use_container_width=True)
 
-    with tabs[2]:
+    with tabs[3]:
         st.subheader("Embedding")
         if st.button("Embed filtered dataset"):
             try:
@@ -374,7 +524,7 @@ def main() -> None:
                 show_error("Embedding failed", exc)
         st.code(str(resolve_path(config, config.data.embeddings_path)))
 
-    with tabs[3]:
+    with tabs[4]:
         st.subheader("Train")
         try:
             import torch
@@ -450,7 +600,7 @@ def main() -> None:
             except Exception as exc:  # noqa: BLE001
                 show_error("Training failed", exc)
 
-    with tabs[4]:
+    with tabs[5]:
         st.subheader("Generate")
         world = st.text_area("World", "기억 조각을 거래하는 근미래 도시.", height=80, key="gen_world")
         characters = st.text_area("Characters", "하린: 실종된 언니를 찾는 복원사. 도겸: 기억 암시장의 브로커.", height=80, key="gen_chars")
@@ -473,7 +623,7 @@ def main() -> None:
             except Exception as exc:  # noqa: BLE001
                 show_error("Generation failed", exc)
 
-    with tabs[5]:
+    with tabs[6]:
         st.subheader("Evaluate")
         previous_scene = st.text_area(
             "Reference previous scene",
@@ -492,7 +642,7 @@ def main() -> None:
             except Exception as exc:  # noqa: BLE001
                 show_error("Evaluation failed", exc)
 
-    with tabs[6]:
+    with tabs[7]:
         st.subheader("Reports")
         report_dir = resolve_path(config, config.evaluation.report_dir)
         reports = sorted(report_dir.glob("*.md")) if report_dir.exists() else []

@@ -42,6 +42,17 @@
 - [x] Implement JEPA Planner + RAG + LLM mode.
 - [x] Display predicted next-scene direction via retrieved examples.
 - [x] Display retrieved examples through generated prompts and reports.
+- [x] Add long-form Chat tab with persistent sessions.
+- [x] Add hybrid recent-message, summary, and knowledge-graph memory for long context.
+- [x] Add session Markdown export.
+
+## Phase 4.5 - Chat Memory
+
+- [x] Save chat sessions as JSON files.
+- [x] Compress long sessions into memory summaries.
+- [x] Extract and merge knowledge graph nodes/edges.
+- [x] Show graph tables and Mermaid text.
+- [x] Support LLM-only, RAG, and JEPA modes in chat generation.
 
 ## Phase 5 - Evaluation
 
