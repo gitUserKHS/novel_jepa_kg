@@ -209,7 +209,15 @@ def extract_knowledge_graph(config: AppConfig, client: OllamaClient, session: di
 {new_text}
 """
     try:
-        payload = parse_json_object(client.chat(prompt, system="당신은 소설 설정을 지식 그래프로 구조화하는 도우미입니다.", temperature=0.1, max_tokens=1200))
+        payload = parse_json_object(
+            client.chat(
+                prompt,
+                system="당신은 소설 설정을 지식 그래프로 구조화하는 도우미입니다.",
+                temperature=0.1,
+                max_tokens=1200,
+                json_mode=True,
+            )
+        )
         merged = merge_graphs(session.get("knowledge_graph", {}), payload)
         session["knowledge_graph"] = merged
         return merged

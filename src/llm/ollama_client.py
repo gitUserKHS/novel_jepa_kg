@@ -24,21 +24,31 @@ class OllamaClient:
         self.timeout_sec = timeout_sec
         self.dry_run = dry_run
 
-    def chat(self, prompt: str, system: str | None = None, temperature: float = 0.7, max_tokens: int = 1200) -> str:
+    def chat(
+        self,
+        prompt: str,
+        system: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 1200,
+        json_mode: bool = False,
+    ) -> str:
         if self.dry_run:
             return self._dry_chat(prompt)
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
+        body = {
+            "model": self.chat_model,
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }
+        if json_mode:
+            body["format"] = "json"
         response = requests.post(
             f"{self.base_url}/api/chat",
-            json={
-                "model": self.chat_model,
-                "messages": messages,
-                "stream": False,
-                "options": {"temperature": temperature, "num_predict": max_tokens},
-            },
+            json=body,
             timeout=self.timeout_sec,
         )
         response.raise_for_status()

@@ -130,12 +130,13 @@ def synthetic_sample_prompt(genre: str, sample_index: int, plan: dict[str, str] 
 - scene_t_plus_1: summary, emotion, conflict, state, plot_function
 
 조건:
+- 첫 글자는 반드시 {{ 이고 마지막 글자는 반드시 }} 이어야 합니다.
+- JSON 객체 하나만 출력합니다. 앞뒤 설명, 사과문, 주석, 코드펜스는 금지합니다.
 - 한국어로만 작성합니다.
 - 실제 저작권 프랜차이즈명, 유명 캐릭터명은 쓰지 않습니다.
 - scene_t와 scene_t_plus_1은 같은 사건을 반복하지 말고 원인과 결과가 이어져야 합니다.
 - scene_t_plus_1에는 새 단서, 선택 압박, 관계 변화 중 최소 두 가지를 포함합니다.
 - 매 샘플마다 장소, 목표, 갈등, 감정선을 다르게 만듭니다.
-- JSON 외의 설명, 마크다운 코드펜스는 출력하지 않습니다.
 """
 
 

@@ -193,6 +193,7 @@ Keep `Reuse cached data` on. The first run is slower; later runs reuse samples a
 ## Current Pipeline Behavior
 
 - Synthetic samples are diversified with rotating scene plans: subgenre, plot function, emotion arc, conflict, motif, and relationship tension.
+- Synthetic data generation requests Ollama JSON mode and extracts the first valid balanced JSON object if the model still adds surrounding text.
 - `data/synthetic/sample_cache.jsonl` stores generated samples by model, genre, sample id, and diversity plan. Re-running the same request reuses matching samples instead of calling Ollama again.
 - `data/embeddings/embedding_cache.jsonl` stores text embeddings by embedding model and text hash. The embedding stage only calls Ollama for missing vectors.
 - `data/embeddings/scenes.npz` is reused when the filtered dataset and embedding model are unchanged.

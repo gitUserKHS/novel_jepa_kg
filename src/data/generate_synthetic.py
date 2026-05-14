@@ -100,6 +100,7 @@ def generate_synthetic_dataset(config: AppConfig, client: OllamaClient, genre: s
                     system="당신은 한국어 서사 데이터셋을 JSON으로만 작성하는 도우미입니다.",
                     temperature=0.95,
                     max_tokens=1400,
+                    json_mode=True,
                 )
                 payload = parse_json_object(text)
                 sample = validate_sample(payload).to_jsonable(sample_id)
