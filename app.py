@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
 
@@ -44,12 +45,29 @@ PIPELINE_STAGES = [
     {"stage": "Evaluate", "work": "Score outputs and write Markdown report"},
 ]
 
+DEFAULT_CHAT_SETTINGS = {
+    "session_dir": "data/sessions",
+    "recent_messages": 8,
+    "compress_every_messages": 6,
+    "compress_over_chars": 12000,
+    "max_memory_chars": 5000,
+    "auto_update_graph": True,
+    "scene_summary_chars": 700,
+}
+
 
 def show_error(message: str, exc: Exception | None = None) -> None:
     if exc:
         st.error(f"{message}: {exc}")
     else:
         st.error(message)
+
+
+def ensure_chat_config(config: AppConfig) -> AppConfig:
+    if hasattr(config, "chat"):
+        return config
+    object.__setattr__(config, "chat", SimpleNamespace(**DEFAULT_CHAT_SETTINGS))
+    return config
 
 
 @st.cache_data(show_spinner=False)
@@ -356,6 +374,7 @@ def render_chat_session(config: AppConfig, client: OllamaClient) -> None:
 
 def main() -> None:
     config = load_config("configs/default.yaml")
+    config = ensure_chat_config(config)
     config, dry_run = sidebar_config(config)
     ensure_project_dirs(config)
     client = make_client(config, dry_run)
