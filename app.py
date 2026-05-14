@@ -177,6 +177,13 @@ def main() -> None:
 
     with tabs[3]:
         st.subheader("Train")
+        try:
+            import torch
+
+            device_label = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
+            st.info(f"Training device: {device_label}")
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Could not inspect torch device: {exc}")
         config.training.epochs = int(st.number_input("Epochs", min_value=1, max_value=500, value=config.training.epochs))
         config.training.batch_size = int(
             st.number_input("Batch size", min_value=1, max_value=512, value=config.training.batch_size)

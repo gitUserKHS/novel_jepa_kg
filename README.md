@@ -34,6 +34,12 @@ pip install -r requirements.txt
 
 Make sure Ollama is running locally and that your selected chat/embedding models are installed. The GUI also includes dry-run mode, which exercises the pipeline without Ollama.
 
+For RTX 4060/CUDA acceleration, install the CUDA build after creating the virtual environment:
+
+```bash
+pip install -r requirements-gpu.txt
+```
+
 ## Run
 
 ```bash

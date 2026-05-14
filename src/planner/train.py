@@ -54,18 +54,21 @@ def train_predictor(config: AppConfig) -> dict:
         batch_size=config.training.batch_size,
         shuffle=True,
     )
-    val_x = x[val_idx]
-    val_y = y[val_idx]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    val_x = x[val_idx].to(device)
+    val_y = y[val_idx].to(device)
 
-    model = MLPPredictor(dim=x.shape[1])
+    model = MLPPredictor(dim=x.shape[1]).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.learning_rate)
     best_val = -1.0
     epochs = []
-    logger.info("Training predictor for %s epochs", config.training.epochs)
+    logger.info("Training predictor for %s epochs on %s", config.training.epochs, device)
     for epoch in range(1, config.training.epochs + 1):
         model.train()
         losses = []
         for batch_x, batch_y in train_loader:
+            batch_x = batch_x.to(device)
+            batch_y = batch_y.to(device)
             optimizer.zero_grad()
             pred = model(batch_x)
             loss = cosine_loss(pred, batch_y)
@@ -85,7 +88,7 @@ def train_predictor(config: AppConfig) -> dict:
                 {"model_state": model.state_dict(), "dim": int(x.shape[1]), "config": config.training.dict()},
                 checkpoint_path,
             )
-    history = {"best_val_cosine": best_val, "epochs": epochs}
+    history = {"best_val_cosine": best_val, "device": str(device), "epochs": epochs}
     history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
     return history
 

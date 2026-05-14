@@ -1,0 +1,14 @@
+--extra-index-url https://download.pytorch.org/whl/cu126
+
+streamlit
+pydantic
+pyyaml
+requests
+numpy
+pandas
+torch==2.12.0+cu126
+faiss-cpu
+scikit-learn
+tqdm
+plotly
+python-dotenv
