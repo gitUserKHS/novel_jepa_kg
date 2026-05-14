@@ -52,6 +52,12 @@ Then open:
 http://localhost:8501
 ```
 
+On Windows, you can also double-click:
+
+```text
+run_server.bat
+```
+
 ## Streamlit Tabs
 
 - Project: one-click dry-run or Ollama-backed full pipeline
