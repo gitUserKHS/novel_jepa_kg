@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.embedding.vector_store import retrieve_by_text, retrieve_by_vector
+from src.generation.consistency import allowed_name_instruction, build_beat_card, repair_name_consistency
 from src.llm.ollama_client import OllamaClient
 from src.llm.prompts import prose_prompt
 from src.memory.context import (
@@ -44,12 +45,12 @@ def _retrieve_examples(
     try:
         if mode == "RAG + LLM":
             retrieved = retrieve_by_text(config, client, previous_scene, config.generation.top_k)
-            examples = [item["sample"]["scene_t_plus_1"]["summary"] for item in retrieved]
+            examples = [item["sample"]["scene_t_plus_1"]["summary"] for item in retrieved[: config.generation.rag_context_limit]]
             return "검색된 유사 장면의 전환 논리를 참고해 다음 갈등을 확장한다.", examples, retrieved
 
         predicted = predict_next_embedding(config, client, previous_scene)
         retrieved = retrieve_by_vector(config, predicted, config.generation.top_k)
-        examples = [item["sample"]["scene_t_plus_1"]["summary"] for item in retrieved]
+        examples = [item["sample"]["scene_t_plus_1"]["summary"] for item in retrieved[: config.generation.rag_context_limit]]
         direction = examples[0] if examples else "예측된 다음 장면 방향에 맞춰 갈등을 한 단계 진전시킨다."
         return direction, examples, retrieved
     except Exception as exc:  # noqa: BLE001 - Chat should degrade instead of losing the session.
@@ -79,6 +80,8 @@ def generate_chat_turn(
         style=config.generation.style,
         direction=direction,
         examples=examples,
+        beat_card=build_beat_card(mode, direction, examples, session.get("characters", ""), config.generation.rag_context_limit),
+        consistency_rules=allowed_name_instruction(session.get("characters", "")),
     )
     assistant_text = client.chat(
         prompt,
@@ -86,6 +89,14 @@ def generate_chat_turn(
         temperature=config.generation.temperature,
         max_tokens=config.generation.max_tokens,
     ).strip()
+    assistant_text = repair_name_consistency(
+        config,
+        client,
+        assistant_text,
+        session.get("world", ""),
+        session.get("characters", ""),
+        memory_context,
+    )
     append_message(
         session,
         "assistant",

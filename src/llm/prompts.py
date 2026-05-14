@@ -150,6 +150,8 @@ def prose_prompt(
     style: str,
     direction: str | None = None,
     examples: list[str] | None = None,
+    beat_card: str | None = None,
+    consistency_rules: str | None = None,
 ) -> str:
     example_text = "\n".join(f"- {example}" for example in (examples or []))
     return f"""
@@ -170,6 +172,12 @@ def prose_prompt(
 [참고 장면 예시]
 {example_text or "- 참고 장면 없음"}
 
+[Beat Card]
+{beat_card or "- 별도 beat card 없음"}
+
+[일관성 제약]
+{consistency_rules or "- 입력 설정과 인물명을 유지합니다."}
+
 [문체 제약]
 {style}
 
@@ -178,6 +186,8 @@ def prose_prompt(
 - 1200자 이내.
 - 새 단서, 감정 변화, 다음 선택지를 포함합니다.
 - 이전 장면을 반복 요약하지 말고, 사건의 상태를 한 단계 바꿉니다.
+- 입력 인물표에 없는 이름을 만들지 않습니다.
+- 참고 장면 예시의 고유명사와 사건을 그대로 가져오지 않습니다.
 """
 
 

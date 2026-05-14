@@ -198,6 +198,10 @@ Keep `Reuse cached data` on. The first run is slower; later runs reuse samples a
 - Project and Dataset tabs provide genre presets plus a custom genre option.
 - The sidebar can load installed Ollama models from `/api/tags`, and Ollama API errors include the endpoint, model, HTTP status, and response detail.
 - Synthetic data generation requests Ollama JSON mode and extracts the first valid balanced JSON object if the model still adds surrounding text.
+- RAG/JEPA generation now feeds the LLM a compact beat card instead of dumping all retrieved context into prose.
+- `Prompt examples` limits how many retrieved examples enter the prompt, while `Retrieval top K` still controls the search pool.
+- Name consistency checks compare generated outputs against the character list and report unknown or likely misspelled names.
+- Optional auto-repair rewrites only detected name inconsistencies before the output is saved.
 - `data/synthetic/sample_cache.jsonl` stores generated samples by model, genre, sample id, and diversity plan. Re-running the same request reuses matching samples instead of calling Ollama again.
 - `data/embeddings/embedding_cache.jsonl` stores text embeddings by embedding model and text hash. The embedding stage only calls Ollama for missing vectors.
 - `data/embeddings/scenes.npz` is reused when the filtered dataset and embedding model are unchanged.

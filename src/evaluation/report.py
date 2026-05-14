@@ -20,6 +20,7 @@ from src.evaluation.metrics import (
     repetition_rate,
     sentence_stats,
 )
+from src.generation.consistency import check_name_consistency
 from src.llm.ollama_client import OllamaClient
 from src.utils.config import AppConfig
 from src.utils.paths import resolve_path
@@ -33,12 +34,19 @@ def _embedding_map(client: OllamaClient, previous_scene: str, outputs: dict[str,
     return vectors[0], {name: vector for (name, _text), vector in zip(nonempty, vectors[1:])}
 
 
-def evaluate_outputs(config: AppConfig, client: OllamaClient, previous_scene: str, outputs: dict[str, str]) -> dict:
+def evaluate_outputs(
+    config: AppConfig,
+    client: OllamaClient,
+    previous_scene: str,
+    outputs: dict[str, str],
+    characters: str = "",
+) -> dict:
     reference_vector, output_vectors = _embedding_map(client, previous_scene, outputs)
     rows = {}
     for name, text in outputs.items():
         vector = output_vectors.get(name)
         embedding_continuity = cosine_similarity(reference_vector, vector) if reference_vector is not None and vector is not None else 0.0
+        consistency = check_name_consistency(text, characters)
         row = {
             "char_count": len(text.strip()),
             "repetition_rate": repetition_rate(text, config.evaluation.repetition_ngram),
@@ -51,6 +59,9 @@ def evaluate_outputs(config: AppConfig, client: OllamaClient, previous_scene: st
             "length_fit": length_fit(text, config.evaluation.target_min_chars, config.evaluation.target_max_chars),
             "progression_score": progression_score(text),
             "contradictions": contradiction_check(text),
+            "known_names": consistency.known_names,
+            "name_consistency_issues": consistency.issues,
+            "name_consistency_score": consistency.score,
             **sentence_stats(text),
         }
         row["overall_score"] = overall_score(row)
@@ -68,10 +79,12 @@ def evaluate_and_write_report(
     client: OllamaClient,
     previous_scene: str,
     outputs: dict[str, str],
+    world: str = "",
+    characters: str = "",
 ) -> str:
     report_dir = resolve_path(config, config.evaluation.report_dir)
     report_dir.mkdir(parents=True, exist_ok=True)
-    metrics = evaluate_outputs(config, client, previous_scene, outputs)
+    metrics = evaluate_outputs(config, client, previous_scene, outputs, characters=characters)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = report_dir / f"comparison_{timestamp}.md"
     lines = [
@@ -79,6 +92,8 @@ def evaluate_and_write_report(
         "",
         f"- Created: {timestamp}",
         f"- Previous scene: {previous_scene}",
+        f"- World: {world or '(not provided)'}",
+        f"- Characters: {characters or '(not provided)'}",
         f"- Ranking: {', '.join(metrics['ranking'])}",
         f"- Pairwise output diversity: {metrics['pairwise_output_diversity']:.4f}",
         "",
@@ -88,8 +103,20 @@ def evaluate_and_write_report(
         json.dumps(metrics, ensure_ascii=False, indent=2),
         "```",
         "",
-        "## Outputs",
+        "## Consistency Findings",
+        "",
     ]
+    for name, row in metrics["modes"].items():
+        issues = row.get("name_consistency_issues", [])
+        lines.extend([f"### {name}", ""])
+        if issues:
+            lines.extend([f"- {issue}" for issue in issues])
+        else:
+            lines.append("- No name consistency issues detected.")
+        lines.append("")
+    lines.extend([
+        "## Outputs",
+    ])
     for name, text in outputs.items():
         lines.extend(["", f"### {name}", "", text or "(empty)"])
     path.write_text("\n".join(lines), encoding="utf-8")

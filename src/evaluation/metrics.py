@@ -136,16 +136,18 @@ def overall_score(metrics: dict[str, float | int | list | dict]) -> float:
     progression = float(metrics.get("progression_score", 0.0))
     lexical = min(1.0, float(metrics.get("lexical_diversity", 0.0)) / 0.75)
     length = float(metrics.get("length_fit", 0.0))
+    consistency = float(metrics.get("name_consistency_score", 1.0))
     repetition = float(metrics.get("repetition_rate", 0.0))
     contradictions = metrics.get("contradictions", [])
     contradiction_penalty = min(0.25, 0.08 * len(contradictions)) if isinstance(contradictions, list) else 0.0
     score = (
-        0.22 * continuity
-        + 0.16 * keyword
-        + 0.16 * novelty
-        + 0.18 * progression
-        + 0.12 * lexical
-        + 0.16 * length
+        0.20 * continuity
+        + 0.14 * keyword
+        + 0.14 * novelty
+        + 0.17 * progression
+        + 0.10 * lexical
+        + 0.13 * length
+        + 0.12 * consistency
         - 0.25 * repetition
         - contradiction_penalty
     )

@@ -267,6 +267,26 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
     output_root = st.sidebar.text_input("Output directory", ".")
     dry_run = st.sidebar.checkbox("Dry-run mode", value=True)
     config.data.reuse_existing = st.sidebar.checkbox("Reuse cached data", value=config.data.reuse_existing)
+    with st.sidebar.expander("Generation controls", expanded=False):
+        config.generation.top_k = int(
+            st.number_input("Retrieval top K", min_value=1, max_value=20, value=config.generation.top_k, step=1)
+        )
+        config.generation.rag_context_limit = int(
+            st.number_input(
+                "Prompt examples",
+                min_value=1,
+                max_value=10,
+                value=min(config.generation.rag_context_limit, config.generation.top_k),
+                step=1,
+            )
+        )
+        config.generation.max_tokens = int(
+            st.number_input("Max output tokens", min_value=256, max_value=8192, value=config.generation.max_tokens, step=128)
+        )
+        config.generation.enable_consistency_repair = st.checkbox(
+            "Auto-repair name consistency",
+            value=config.generation.enable_consistency_repair,
+        )
     if output_root.strip() and output_root.strip() != ".":
         config.output_root = output_root.strip()
     return config, dry_run
@@ -540,7 +560,14 @@ def main() -> None:
 
                 update_stage(stage_rows, stage_table, 5, "running", "Scoring outputs and writing report")
                 current_step.info("Step 6/6: Evaluation report")
-                report_path = evaluate_and_write_report(config, client, previous_scene, outputs)
+                report_path = evaluate_and_write_report(
+                    config,
+                    client,
+                    previous_scene,
+                    outputs,
+                    world=world,
+                    characters=characters,
+                )
                 run_summary["report"] = report_path
                 update_stage(stage_rows, stage_table, 5, "done", f"report={report_path}")
                 artifact_table.dataframe(artifact_status(config), hide_index=True, width="stretch")
@@ -707,13 +734,22 @@ def main() -> None:
             height=80,
             key="eval_prev",
         )
+        eval_world = st.text_area("World setting for consistency check", height=80, key="eval_world")
+        eval_characters = st.text_area("Known characters for consistency check", height=80, key="eval_characters")
         llm_only = st.text_area("LLM-only output", height=120)
         rag = st.text_area("RAG output", height=120)
         jepa = st.text_area("JEPA output", height=120)
         if st.button("Write evaluation report"):
             try:
                 outputs = {"llm_only": llm_only, "rag": rag, "jepa": jepa}
-                report_path = evaluate_and_write_report(config, client, previous_scene, outputs)
+                report_path = evaluate_and_write_report(
+                    config,
+                    client,
+                    previous_scene,
+                    outputs,
+                    world=eval_world,
+                    characters=eval_characters,
+                )
                 st.success(f"Report saved to {report_path}")
             except Exception as exc:  # noqa: BLE001
                 show_error("Evaluation failed", exc)

@@ -45,6 +45,9 @@
 - [x] Add long-form Chat tab with persistent sessions.
 - [x] Add hybrid recent-message, summary, and knowledge-graph memory for long context.
 - [x] Add session Markdown export.
+- [x] Add beat-card grounded prompting for RAG/JEPA generation.
+- [x] Limit retrieved examples injected into prompts.
+- [x] Add optional name consistency repair after generation.
 
 ## Phase 4.5 - Chat Memory
 
@@ -59,6 +62,7 @@
 - [x] Repetition rate.
 - [x] Embedding continuity score.
 - [x] Keyword consistency score.
+- [x] Name consistency score and issue list.
 - [x] Simple contradiction checklist.
 - [x] Add lexical diversity, novelty, progression, length fit, dialogue ratio, sentence stats, ranking, and pairwise output diversity.
 - [ ] Optional LLM judge.

@@ -46,8 +46,10 @@ class TrainingConfig(BaseModel):
 
 class GenerationConfig(BaseModel):
     top_k: int = 5
+    rag_context_limit: int = 3
     max_tokens: int = 1600
     temperature: float = 0.8
+    enable_consistency_repair: bool = True
     style: str = "한국어 웹소설 문체. 감정선은 선명하게, 장면 전환은 자연스럽게."
 
 
