@@ -112,11 +112,13 @@ Chat model: gemma4:e4b
 Embedding model: embeddinggemma
 ```
 
+If Ollama is reachable, the sidebar shows installed models as dropdowns. You can still choose `직접 입력` when you want to type a model name manually.
+
 ### 5. Run the full experiment
 
 Open the `Project` tab.
 
-1. Enter a genre.
+1. Pick a genre preset, or choose `직접 입력` and enter your own genre.
 2. Set `Samples` to `8` to `20` for a first real test.
 3. Fill in world, characters, and previous scene.
 4. Click `Run Full Pipeline`.
@@ -193,6 +195,8 @@ Keep `Reuse cached data` on. The first run is slower; later runs reuse samples a
 ## Current Pipeline Behavior
 
 - Synthetic samples are diversified with rotating scene plans: subgenre, plot function, emotion arc, conflict, motif, and relationship tension.
+- Project and Dataset tabs provide genre presets plus a custom genre option.
+- The sidebar can load installed Ollama models from `/api/tags`, and Ollama API errors include the endpoint, model, HTTP status, and response detail.
 - Synthetic data generation requests Ollama JSON mode and extracts the first valid balanced JSON object if the model still adds surrounding text.
 - `data/synthetic/sample_cache.jsonl` stores generated samples by model, genre, sample id, and diversity plan. Re-running the same request reuses matching samples instead of calling Ollama again.
 - `data/embeddings/embedding_cache.jsonl` stores text embeddings by embedding model and text hash. The embedding stage only calls Ollama for missing vectors.

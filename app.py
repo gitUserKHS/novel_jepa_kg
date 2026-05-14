@@ -55,6 +55,24 @@ DEFAULT_CHAT_SETTINGS = {
     "scene_summary_chars": 700,
 }
 
+GENRE_PRESETS = [
+    "한국형 SF 미스터리",
+    "한국형 판타지 미스터리",
+    "궁중 판타지",
+    "현대 오컬트",
+    "로맨스 스릴러",
+    "무협 정치극",
+    "디스토피아 성장물",
+    "해양 모험",
+    "법정 미스터리",
+    "학원 이능 배틀",
+    "가족 드라마 미스터리",
+    "사이버펑크 누아르",
+    "역사 대체물",
+]
+
+CUSTOM_OPTION = "직접 입력"
+
 
 def show_error(message: str, exc: Exception | None = None) -> None:
     if exc:
@@ -68,6 +86,39 @@ def ensure_chat_config(config: AppConfig) -> AppConfig:
         return config
     object.__setattr__(config, "chat", SimpleNamespace(**DEFAULT_CHAT_SETTINGS))
     return config
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def available_ollama_models(base_url: str, timeout_sec: int) -> list[str]:
+    return OllamaClient(base_url=base_url, chat_model="", embed_model="", timeout_sec=timeout_sec).list_models()
+
+
+def model_selector(label: str, current: str, models: list[str], key: str) -> str:
+    if not models:
+        return st.sidebar.text_input(label, current, key=key)
+
+    options = models + [CUSTOM_OPTION]
+    if current in models:
+        index = models.index(current)
+    elif f"{current}:latest" in models:
+        index = models.index(f"{current}:latest")
+    else:
+        index = len(options) - 1
+    selected = st.sidebar.selectbox(label, options, index=index, key=f"{key}_select")
+    if selected == CUSTOM_OPTION:
+        custom = st.sidebar.text_input(f"Custom {label.lower()}", current, key=key)
+        return custom.strip() or current
+    return selected
+
+
+def genre_selector(label: str, default: str, key: str) -> str:
+    options = GENRE_PRESETS + [CUSTOM_OPTION]
+    index = GENRE_PRESETS.index(default) if default in GENRE_PRESETS else len(options) - 1
+    selected = st.selectbox(label, options, index=index, key=f"{key}_preset")
+    if selected == CUSTOM_OPTION:
+        custom = st.text_input("Custom genre", default if default not in GENRE_PRESETS else "", key=f"{key}_custom")
+        return custom.strip() or default
+    return selected
 
 
 @st.cache_data(show_spinner=False)
@@ -205,8 +256,14 @@ def make_client(config: AppConfig, dry_run: bool) -> OllamaClient:
 def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
     st.sidebar.header("Project Settings")
     config.ollama.base_url = st.sidebar.text_input("Ollama base URL", config.ollama.base_url)
-    config.ollama.chat_model = st.sidebar.text_input("Chat model", config.ollama.chat_model)
-    config.ollama.embed_model = st.sidebar.text_input("Embedding model", config.ollama.embed_model)
+    try:
+        models = available_ollama_models(config.ollama.base_url, config.ollama.timeout_sec)
+        st.sidebar.caption(f"Ollama models detected: {len(models)}")
+    except Exception as exc:  # noqa: BLE001 - model selection must still work when Ollama is offline.
+        models = []
+        st.sidebar.warning(f"Could not load Ollama model list: {exc}")
+    config.ollama.chat_model = model_selector("Chat model", config.ollama.chat_model, models, "chat_model")
+    config.ollama.embed_model = model_selector("Embedding model", config.ollama.embed_model, models, "embed_model")
     output_root = st.sidebar.text_input("Output directory", ".")
     dry_run = st.sidebar.checkbox("Dry-run mode", value=True)
     config.data.reuse_existing = st.sidebar.checkbox("Reuse cached data", value=config.data.reuse_existing)
@@ -387,7 +444,7 @@ def main() -> None:
     with tabs[0]:
         st.subheader("One-click experiment")
         st.write("합성 서사 데이터 생성부터 평가 리포트까지 작은 샘플로 실행합니다.")
-        genre = st.text_input("Genre", "한국형 SF 미스터리", key="project_genre")
+        genre = genre_selector("Genre", "한국형 SF 미스터리", "project_genre")
         sample_count = st.number_input("Samples", min_value=2, max_value=100, value=8, step=1)
         previous_scene = st.text_area(
             "Previous scene",
@@ -500,7 +557,7 @@ def main() -> None:
 
     with tabs[2]:
         st.subheader("Dataset")
-        genre = st.text_input("Dataset genre", "한국형 판타지 미스터리")
+        genre = genre_selector("Dataset genre", "한국형 판타지 미스터리", "dataset_genre")
         count = st.number_input("Number of samples", min_value=1, max_value=500, value=10, step=1)
         if st.button("Generate dataset"):
             try:

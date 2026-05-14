@@ -24,6 +24,18 @@ class OllamaClient:
         self.timeout_sec = timeout_sec
         self.dry_run = dry_run
 
+    def list_models(self) -> list[str]:
+        try:
+            response = requests.get(f"{self.base_url}/api/tags", timeout=min(self.timeout_sec, 5))
+            self._raise_for_status(response, "/api/tags")
+            payload = response.json()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Could not reach Ollama /api/tags at {self.base_url}: {exc}") from exc
+        except ValueError as exc:
+            raise RuntimeError("Ollama /api/tags returned invalid JSON.") from exc
+        names = [item.get("name") for item in payload.get("models", []) if item.get("name")]
+        return sorted(names)
+
     def chat(
         self,
         prompt: str,
@@ -42,33 +54,69 @@ class OllamaClient:
             "model": self.chat_model,
             "messages": messages,
             "stream": False,
+            "think": False,
             "options": {"temperature": temperature, "num_predict": max_tokens},
         }
         if json_mode:
             body["format"] = "json"
-        response = requests.post(
-            f"{self.base_url}/api/chat",
-            json=body,
-            timeout=self.timeout_sec,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        return payload.get("message", {}).get("content", "")
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/chat",
+                json=body,
+                timeout=self.timeout_sec,
+            )
+            self._raise_for_status(response, "/api/chat", self.chat_model)
+            payload = response.json()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Could not reach Ollama /api/chat at {self.base_url}: {exc}") from exc
+        except ValueError as exc:
+            raise RuntimeError("Ollama /api/chat returned invalid JSON.") from exc
+
+        message = payload.get("message", {})
+        content = message.get("content", "")
+        if not content.strip():
+            done_reason = payload.get("done_reason", "unknown")
+            thinking = message.get("thinking", "")
+            detail = f" done_reason={done_reason}."
+            if thinking:
+                detail += " The model returned thinking text but no final content."
+            raise RuntimeError(
+                f"Ollama /api/chat returned empty content for model '{self.chat_model}'.{detail} "
+                "Try a larger max token value or a non-thinking chat model."
+            )
+        return content
 
     def embed(self, texts: list[str]) -> np.ndarray:
         if self.dry_run:
             return np.vstack([self._stable_embedding(text) for text in texts]).astype("float32")
-        response = requests.post(
-            f"{self.base_url}/api/embed",
-            json={"model": self.embed_model, "input": texts},
-            timeout=self.timeout_sec,
-        )
-        response.raise_for_status()
-        payload = response.json()
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/embed",
+                json={"model": self.embed_model, "input": texts},
+                timeout=self.timeout_sec,
+            )
+            self._raise_for_status(response, "/api/embed", self.embed_model)
+            payload = response.json()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Could not reach Ollama /api/embed at {self.base_url}: {exc}") from exc
+        except ValueError as exc:
+            raise RuntimeError("Ollama /api/embed returned invalid JSON.") from exc
         vectors = payload.get("embeddings")
         if not vectors:
             raise RuntimeError("Ollama /api/embed returned no embeddings.")
         return np.asarray(vectors, dtype="float32")
+
+    def _raise_for_status(self, response: requests.Response, endpoint: str, model: str | None = None) -> None:
+        if response.ok:
+            return
+        detail = response.text.strip()
+        try:
+            payload = response.json()
+            detail = payload.get("error") or detail
+        except ValueError:
+            pass
+        model_part = f" for model '{model}'" if model else ""
+        raise RuntimeError(f"Ollama {endpoint} failed{model_part}: HTTP {response.status_code}. {detail}")
 
     def _dry_chat(self, prompt: str) -> str:
         if "JSON" in prompt.upper() or "json" in prompt:
