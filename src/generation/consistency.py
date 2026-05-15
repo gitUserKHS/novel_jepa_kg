@@ -69,6 +69,19 @@ def build_beat_card(
             f"- Preset hook: {scene_preset.get('next_hook', '')}",
             f"- Preset conflict: {scene_preset.get('conflict', '')}",
         ]
+    soft_notes = [
+        f"- mode: {mode}",
+        f"- active names: {active_names}",
+        f"- likely next movement: {direction or 'continue the unresolved conflict from the previous scene'}",
+        *preset_lines,
+        "- use retrieved examples only as structural hints; do not copy their proper nouns or scene events",
+        "- keep one central dramatic movement instead of stacking every clue, device, secret, and threat",
+        "- avoid formulaic beat labels, numbered steps, and summary-like transitions in the final prose",
+    ]
+    if evidence:
+        soft_notes.append("- retrieved transition hints:")
+        soft_notes.extend(f"  - {item}" for item in evidence)
+    return "\n".join(soft_notes)
     return "\n".join(
         [
             f"- 생성 모드: {mode}",

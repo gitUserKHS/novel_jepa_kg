@@ -178,6 +178,13 @@ def prose_prompt(
     consistency_rules: str | None = None,
 ) -> str:
     example_text = "\n".join(f"- {example}" for example in (examples or []))
+    natural_prose_rules = """
+- Beat Card and retrieved examples are private planning notes, not visible output.
+- Do not write headings, bullet points, numbered beats, analysis, or summaries.
+- Do not mechanically include every retrieved clue. Pick only the details that fit the current scene.
+- Keep the prose sensory and continuous: action, perception, dialogue, hesitation, and consequence.
+- Vary sentence length. Avoid repetitive transition phrases and template-like scene openings.
+"""
     return f"""
 아래 설정을 바탕으로 다음 장면의 한국어 웹소설 본문을 작성하세요.
 
@@ -204,6 +211,9 @@ def prose_prompt(
 
 [문체 제약]
 {style}
+
+[Natural prose rules]
+{natural_prose_rules}
 
 출력 조건:
 - 본문만 출력합니다.

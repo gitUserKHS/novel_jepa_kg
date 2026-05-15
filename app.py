@@ -487,7 +487,9 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
         except Exception as exc:  # noqa: BLE001
             st.caption(f"Runtime status unavailable: {exc}")
     output_root = st.sidebar.text_input("Output directory", ".")
-    dry_run = st.sidebar.checkbox("Dry-run mode", value=True)
+    dry_run = st.sidebar.checkbox("Dry-run mode", value=False)
+    if dry_run:
+        st.sidebar.warning("Dry-run mode uses deterministic canned outputs. Turn it off for real Ollama prose.")
     config.data.reuse_existing = st.sidebar.checkbox("Reuse cached data", value=config.data.reuse_existing)
     with st.sidebar.expander("Synthetic data controls", expanded=False):
         config.data.diversity_buckets = int(
