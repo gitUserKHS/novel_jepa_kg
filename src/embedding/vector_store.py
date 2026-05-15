@@ -71,6 +71,11 @@ def _load_index_results(config: AppConfig, query_vector: np.ndarray, top_k: int,
         if tmp_path.exists():
             tmp_path.unlink()
     query = np.asarray(query_vector, dtype="float32").reshape(1, -1)
+    if int(query.shape[1]) != int(index.d):
+        raise RuntimeError(
+            "Embedding/index dimension mismatch. Re-run the Embedding step or Full Pipeline. "
+            "This often happens when a FAISS index was created in Dry-run mode and then queried with a real Ollama embedding model."
+        )
     query = _normalize(query)
     scores, indices = index.search(query, top_k)
     samples = [json.loads(line) for line in filtered_path.read_text(encoding="utf-8").splitlines() if line.strip()]

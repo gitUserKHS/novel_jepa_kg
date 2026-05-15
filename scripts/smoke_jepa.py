@@ -5,6 +5,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import numpy as np
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -155,6 +156,8 @@ def test_dry_run_pipeline() -> None:
         assert report["axes"]["transition_shape"]["unique"] >= 1
         embedded = embed_dataset(config, client)
         assert embedded["count"] >= 2
+        with np.load(resolve_path(config, config.data.embeddings_path)) as embedding_payload:
+            assert str(embedding_payload["embedding_backend"]) == "dry-run"
         current_index = build_current_context_index(config)
         next_index = build_next_scene_index(config)
         assert current_index.exists()
