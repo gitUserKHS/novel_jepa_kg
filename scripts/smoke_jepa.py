@@ -13,15 +13,17 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.data.filter_dataset import filter_jsonl
 from src.data.generate_synthetic import generate_synthetic_dataset
 from src.embedding.embed_scenes import embed_dataset
-from src.embedding.vector_store import build_next_scene_index, retrieve_by_vector
+from src.embedding.vector_store import build_current_context_index, build_next_scene_index, retrieve_by_vector
 from src.generation.generate_with_jepa import generate_with_jepa
+from src.generation.generate_with_rag import generate_with_rag
 from src.llm.ollama_client import OllamaClient
 from src.planner.jepa_dataset import MASK_TOKEN, build_context_text, build_target_text
 from src.planner.jepa_model import JEPAPredictor
 from src.planner.jepa_train import representation_prediction_loss, train_predictor
 from src.planner.predict import evaluate_planner_diagnostics, predict_next_embedding
+from src.planner.scene_analyzer import analyze_current_scene, build_analyzed_generation_context
 from src.utils.config import AppConfig
-from src.utils.paths import ensure_project_dirs
+from src.utils.paths import ensure_project_dirs, resolve_path
 
 
 def _sample() -> dict:
@@ -77,6 +79,26 @@ def test_builders_and_loss() -> None:
     assert mse.item() >= 0
     assert norm.item() >= 0
 
+    config = AppConfig()
+    client = OllamaClient(config.ollama.base_url, config.ollama.chat_model, config.ollama.embed_model, dry_run=True)
+    analysis = analyze_current_scene(
+        config,
+        client,
+        "기억 잔향이 물리적 흔적으로 남는 근미래 서울.",
+        "서윤: 동생을 찾는 기록 복원가. 민재: 진실을 숨긴 연구원.",
+        "서윤은 폐쇄 연구동에서 손상된 로그와 동생의 이름을 발견한다.",
+    )
+    for key in ["summary", "emotion", "conflict", "state", "plot_function"]:
+        assert analysis.get(key)
+    analyzed_context = build_analyzed_generation_context(
+        "기억 잔향이 물리적 흔적으로 남는 근미래 서울.",
+        "서윤: 동생을 찾는 기록 복원가. 민재: 진실을 숨긴 연구원.",
+        "서윤은 폐쇄 연구동에서 손상된 로그와 동생의 이름을 발견한다.",
+        analysis,
+    )
+    for label in ["요약", "감정", "갈등", "상태", "장면 기능"]:
+        assert label in analyzed_context
+
 
 def test_dry_run_pipeline() -> None:
     with tempfile.TemporaryDirectory(prefix="novel_jepa_smoke_") as tmp:
@@ -101,12 +123,19 @@ def test_dry_run_pipeline() -> None:
         assert filtered["kept"] >= 2
         embedded = embed_dataset(config, client)
         assert embedded["count"] >= 2
-        build_next_scene_index(config)
+        current_index = build_current_context_index(config)
+        next_index = build_next_scene_index(config)
+        assert current_index.exists()
+        assert next_index.exists()
         history = train_predictor(config)
         assert history["best_val_cosine"] > -1
+        payload = torch.load(resolve_path(config, config.training.checkpoint_path), map_location="cpu")
+        assert payload.get("train_idx")
+        assert payload.get("val_idx")
         diagnostics = evaluate_planner_diagnostics(config, top_k=2)
         assert diagnostics["available"]
-        assert "pred_target_cosine" in diagnostics
+        assert "validation_pred_target_cosine" in diagnostics
+        assert diagnostics.get("validation", {}).get("available")
 
         predicted = predict_next_embedding(
             config,
@@ -126,6 +155,15 @@ def test_dry_run_pipeline() -> None:
         )
         assert isinstance(output, str)
         assert output.strip()
+        rag_output = generate_with_rag(
+            config,
+            client,
+            "기억 잔향이 물리적 흔적으로 남는 근미래 서울.",
+            "서윤: 동생을 찾는 기록 복원가. 민재: 진실을 숨긴 연구원.",
+            "서윤은 폐쇄 연구동에서 손상된 로그를 발견한다.",
+        )
+        assert isinstance(rag_output, str)
+        assert rag_output.strip()
 
 
 if __name__ == "__main__":

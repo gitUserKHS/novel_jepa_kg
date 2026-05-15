@@ -25,6 +25,7 @@ class DataConfig(BaseModel):
     sample_cache_path: str = "data/synthetic/sample_cache.jsonl"
     embeddings_path: str = "data/embeddings/scenes.npz"
     embedding_cache_path: str = "data/embeddings/embedding_cache.jsonl"
+    current_context_index_path: str = "data/indexes/current_context.faiss"
     faiss_index_path: str = "data/indexes/next_scene.faiss"
     min_summary_chars: int = 20
     max_retries: int = 3
@@ -62,6 +63,7 @@ class GenerationConfig(BaseModel):
     max_tokens: int = 1600
     temperature: float = 0.8
     enable_consistency_repair: bool = True
+    use_scene_analyzer: bool = True
     style: str = "한국어 웹소설 문체. 감정선은 선명하게, 장면 전환은 자연스럽게."
 
 
@@ -73,8 +75,9 @@ class EvaluationConfig(BaseModel):
     target_max_chars: int = 1600
     planner_ablation_modes: list[str] = Field(
         default_factory=lambda: [
-            "rag_current_embedding",
-            "jepa_predicted_target",
+            "rag_current_index",
+            "rag_next_index",
+            "jepa_next_index",
             "jepa_delta_predictor",
             "jepa_no_context_dropout",
         ]

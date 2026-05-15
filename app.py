@@ -13,16 +13,17 @@ import streamlit as st
 from src.data.filter_dataset import filter_jsonl
 from src.data.generate_synthetic import generate_synthetic_dataset
 from src.embedding.embed_scenes import embed_dataset
-from src.embedding.vector_store import build_next_scene_index
+from src.embedding.vector_store import build_current_context_index, build_next_scene_index
 from src.evaluation.report import evaluate_and_write_report
 from src.generation.chat import CHAT_MODES, generate_chat_turn
 from src.generation.generate_baseline import generate_llm_only
 from src.generation.generate_with_jepa import generate_with_jepa
-from src.generation.generate_with_rag import generate_with_rag
+from src.generation.generate_with_rag import generate_with_rag, plan_rag_generation
 from src.llm.scene_presets import AUTO_SCENE_PRESET, demo_defaults_for_genre, resolve_scene_preset, scene_preset_labels
 from src.llm.ollama_client import OllamaClient
 from src.memory.context import compress_session_memory, extract_knowledge_graph, graph_tables, graph_to_mermaid
 from src.planner.train import train_predictor
+from src.planner.predict import evaluate_planner_diagnostics
 from src.session.store import (
     create_session,
     delete_session,
@@ -40,7 +41,7 @@ st.set_page_config(page_title="Novel JEPA Lab", layout="wide")
 PIPELINE_STAGES = [
     {"stage": "Dataset", "work": "Generate or reuse samples, then validate/filter JSONL"},
     {"stage": "Embedding", "work": "Reuse or create scene embeddings, then prepare vectors"},
-    {"stage": "Index", "work": "Reuse or build FAISS next-scene index"},
+    {"stage": "Index", "work": "Reuse or build FAISS current-context and next-scene indexes"},
     {"stage": "Train", "work": "Train residual predictor and save best checkpoint"},
     {"stage": "Generate", "work": "Create LLM-only, RAG, and JEPA outputs"},
     {"stage": "Evaluate", "work": "Score outputs and write Markdown report"},
@@ -206,7 +207,8 @@ def artifact_status(config: AppConfig) -> pd.DataFrame:
         ("Sample cache", config.data.sample_cache_path),
         ("Embeddings", config.data.embeddings_path),
         ("Embedding cache", config.data.embedding_cache_path),
-        ("FAISS index", config.data.faiss_index_path),
+        ("Current context index", config.data.current_context_index_path),
+        ("Next scene index", config.data.faiss_index_path),
         ("Chat sessions", config.chat.session_dir),
         ("Predictor checkpoint", config.training.checkpoint_path),
         ("Predictor metadata", "checkpoints/predictor/model_card.json"),
@@ -412,6 +414,10 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
         config.generation.enable_consistency_repair = st.checkbox(
             "Auto-repair name consistency",
             value=config.generation.enable_consistency_repair,
+        )
+        config.generation.use_scene_analyzer = st.checkbox(
+            "Use current scene analyzer",
+            value=config.generation.use_scene_analyzer,
         )
     if output_root.strip() and output_root.strip() != ".":
         config.output_root = output_root.strip()
@@ -722,10 +728,11 @@ def main() -> None:
                 progress.progress(32)
 
                 update_stage(stage_rows, stage_table, 2, "running", "Checking FAISS index freshness")
-                current_step.info("Step 3/6: Vector index")
-                index_path = build_next_scene_index(config)
-                run_summary["index"] = str(index_path)
-                update_stage(stage_rows, stage_table, 2, "done", f"index={index_path}")
+                current_step.info("Step 3/6: Vector indexes")
+                current_index_path = build_current_context_index(config)
+                next_index_path = build_next_scene_index(config)
+                run_summary["index"] = {"current_context": str(current_index_path), "next_scene": str(next_index_path)}
+                update_stage(stage_rows, stage_table, 2, "done", f"current={current_index_path} | next={next_index_path}")
                 artifact_table.dataframe(artifact_status(config), hide_index=True, width="stretch")
                 progress.progress(48)
 
@@ -850,6 +857,7 @@ def main() -> None:
         if st.button("Embed filtered dataset"):
             try:
                 result = embed_dataset(config, client)
+                current_index_path = build_current_context_index(config)
                 index_path = build_next_scene_index(config)
                 cols = st.columns(4)
                 cols[0].metric("pairs", result["count"])
@@ -861,7 +869,10 @@ def main() -> None:
                     if result.get("reused_file")
                     else f"{result.get('new_vectors', 0)} new vectors, {result.get('reused_vectors', 0)} cached vectors"
                 )
-                st.success(f"Saved {result['count']} embedding pairs ({cache_note}) and FAISS index to {index_path}.")
+                st.success(
+                    f"Saved {result['count']} embedding pairs ({cache_note}) and FAISS indexes to "
+                    f"{current_index_path} and {index_path}."
+                )
             except Exception as exc:  # noqa: BLE001
                 show_error("Embedding failed", exc)
         st.code(str(resolve_path(config, config.data.embeddings_path)))
@@ -879,6 +890,7 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             st.warning(f"Could not inspect torch device: {exc}")
         st.info("Planner type: JEPA-inspired latent transition planner with frozen text encoders and a trainable PyTorch predictor.")
+        st.caption(f"Scene analyzer for inference: {'on' if config.generation.use_scene_analyzer else 'off'}")
         config.training.epochs = int(st.number_input("Epochs", min_value=1, max_value=500, value=config.training.epochs))
         config.training.batch_size = int(
             st.number_input("Batch size", min_value=1, max_value=512, value=config.training.batch_size)
@@ -944,7 +956,21 @@ def main() -> None:
         model_card_path = resolve_path(config, "checkpoints/predictor/model_card.json")
         if model_card_path.exists():
             with st.expander("Latest model card", expanded=False):
-                st.json(json.loads(model_card_path.read_text(encoding="utf-8")))
+                model_card = json.loads(model_card_path.read_text(encoding="utf-8"))
+                summary_cols = st.columns(3)
+                summary_cols[0].metric("validation pred_target_cosine", f"{model_card.get('best_pred_target_cosine', 0.0):.4f}")
+                summary_cols[1].metric("effective norm weight", f"{model_card.get('effective_loss_norm_weight', 0.0):.4f}")
+                summary_cols[2].metric("params", f"{model_card.get('parameter_count', 0):,}")
+                st.json(model_card)
+        try:
+            diagnostics = evaluate_planner_diagnostics(config, top_k=config.generation.top_k)
+            if diagnostics.get("available"):
+                metric_cols = st.columns(3)
+                metric_cols[0].metric("validation retrieval hit@k", f"{diagnostics.get('validation_retrieval_hit_at_k', 0.0):.4f}")
+                metric_cols[1].metric("validation mean score", f"{diagnostics.get('validation_retrieval_mean_score', 0.0):.4f}")
+                metric_cols[2].metric("validation diversity", f"{diagnostics.get('validation_transition_direction_diversity', 0.0):.4f}")
+        except Exception:
+            pass
         if st.button("Train predictor"):
             try:
                 train_progress = st.progress(0)
@@ -1051,16 +1077,58 @@ def main() -> None:
                     )
                     output = str(result["text"])
                     generation_details = result.get("planner", {})
+                    generation_details["rag_baselines"] = plan_rag_generation(
+                        config,
+                        client,
+                        world,
+                        characters,
+                        previous_scene,
+                        scene_preset=scene_preset,
+                    )
                 live_output.markdown(output)
                 if generation_details:
                     st.markdown("#### Retrieval / Planner diagnostics")
+                    analyzed_scene = generation_details.get("analyzed_scene")
+                    if analyzed_scene:
+                        st.markdown("##### Analyzed current scene")
+                        st.json(analyzed_scene)
                     if generation_details.get("direction"):
                         st.info(f"Predicted direction: {generation_details['direction']}")
                     if "predicted_vector_norm" in generation_details:
                         st.metric("predicted vector norm", f"{generation_details['predicted_vector_norm']:.4f}")
                     retrieved = generation_details.get("retrieved", [])
-                    if retrieved:
+                    if retrieved and mode == "JEPA Planner + RAG + LLM":
+                        st.markdown("##### JEPA retrieved examples")
                         st.dataframe(pd.DataFrame(retrieval_preview_rows(retrieved)), hide_index=True, width="stretch")
+                    if generation_details.get("current_retrieved"):
+                        st.markdown("##### RAG current-index retrieved examples")
+                        st.dataframe(
+                            pd.DataFrame(retrieval_preview_rows(generation_details["current_retrieved"])),
+                            hide_index=True,
+                            width="stretch",
+                        )
+                    if generation_details.get("next_retrieved"):
+                        st.markdown("##### RAG next-index retrieved examples")
+                        st.dataframe(
+                            pd.DataFrame(retrieval_preview_rows(generation_details["next_retrieved"])),
+                            hide_index=True,
+                            width="stretch",
+                        )
+                    rag_baselines = generation_details.get("rag_baselines", {})
+                    if rag_baselines.get("current_retrieved"):
+                        st.markdown("##### RAG current-index retrieved examples")
+                        st.dataframe(
+                            pd.DataFrame(retrieval_preview_rows(rag_baselines["current_retrieved"])),
+                            hide_index=True,
+                            width="stretch",
+                        )
+                    if rag_baselines.get("next_retrieved"):
+                        st.markdown("##### RAG next-index retrieved examples")
+                        st.dataframe(
+                            pd.DataFrame(retrieval_preview_rows(rag_baselines["next_retrieved"])),
+                            hide_index=True,
+                            width="stretch",
+                        )
             except Exception as exc:  # noqa: BLE001
                 show_error("Generation failed", exc)
 

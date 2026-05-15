@@ -32,11 +32,13 @@ def representation_prediction_loss(
     target: torch.Tensor,
     mse_weight: float = 0.05,
     norm_weight: float = 0.001,
+    normalize_prediction: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    effective_norm_weight = 0.0 if normalize_prediction else norm_weight
     cosine_component = 1 - F.cosine_similarity(pred, target, dim=1).mean()
     mse_component = F.mse_loss(F.normalize(pred, dim=1), F.normalize(target, dim=1))
     norm_component = (pred.norm(dim=1) - target.norm(dim=1).detach()).pow(2).mean()
-    total = cosine_component + mse_weight * mse_component + norm_weight * norm_component
+    total = cosine_component + mse_weight * mse_component + effective_norm_weight * norm_component
     return total, cosine_component, mse_component, norm_component
 
 
@@ -68,19 +70,19 @@ def _make_legacy_model(dim: int, config_dict: dict[str, Any]) -> MLPPredictor:
     )
 
 
-def _load_embedding_tensors(config: AppConfig) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+def _load_embedding_arrays(config: AppConfig) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, dict[str, Any]]:
     embeddings_path = resolve_path(config, config.data.embeddings_path)
     if not embeddings_path.exists():
         raise FileNotFoundError(f"Embeddings file not found: {embeddings_path}")
     data = np.load(embeddings_path)
     x = np.asarray(data["current_embeddings"], dtype="float32")
     y = np.asarray(data["next_embeddings"], dtype="float32")
+    dropout_x = None
     augmented_count = 0
     if config.training.use_context_dropout and "dropout_context_embeddings" in data:
-        dropout_x = np.asarray(data["dropout_context_embeddings"], dtype="float32")
-        if dropout_x.shape == x.shape:
-            x = np.concatenate([x, dropout_x], axis=0)
-            y = np.concatenate([y, y], axis=0)
+        candidate = np.asarray(data["dropout_context_embeddings"], dtype="float32")
+        if candidate.shape == x.shape:
+            dropout_x = candidate
             augmented_count = int(len(dropout_x))
     metadata = {
         "embedding_path": str(embeddings_path),
@@ -88,7 +90,7 @@ def _load_embedding_tensors(config: AppConfig) -> tuple[torch.Tensor, torch.Tens
         "augmented_context_count": augmented_count,
         "target_count": int(len(data["next_embeddings"])),
     }
-    return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.float32), metadata
+    return x, y, dropout_x, metadata
 
 
 def train_predictor(config: AppConfig, progress_callback: ProgressCallback | None = None) -> dict[str, Any]:
@@ -103,13 +105,13 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
     ensure_parent(history_path)
     ensure_parent(model_card_path)
 
-    x, y, data_metadata = _load_embedding_tensors(config)
-    if len(x) < 2:
+    base_x, base_y, dropout_x, data_metadata = _load_embedding_arrays(config)
+    if len(base_x) < 2:
         raise ValueError("At least two embedding pairs are required for train/validation split.")
 
-    indices = torch.randperm(len(x))
-    val_size = max(1, int(len(x) * config.training.val_ratio))
-    if val_size >= len(x):
+    indices = torch.randperm(len(base_x))
+    val_size = max(1, int(len(base_x) * config.training.val_ratio))
+    if val_size >= len(base_x):
         val_size = 1
     val_idx = indices[:val_size]
     train_idx = indices[val_size:]
@@ -117,18 +119,28 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
         train_idx = indices[:1]
         val_idx = indices[1:] if len(indices) > 1 else indices[:1]
 
+    train_x_np = base_x[train_idx.numpy()]
+    train_y_np = base_y[train_idx.numpy()]
+    if dropout_x is not None:
+        train_x_np = np.concatenate([train_x_np, dropout_x[train_idx.numpy()]], axis=0)
+        train_y_np = np.concatenate([train_y_np, base_y[train_idx.numpy()]], axis=0)
+    train_x = torch.tensor(train_x_np, dtype=torch.float32)
+    train_y = torch.tensor(train_y_np, dtype=torch.float32)
+    val_x_cpu = torch.tensor(base_x[val_idx.numpy()], dtype=torch.float32)
+    val_y_cpu = torch.tensor(base_y[val_idx.numpy()], dtype=torch.float32)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     train_loader = DataLoader(
-        TensorDataset(x[train_idx], y[train_idx]),
+        TensorDataset(train_x, train_y),
         batch_size=config.training.batch_size,
         shuffle=True,
         pin_memory=device.type == "cuda",
     )
-    val_x = x[val_idx].to(device)
-    val_y = y[val_idx].to(device)
+    val_x = val_x_cpu.to(device)
+    val_y = val_y_cpu.to(device)
 
     train_config = _training_config_dict(config)
-    model = _make_jepa_model(dim=x.shape[1], config_dict=train_config).to(device)
+    model = _make_jepa_model(dim=base_x.shape[1], config_dict=train_config).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.training.learning_rate,
@@ -143,6 +155,8 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
     param_count = count_parameters(model)
     mse_weight = float(config.training.loss_mse_weight)
     norm_weight = float(config.training.loss_norm_weight)
+    normalize_prediction = bool(config.training.normalize_prediction)
+    effective_norm_weight = 0.0 if normalize_prediction else norm_weight
     logger.info("Training JEPA-inspired predictor for %s epochs on %s with %s params", config.training.epochs, device, param_count)
 
     for epoch in range(1, config.training.epochs + 1):
@@ -164,6 +178,7 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
                     batch_y,
                     mse_weight=mse_weight,
                     norm_weight=norm_weight,
+                    normalize_prediction=normalize_prediction,
                 )
             scaler.scale(loss).backward()
             if config.training.gradient_clip_norm > 0:
@@ -186,6 +201,7 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
                 val_y,
                 mse_weight=mse_weight,
                 norm_weight=norm_weight,
+                normalize_prediction=normalize_prediction,
             )
             val_cosine = F.cosine_similarity(val_pred, val_y, dim=1).mean().item()
             val_pred_norm = val_pred.norm(dim=1).mean().item()
@@ -197,6 +213,7 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
             "train_norm_regularization": float(np.mean(norm_losses)) if norm_losses else 0.0,
             "train_pred_target_cosine": float(np.mean(pred_cosines)) if pred_cosines else 0.0,
             "train_predicted_vector_norm": float(np.mean(pred_norms)) if pred_norms else 0.0,
+            "effective_loss_norm_weight": effective_norm_weight,
             "val_loss": float(val_loss.detach().cpu()),
             "val_cosine_loss": float(val_cosine_loss.detach().cpu()),
             "val_norm_mse": float(val_mse.detach().cpu()),
@@ -226,15 +243,19 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
                     "checkpoint_version": 3,
                     "predictor_class": "JEPAPredictor",
                     "model_state": cpu_state,
-                    "dim": int(x.shape[1]),
+                    "dim": int(base_x.shape[1]),
                     "config": train_config,
+                    "effective_loss_norm_weight": effective_norm_weight,
                     "parameter_count": param_count,
                     "best_val_cosine": best_val,
                     "best_epoch": best_epoch,
                     "data_metadata": data_metadata,
-                    "dataset_size": int(len(x)),
+                    "train_idx": train_idx.cpu().numpy().astype("int64").tolist(),
+                    "val_idx": val_idx.cpu().numpy().astype("int64").tolist(),
+                    "dataset_size": int(len(base_x)),
                     "train_size": int(len(train_idx)),
                     "val_size": int(len(val_idx)),
+                    "augmented_train_size": int(len(train_x)),
                 },
                 checkpoint_path,
             )
@@ -255,9 +276,11 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
         "parameter_count": param_count,
         "checkpoint_path": str(checkpoint_path),
         **data_metadata,
-        "dataset_size": int(len(x)),
+        "effective_loss_norm_weight": effective_norm_weight,
+        "dataset_size": int(len(base_x)),
         "train_size": int(len(train_idx)),
         "val_size": int(len(val_idx)),
+        "augmented_train_size": int(len(train_x)),
         "training_config": train_config,
         "epochs": epochs,
     }

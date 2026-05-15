@@ -4,6 +4,7 @@ import json
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -18,22 +19,21 @@ def _normalize(vectors: np.ndarray) -> np.ndarray:
     return (vectors / norms).astype("float32")
 
 
-def build_next_scene_index(config: AppConfig) -> Path:
+def _build_index(config: AppConfig, index_path: Path, vector_key: str) -> Path:
     embeddings_path = resolve_path(config, config.data.embeddings_path)
-    index_path = resolve_path(config, config.data.faiss_index_path)
     ensure_parent(index_path)
     if not embeddings_path.exists():
         raise FileNotFoundError(f"Embeddings file not found: {embeddings_path}")
     if config.data.reuse_existing and index_path.exists() and index_path.stat().st_mtime >= embeddings_path.stat().st_mtime:
         return index_path
     data = np.load(embeddings_path)
-    next_embeddings = _normalize(data["next_embeddings"])
+    embeddings = _normalize(data[vector_key])
     try:
         import faiss  # type: ignore
     except ImportError as exc:
         raise RuntimeError("faiss-cpu is required to build the vector index. Install requirements.txt.") from exc
-    index = faiss.IndexFlatIP(next_embeddings.shape[1])
-    index.add(next_embeddings)
+    index = faiss.IndexFlatIP(embeddings.shape[1])
+    index.add(embeddings)
     with tempfile.NamedTemporaryFile(suffix=".faiss", delete=False) as tmp:
         tmp_path = Path(tmp.name)
     try:
@@ -45,12 +45,19 @@ def build_next_scene_index(config: AppConfig) -> Path:
     return index_path
 
 
-def retrieve_by_vector(config: AppConfig, query_vector: np.ndarray, top_k: int) -> list[dict]:
-    index_path = resolve_path(config, config.data.faiss_index_path)
+def build_current_context_index(config: AppConfig) -> Path:
+    return _build_index(config, resolve_path(config, config.data.current_context_index_path), "current_embeddings")
+
+
+def build_next_scene_index(config: AppConfig) -> Path:
+    return _build_index(config, resolve_path(config, config.data.faiss_index_path), "next_embeddings")
+
+
+def _load_index_results(config: AppConfig, query_vector: np.ndarray, top_k: int, index_path: Path, build_fn: Any) -> list[dict]:
     embeddings_path = resolve_path(config, config.data.embeddings_path)
     filtered_path = resolve_path(config, config.data.filtered_path)
     if not index_path.exists():
-        build_next_scene_index(config)
+        build_fn(config)
     try:
         import faiss  # type: ignore
     except ImportError as exc:
@@ -75,6 +82,39 @@ def retrieve_by_vector(config: AppConfig, query_vector: np.ndarray, top_k: int) 
     return result
 
 
-def retrieve_by_text(config: AppConfig, client: OllamaClient, text: str, top_k: int) -> list[dict]:
+def retrieve_current_context_by_vector(config: AppConfig, query_vector: np.ndarray, top_k: int) -> list[dict]:
+    return _load_index_results(
+        config,
+        query_vector,
+        top_k,
+        resolve_path(config, config.data.current_context_index_path),
+        build_current_context_index,
+    )
+
+
+def retrieve_current_context_by_text(config: AppConfig, client: OllamaClient, text: str, top_k: int) -> list[dict]:
     vector = client.embed([text])[0]
-    return retrieve_by_vector(config, vector, top_k)
+    return retrieve_current_context_by_vector(config, vector, top_k)
+
+
+def retrieve_next_by_vector(config: AppConfig, query_vector: np.ndarray, top_k: int) -> list[dict]:
+    return _load_index_results(
+        config,
+        query_vector,
+        top_k,
+        resolve_path(config, config.data.faiss_index_path),
+        build_next_scene_index,
+    )
+
+
+def retrieve_next_by_text(config: AppConfig, client: OllamaClient, text: str, top_k: int) -> list[dict]:
+    vector = client.embed([text])[0]
+    return retrieve_next_by_vector(config, vector, top_k)
+
+
+def retrieve_by_vector(config: AppConfig, query_vector: np.ndarray, top_k: int) -> list[dict]:
+    return retrieve_next_by_vector(config, query_vector, top_k)
+
+
+def retrieve_by_text(config: AppConfig, client: OllamaClient, text: str, top_k: int) -> list[dict]:
+    return retrieve_next_by_text(config, client, text, top_k)

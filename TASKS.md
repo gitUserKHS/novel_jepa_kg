@@ -37,6 +37,8 @@
 - [x] Add dropout, weight decay, gradient clipping, and early stopping.
 - [x] Refactor predictor into JEPA-inspired context/target representation prediction modules.
 - [x] Add context/field dropout, delta prediction, output normalization, and configurable representation loss.
+- [x] Add inference current-scene analyzer to reduce train/inference context mismatch.
+- [x] Save train/validation indices for validation-first planner diagnostics.
 
 ## Phase 4 - Generation
 
@@ -54,6 +56,7 @@
 - [x] Stream generated prose into the UI during generation.
 - [x] Apply selected genre scene presets to LLM-only, RAG, JEPA, and Chat generation.
 - [x] Build compact JEPA planner beat cards from predicted target retrieval.
+- [x] Split RAG baselines into current-context index and next-scene index retrieval.
 
 ## Phase 4.5 - Chat Memory
 
@@ -72,6 +75,7 @@
 - [x] Simple contradiction checklist.
 - [x] Add lexical diversity, novelty, progression, length fit, dialogue ratio, sentence stats, ranking, and pairwise output diversity.
 - [x] Add planner diagnostics to comparison reports.
+- [x] Report validation-first planner metrics and RAG-current/RAG-next/JEPA-next baseline overlap.
 - [ ] Optional LLM judge.
 - [x] Markdown report export.
 

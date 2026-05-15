@@ -204,19 +204,27 @@ This project is not a faithful reproduction of Meta JEPA. It is a JEPA-inspired 
 - Trainable PyTorch MLP predictor: predicts the next narrative-state representation from structured context.
 - FAISS: retrieves likely target scene directions from the predicted representation.
 - Local LLM: writes the final Korean prose from the beat card and retrieved direction.
+- Inference scene analyzer: structures the raw current scene into summary, emotion, conflict, state, plot function, active characters, unresolved clues, and next pressure before embedding.
 
 The comparison modes mean:
 
 - LLM-only: tests pure local LLM generation.
-- RAG + LLM: retrieves examples from the current scene/context representation.
-- JEPA-inspired Planner + RAG + LLM: predicts a likely next-state representation first, then retrieves target-scene directions.
+- RAG + LLM: retrieves examples from the current-context index and uses the matched samples' next scenes.
+- RAG next-index baseline: embeds the current context directly against the next-scene target index.
+- JEPA-inspired Planner + RAG + LLM: predicts a likely next-state representation first, then retrieves target-scene directions from the next-scene index.
+
+Planner diagnostics report validation-first metrics. The report keeps all-sample metrics as `all_*`, but the headline `pred_target_cosine`, `retrieval_hit_at_k`, `retrieval_mean_score`, and transition diversity are taken from the saved validation split when available. This avoids presenting train-set retrieval as generalization.
+
+When `normalize_prediction=True`, cosine alignment is the main objective and norm regularization is disabled internally (`effective_loss_norm_weight=0`). Norm regularization is meaningful only for `normalize_prediction=False` experiments.
 
 ## Current Pipeline Behavior
 
 - Synthetic samples are diversified with genre-specific scene presets. Each built-in genre has multiple preset situations with plot function, emotion arc, conflict, motif, relationship tension, scene goal, and next hook.
 - The embedding stage builds structured context encoder input from world, character, current scene, and preset metadata, and target encoder input from the next narrative state.
 - Training supports context/field dropout, delta prediction, output normalization, and a JEPA-style representation prediction loss.
-- Evaluation reports include a `Planner Diagnostics` section with predicted-target cosine, retrieval hit@k, retrieval overlap, diversity, and predicted vector norm.
+- Training checkpoints store the base-sample train/validation indices used by planner diagnostics.
+- Evaluation reports include a `Planner Diagnostics` section with validation predicted-target cosine, retrieval hit@k, RAG-current/RAG-next/JEPA-next baselines, retrieval overlap, diversity, and predicted vector norm.
+- The project builds both `current_context.faiss` and `next_scene.faiss` indexes.
 - Project, Dataset, Generate, and Chat tabs can apply the same scene preset idea, so the training data and generated prose can follow matching genre situations.
 - Changing genre resets stale scene preset selections to `자동 순환` and refreshes one-click demo inputs with matching world, characters, and previous scene defaults.
 - Project and Dataset tabs provide genre presets plus a custom genre option.

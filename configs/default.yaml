@@ -20,6 +20,7 @@ data:
   sample_cache_path: "data/synthetic/sample_cache.jsonl"
   embeddings_path: "data/embeddings/scenes.npz"
   embedding_cache_path: "data/embeddings/embedding_cache.jsonl"
+  current_context_index_path: "data/indexes/current_context.faiss"
   faiss_index_path: "data/indexes/next_scene.faiss"
   min_summary_chars: 20
   max_retries: 3
@@ -55,6 +56,7 @@ generation:
   max_tokens: 1600
   temperature: 0.8
   enable_consistency_repair: true
+  use_scene_analyzer: true
   style: "한국어 웹소설 문체. 감정선은 선명하게, 장면 전환은 자연스럽게."
 
 evaluation:
@@ -64,8 +66,9 @@ evaluation:
   target_min_chars: 600
   target_max_chars: 1600
   planner_ablation_modes:
-    - "rag_current_embedding"
-    - "jepa_predicted_target"
+    - "rag_current_index"
+    - "rag_next_index"
+    - "jepa_next_index"
     - "jepa_delta_predictor"
     - "jepa_no_context_dropout"
 
