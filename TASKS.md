@@ -57,6 +57,7 @@
 - [x] Apply selected genre scene presets to LLM-only, RAG, JEPA, and Chat generation.
 - [x] Build compact JEPA planner beat cards from predicted target retrieval.
 - [x] Split RAG baselines into current-context index and next-scene index retrieval.
+- [x] Add synthetic sample diversity axes for JEPA planner training.
 
 ## Phase 4.5 - Chat Memory
 
@@ -89,6 +90,7 @@
 - [x] Add scene preset controls to Project, Dataset, Generate, and Chat tabs.
 - [x] Reset scene presets and one-click defaults when the selected genre changes.
 - [x] Add Ollama partial-offload controls and runtime VRAM visibility.
+- [x] Add sample-count recommendations, diversity coverage reporting, and candidate-pool retry generation.
 - [x] Store JEPA predictor training metadata with the checkpoint.
 - [x] Add JEPA-inspired smoke checks for builders, loss, retrieval, and dry-run pipeline.
 - [x] Add final demo report.

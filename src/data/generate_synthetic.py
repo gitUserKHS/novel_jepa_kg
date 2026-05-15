@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
+from src.data.diversity import diversity_report_from_samples
 from src.data.validate_jsonl import parse_json_object, validate_sample
 from src.llm.ollama_client import OllamaClient
 from src.llm.prompts import compact_plan_text, diversity_plan, synthetic_sample_prompt
@@ -47,7 +49,7 @@ def _write_cache(path: Path, cache: dict[str, dict[str, Any]]) -> None:
 def _cache_key(config: AppConfig, genre: str, sample_id: int, plan: dict[str, str]) -> str:
     return _json_hash(
         {
-            "schema": "scene-transition-v3-genre-presets",
+            "schema": "scene-transition-v4-diversity-axes",
             "chat_model": config.ollama.chat_model,
             "genre": genre,
             "sample_id": sample_id,
@@ -78,7 +80,7 @@ def generate_synthetic_dataset(
     genre: str,
     count: int,
     scene_preset: str | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     output_path = resolve_path(config, config.data.synthetic_path)
     cache_path = resolve_path(config, config.data.sample_cache_path)
     ensure_parent(output_path)
@@ -88,10 +90,15 @@ def generate_synthetic_dataset(
     reused = 0
     generated = 0
     failures = 0
-    logger.info("Generating %s synthetic samples at %s", count, output_path)
+    candidate_limit = max(count, math.ceil(count * max(1.0, config.data.synthetic_candidate_multiplier)))
+    logger.info("Generating %s synthetic samples at %s with candidate limit %s", count, output_path, candidate_limit)
 
     selected_samples: list[dict[str, Any]] = []
-    for sample_id in range(1, count + 1):
+    candidates_checked = 0
+    for sample_id in range(1, candidate_limit + 1):
+        if len(selected_samples) >= count:
+            break
+        candidates_checked += 1
         plan = diversity_plan(sample_id, config.data.diversity_buckets, genre=genre, preset_label=scene_preset)
         key = _cache_key(config, genre, sample_id, plan)
         cached = cache.get(key)
@@ -109,8 +116,8 @@ def generate_synthetic_dataset(
                 text = client.chat(
                     synthetic_sample_prompt(genre, sample_id, plan),
                     system="당신은 한국어 서사 데이터셋을 JSON으로만 작성하는 도우미입니다.",
-                    temperature=0.95,
-                    max_tokens=1400,
+                    temperature=config.data.synthetic_temperature,
+                    max_tokens=config.data.synthetic_max_tokens,
                     json_mode=True,
                 )
                 payload = parse_json_object(text)
@@ -133,4 +140,13 @@ def generate_synthetic_dataset(
             f.write(json.dumps(sample, ensure_ascii=False) + "\n")
     if config.data.reuse_existing:
         _write_cache(cache_path, cache)
-    return {"requested": count, "written": written, "generated": generated, "reused": reused, "failures": failures}
+    return {
+        "requested": count,
+        "candidate_limit": candidate_limit,
+        "candidates_checked": candidates_checked,
+        "written": written,
+        "generated": generated,
+        "reused": reused,
+        "failures": failures,
+        "diversity": diversity_report_from_samples(selected_samples),
+    }

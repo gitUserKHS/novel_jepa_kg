@@ -123,7 +123,7 @@ Open the `Project` tab.
 
 1. Pick a genre preset, or choose `직접 입력` and enter your own genre.
 2. Leave `Scene preset` on `자동 순환` for a first run. The preset list resets automatically when the genre changes.
-3. Set `Samples` to `8` to `20` for a first real test.
+3. Use the sample recommendation row in the UI. `quick` is for smoke checks, `balanced` is the default JEPA diagnostic range, `research` is better for a graduation-project comparison, and `robust` is for slower but stabler retrieval experiments.
 4. Turn on `Create fresh dataset for this run` when you want to ignore the synthetic sample cache and make a new dataset.
 5. Click `Run Full Pipeline`. The app fills genre-matched world, characters, and previous scene defaults automatically.
 
@@ -231,6 +231,10 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - Project and Dataset tabs provide genre presets plus a custom genre option.
 - The sidebar can load installed Ollama models from `/api/tags`, and Ollama API errors include the endpoint, model, HTTP status, and response detail.
 - Synthetic data generation requests Ollama JSON mode and extracts the first valid balanced JSON object if the model still adds surrounding text.
+- Synthetic samples now include explicit diversity axes: pacing, point-of-view distance, stakes scale, clue type, relationship shift, transition shape, and pressure source. These axes are stored in metadata and included in planner context text.
+- The Project and Dataset tabs show recommended sample counts plus diversity coverage. As a rule of thumb: quick runs use roughly 8-24 samples, balanced JEPA diagnostics use about 32-96, research demos use about 96-216, and robust experiments use 192+ depending on genre preset count.
+- Dataset generation uses a candidate multiplier. If some samples fail JSON/schema validation, the generator can try extra candidate ids without requiring a manual rerun.
+- Synthetic JSON generation defaults to a lower max token budget than prose generation to speed up sample creation while keeping the schema compact.
 - RAG/JEPA generation now feeds the LLM a compact beat card instead of dumping all retrieved context into prose.
 - `Prompt examples` limits how many retrieved examples enter the prompt, while `Retrieval top K` still controls the search pool.
 - Name consistency checks compare generated outputs against the character list and report unknown or likely misspelled names.

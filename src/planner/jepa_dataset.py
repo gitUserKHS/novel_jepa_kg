@@ -89,6 +89,17 @@ def build_context_text(
     scene = sample.get("scene_t", {})
     metadata = sample.get("metadata", {})
     preset_lines = _scene_preset_context(metadata)
+    plan = metadata.get("diversity_plan") or {}
+    preset_lines.extend(
+        [
+            _line("전개 리듬", plan.get("pacing")),
+            _line("위험 규모", plan.get("stakes_scale")),
+            _line("단서 유형", plan.get("clue_type")),
+            _line("관계 변화", plan.get("relationship_shift")),
+            _line("전이 형태", plan.get("transition_shape")),
+            _line("압박 원천", plan.get("pressure_source")),
+        ]
+    )
     if active_dropout and rng.random() < field_dropout_prob:
         preset_lines = [_line("프리셋", MASK_TOKEN)]
 

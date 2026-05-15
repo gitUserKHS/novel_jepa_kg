@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.data.diversity import enhance_diversity_plan
 from src.llm.scene_presets import compact_plan_text as compact_scene_plan_text
 from src.llm.scene_presets import resolve_scene_preset
 
@@ -113,11 +114,25 @@ def diversity_plan(
     genre: str | None = None,
     preset_label: str | None = None,
 ) -> dict[str, str]:
-    return resolve_scene_preset(genre, preset_label, sample_index=sample_index, bucket_count=bucket_count)
+    base_plan = resolve_scene_preset(genre, preset_label, sample_index=sample_index, bucket_count=bucket_count)
+    return enhance_diversity_plan(base_plan, sample_index)
 
 
 def synthetic_sample_prompt(genre: str, sample_index: int, plan: dict[str, str] | None = None) -> str:
-    selected = plan or diversity_plan(sample_index, genre=genre)
+    selected = dict(plan or diversity_plan(sample_index, genre=genre))
+    diversity_axis_text = " / ".join(
+        [
+            f"전개 리듬={selected.get('pacing', '느린 긴장 축적')}",
+            f"시점 거리={selected.get('pov_distance', '주인공 밀착')}",
+            f"위험 규모={selected.get('stakes_scale', '개인 비밀')}",
+            f"단서 유형={selected.get('clue_type', '물리 증거')}",
+            f"관계 변화={selected.get('relationship_shift', '불신 심화')}",
+            f"전이 형태={selected.get('transition_shape', '발견에서 선택으로')}",
+            f"압박 원천={selected.get('pressure_source', '시간 제한')}",
+        ]
+    )
+    selected["scene_goal"] = f"{selected.get('scene_goal', '')} / 다양성 조건: {diversity_axis_text}".strip(" /")
+    selected["next_hook"] = f"{selected.get('next_hook', '')} / 다음 전이 조건: {diversity_axis_text}".strip(" /")
     return f"""
 한국어 소설 장면 전환 학습 데이터를 JSON 한 개로 작성하세요. sample #{sample_index}
 
@@ -205,4 +220,18 @@ def report_header(outputs: dict[str, str]) -> str:
 
 
 def compact_plan_text(plan: dict[str, Any]) -> str:
-    return compact_scene_plan_text(plan)
+    base = compact_scene_plan_text(plan)
+    axes = [
+        str(plan[key])
+        for key in [
+            "pacing",
+            "pov_distance",
+            "stakes_scale",
+            "clue_type",
+            "relationship_shift",
+            "transition_shape",
+            "pressure_source",
+        ]
+        if plan.get(key)
+    ]
+    return " / ".join([base, *axes]) if axes else base

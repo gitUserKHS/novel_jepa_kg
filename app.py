@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from src.data.diversity import diversity_report_from_samples, training_scale_recommendations
 from src.data.filter_dataset import filter_jsonl
 from src.data.generate_synthetic import generate_synthetic_dataset
 from src.embedding.embed_scenes import embed_dataset
@@ -177,16 +178,45 @@ def read_jsonl(path: str) -> list[dict[str, Any]]:
 def flatten_samples(samples: list[dict[str, Any]]) -> pd.DataFrame:
     rows = []
     for idx, sample in enumerate(samples):
+        plan = sample.get("metadata", {}).get("diversity_plan") or {}
         rows.append(
             {
                 "id": sample.get("id", idx),
                 "genre": sample.get("world", {}).get("genre", ""),
+                "preset": plan.get("label", sample.get("metadata", {}).get("scene_preset_label", "")),
+                "pacing": plan.get("pacing", ""),
+                "clue": plan.get("clue_type", ""),
+                "transition": plan.get("transition_shape", ""),
                 "current": sample.get("scene_t", {}).get("summary", ""),
                 "next": sample.get("scene_t_plus_1", {}).get("summary", ""),
                 "emotion": sample.get("scene_t_plus_1", {}).get("emotion", ""),
             }
         )
     return pd.DataFrame(rows)
+
+
+def render_diversity_report(report: dict[str, Any]) -> None:
+    if not report or not report.get("sample_count"):
+        st.caption("No diversity report yet.")
+        return
+    cols = st.columns(3)
+    cols[0].metric("samples", report.get("sample_count", 0))
+    cols[1].metric("unique signatures", report.get("unique_signatures", 0))
+    cols[2].metric("signature ratio", f"{report.get('signature_ratio', 0.0):.2f}")
+    rows = []
+    for axis, detail in (report.get("axes") or {}).items():
+        rows.append(
+            {
+                "axis": axis,
+                "unique": detail.get("unique", 0),
+                "coverage": f"{detail.get('coverage_ratio', 0.0):.2f}",
+                "top": " / ".join(
+                    f"{item.get('value')} ({item.get('count')})" for item in detail.get("top_values", [])[:3]
+                ),
+            }
+        )
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 
 def format_size(path: Path) -> str:
@@ -459,6 +489,45 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
     output_root = st.sidebar.text_input("Output directory", ".")
     dry_run = st.sidebar.checkbox("Dry-run mode", value=True)
     config.data.reuse_existing = st.sidebar.checkbox("Reuse cached data", value=config.data.reuse_existing)
+    with st.sidebar.expander("Synthetic data controls", expanded=False):
+        config.data.diversity_buckets = int(
+            st.number_input(
+                "Diversity preset buckets",
+                min_value=1,
+                max_value=64,
+                value=config.data.diversity_buckets,
+                step=1,
+            )
+        )
+        config.data.synthetic_candidate_multiplier = float(
+            st.number_input(
+                "Candidate multiplier",
+                min_value=1.0,
+                max_value=3.0,
+                value=float(config.data.synthetic_candidate_multiplier),
+                step=0.05,
+                help="Allows extra candidate ids when samples fail validation or generation.",
+            )
+        )
+        config.data.synthetic_temperature = float(
+            st.number_input(
+                "Synthetic temperature",
+                min_value=0.1,
+                max_value=1.5,
+                value=float(config.data.synthetic_temperature),
+                step=0.05,
+            )
+        )
+        config.data.synthetic_max_tokens = int(
+            st.number_input(
+                "Synthetic max tokens",
+                min_value=512,
+                max_value=4096,
+                value=config.data.synthetic_max_tokens,
+                step=128,
+                help="Lower values speed up JSON sample generation but can increase truncation risk.",
+            )
+        )
     with st.sidebar.expander("Generation controls", expanded=False):
         config.generation.top_k = int(
             st.number_input("Retrieval top K", min_value=1, max_value=20, value=config.generation.top_k, step=1)
@@ -498,7 +567,8 @@ def run_dataset_stage(
     raw = generate_synthetic_dataset(config, client, genre=genre, count=count, scene_preset=scene_preset_label)
     filtered = filter_jsonl(config)
     read_jsonl.clear()
-    return {"generated": raw, "filtered": filtered}
+    filtered_samples = read_jsonl(str(resolve_path(config, config.data.filtered_path)))
+    return {"generated": raw, "filtered": filtered, "diversity": diversity_report_from_samples(filtered_samples)}
 
 
 def run_generation_bundle(
@@ -741,7 +811,14 @@ def main() -> None:
             },
         )
         scene_preset_label = scene_preset_selector("Scene preset", genre, "project")
-        sample_count = st.number_input("Samples", min_value=2, max_value=100, value=8, step=1)
+        sample_plan = training_scale_recommendations(genre, scene_preset_label, config.data.diversity_buckets)
+        plan_cols = st.columns(4)
+        plan_cols[0].metric("quick", sample_plan["quick"])
+        plan_cols[1].metric("balanced", sample_plan["balanced"])
+        plan_cols[2].metric("research", sample_plan["research"])
+        plan_cols[3].metric("robust", sample_plan["robust"])
+        st.caption(sample_plan["rationale"])
+        sample_count = st.number_input("Samples", min_value=2, max_value=500, value=sample_plan["quick"], step=1)
         fresh_dataset = st.checkbox(
             "Create fresh dataset for this run",
             value=False,
@@ -775,11 +852,15 @@ def main() -> None:
                 run_summary["genre"] = genre
                 run_summary["scene_preset"] = scene_preset_label
                 run_summary["dataset"] = dataset_result
+                diversity = dataset_result.get("diversity", {})
                 dataset_detail = (
                     f"{cache_summary('samples', dataset_result['generated'])} | "
-                    f"kept={dataset_result['filtered']['kept']} | rejected={dataset_result['filtered']['rejected']}"
+                    f"kept={dataset_result['filtered']['kept']} | rejected={dataset_result['filtered']['rejected']} | "
+                    f"diversity={diversity.get('unique_signatures', 0)} signatures"
                 )
                 update_stage(stage_rows, stage_table, 0, "done", dataset_detail)
+                with st.expander("Dataset diversity coverage", expanded=False):
+                    render_diversity_report(diversity)
                 artifact_table.dataframe(artifact_status(config), hide_index=True, width="stretch")
                 progress.progress(16)
 
@@ -895,7 +976,14 @@ def main() -> None:
         st.subheader("Dataset")
         genre = genre_selector("Dataset genre", "한국형 판타지 미스터리", "dataset_genre")
         scene_preset_label = scene_preset_selector("Dataset scene preset", genre, "dataset")
-        count = st.number_input("Number of samples", min_value=1, max_value=500, value=10, step=1)
+        sample_plan = training_scale_recommendations(genre, scene_preset_label, config.data.diversity_buckets)
+        cols = st.columns(4)
+        cols[0].metric("quick", sample_plan["quick"])
+        cols[1].metric("balanced", sample_plan["balanced"])
+        cols[2].metric("research", sample_plan["research"])
+        cols[3].metric("robust", sample_plan["robust"])
+        st.caption(sample_plan["rationale"])
+        count = st.number_input("Number of samples", min_value=1, max_value=1000, value=sample_plan["quick"], step=1)
         if st.button("Generate dataset"):
             try:
                 result = run_dataset_stage(config, client, genre, int(count), scene_preset_label)
@@ -905,6 +993,11 @@ def main() -> None:
                 cols[1].metric("new", generated.get("generated", 0))
                 cols[2].metric("reused", generated.get("reused", 0))
                 cols[3].metric("kept", result["filtered"]["kept"])
+                st.caption(
+                    f"Checked {generated.get('candidates_checked', generated.get('written', 0))} "
+                    f"of {generated.get('candidate_limit', generated.get('requested', 0))} candidate ids."
+                )
+                render_diversity_report(result.get("diversity", {}))
                 st.success(
                     "Generated "
                     f"{generated['written']} samples "
@@ -914,6 +1007,8 @@ def main() -> None:
             except Exception as exc:  # noqa: BLE001
                 show_error("Dataset generation failed", exc)
         samples = read_jsonl(str(resolve_path(config, config.data.filtered_path)))
+        with st.expander("Current filtered dataset diversity", expanded=False):
+            render_diversity_report(diversity_report_from_samples(samples))
         st.dataframe(flatten_samples(samples), width="stretch")
 
     with tabs[3]:
@@ -955,6 +1050,15 @@ def main() -> None:
             st.warning(f"Could not inspect torch device: {exc}")
         st.info("Planner type: JEPA-inspired latent transition planner with frozen text encoders and a trainable PyTorch predictor.")
         st.caption(f"Scene analyzer for inference: {'on' if config.generation.use_scene_analyzer else 'off'}")
+        filtered_samples = read_jsonl(str(resolve_path(config, config.data.filtered_path)))
+        train_cols = st.columns(3)
+        train_cols[0].metric("filtered samples", len(filtered_samples))
+        train_cols[1].metric("recommended minimum", 32)
+        train_cols[2].metric("research target", 96)
+        if len(filtered_samples) < 32:
+            st.warning("For JEPA diagnostics, generate more samples first. 8-24 is fine for smoke tests, but 32+ is a better minimum.")
+        with st.expander("Training data diversity", expanded=False):
+            render_diversity_report(diversity_report_from_samples(filtered_samples))
         config.training.epochs = int(st.number_input("Epochs", min_value=1, max_value=500, value=config.training.epochs))
         config.training.batch_size = int(
             st.number_input("Batch size", min_value=1, max_value=512, value=config.training.batch_size)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -11,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.filter_dataset import filter_jsonl
+from src.data.diversity import diversity_report_from_samples, training_scale_recommendations
 from src.data.generate_synthetic import generate_synthetic_dataset
 from src.embedding.embed_scenes import embed_dataset
 from src.embedding.vector_store import build_current_context_index, build_next_scene_index, retrieve_by_vector
@@ -67,6 +69,8 @@ def test_builders_and_loss() -> None:
     assert "숨겨진 실험실 좌표를 얻는다" not in context
     assert "다음 장면 요약" in target
     assert MASK_TOKEN in dropped
+    scale = training_scale_recommendations("?쒓뎅??SF 誘몄뒪?곕━", None, 5)
+    assert scale["quick"] >= 8
 
     model = JEPAPredictor(dim=384, hidden_dim=128, num_layers=3)
     x = torch.randn(2, 384)
@@ -137,8 +141,18 @@ def test_dry_run_pipeline() -> None:
 
         generated = generate_synthetic_dataset(config, client, "한국형 SF 미스터리", 4)
         assert generated["written"] == 4
+        assert generated["candidate_limit"] >= 4
+        assert generated["diversity"]["unique_signatures"] >= 1
         filtered = filter_jsonl(config)
         assert filtered["kept"] >= 2
+        samples = [
+            json.loads(line)
+            for line in resolve_path(config, config.data.filtered_path).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        report = diversity_report_from_samples(samples)
+        assert report["sample_count"] == filtered["kept"]
+        assert report["axes"]["transition_shape"]["unique"] >= 1
         embedded = embed_dataset(config, client)
         assert embedded["count"] >= 2
         current_index = build_current_context_index(config)

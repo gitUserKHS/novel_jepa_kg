@@ -38,6 +38,9 @@ class DataConfig(BaseModel):
     max_retries: int = 3
     reuse_existing: bool = True
     diversity_buckets: int = 12
+    synthetic_temperature: float = 0.9
+    synthetic_max_tokens: int = 1200
+    synthetic_candidate_multiplier: float = 1.25
 
 
 class TrainingConfig(BaseModel):
