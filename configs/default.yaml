@@ -41,6 +41,13 @@ training:
   early_stopping_patience: 8
   gradient_clip_norm: 1.0
   use_amp: false
+  use_context_dropout: true
+  context_dropout_prob: 0.15
+  field_dropout_prob: 0.20
+  normalize_prediction: true
+  predict_delta: true
+  loss_mse_weight: 0.05
+  loss_norm_weight: 0.001
 
 generation:
   top_k: 5
@@ -56,6 +63,11 @@ evaluation:
   report_dir: "reports/runs"
   target_min_chars: 600
   target_max_chars: 1600
+  planner_ablation_modes:
+    - "rag_current_embedding"
+    - "jepa_predicted_target"
+    - "jepa_delta_predictor"
+    - "jepa_no_context_dropout"
 
 chat:
   session_dir: "data/sessions"

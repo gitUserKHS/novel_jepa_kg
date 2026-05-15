@@ -1,1 +1,1 @@
-"""JEPA-inspired latent predictor."""
+"""JEPA-inspired latent transition planner."""

@@ -277,9 +277,31 @@ def cache_summary(label: str, data: dict[str, Any]) -> str:
         parts.append(f"new_vectors={data.get('new_vectors', 0)}")
     if "reused_vectors" in data:
         parts.append(f"cached_vectors={data.get('reused_vectors', 0)}")
+    if "dropout_context_vectors" in data:
+        parts.append(f"context_dropout={data.get('dropout_context_vectors', 0)}")
     if data.get("reused_file"):
         parts.append("file=reused")
     return " | ".join(parts)
+
+
+def retrieval_preview_rows(retrieved: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for idx, item in enumerate(retrieved, start=1):
+        sample = item.get("sample", {})
+        next_scene = sample.get("scene_t_plus_1", {})
+        metadata = sample.get("metadata", {})
+        rows.append(
+            {
+                "rank": idx,
+                "score": round(float(item.get("score", 0.0)), 4),
+                "sample_id": sample.get("id", ""),
+                "preset": metadata.get("scene_preset_label", ""),
+                "summary": next_scene.get("summary", ""),
+                "emotion": next_scene.get("emotion", ""),
+                "conflict": next_scene.get("conflict", ""),
+            }
+        )
+    return rows
 
 
 def make_stream_callback(placeholder: Any) -> Callable[[str], None]:
@@ -856,6 +878,7 @@ def main() -> None:
                 st.info(f"Training device: CPU | torch {torch.__version__}")
         except Exception as exc:  # noqa: BLE001
             st.warning(f"Could not inspect torch device: {exc}")
+        st.info("Planner type: JEPA-inspired latent transition planner with frozen text encoders and a trainable PyTorch predictor.")
         config.training.epochs = int(st.number_input("Epochs", min_value=1, max_value=500, value=config.training.epochs))
         config.training.batch_size = int(
             st.number_input("Batch size", min_value=1, max_value=512, value=config.training.batch_size)
@@ -887,6 +910,41 @@ def main() -> None:
                 )
             )
             config.training.use_amp = st.checkbox("Use AMP on CUDA", value=config.training.use_amp)
+            config.training.predict_delta = st.checkbox("Predict delta", value=config.training.predict_delta)
+            config.training.normalize_prediction = st.checkbox("Normalize prediction", value=config.training.normalize_prediction)
+        with st.expander("JEPA-inspired planner options", expanded=False):
+            config.training.use_context_dropout = st.checkbox(
+                "Use context dropout",
+                value=config.training.use_context_dropout,
+            )
+            config.training.context_dropout_prob = float(
+                st.number_input(
+                    "Context dropout probability",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=config.training.context_dropout_prob,
+                    step=0.05,
+                )
+            )
+            config.training.field_dropout_prob = float(
+                st.number_input(
+                    "Field dropout probability",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=config.training.field_dropout_prob,
+                    step=0.05,
+                )
+            )
+            config.training.loss_mse_weight = float(
+                st.number_input("Loss MSE weight", min_value=0.0, max_value=1.0, value=config.training.loss_mse_weight, format="%0.4f")
+            )
+            config.training.loss_norm_weight = float(
+                st.number_input("Loss norm weight", min_value=0.0, max_value=0.1, value=config.training.loss_norm_weight, format="%0.4f")
+            )
+        model_card_path = resolve_path(config, "checkpoints/predictor/model_card.json")
+        if model_card_path.exists():
+            with st.expander("Latest model card", expanded=False):
+                st.json(json.loads(model_card_path.read_text(encoding="utf-8")))
         if st.button("Train predictor"):
             try:
                 train_progress = st.progress(0)
@@ -900,11 +958,16 @@ def main() -> None:
                     total = int(row["total_epochs"])
                     train_progress.progress(int(100 * epoch / max(1, total)))
                     train_status.info(
-                        f"epoch={epoch}/{total} | val_cosine={row['val_cosine']:.4f} | "
+                        f"epoch={epoch}/{total} | pred_target_cosine={row.get('val_pred_target_cosine', row['val_cosine']):.4f} | "
                         f"best={row['best_val_cosine']:.4f}"
                     )
                     train_df = pd.DataFrame(train_points)
-                    live_chart.line_chart(train_df.set_index("epoch")[["train_loss", "val_loss", "val_cosine"]])
+                    chart_cols = [
+                        col
+                        for col in ["train_loss", "val_loss", "val_pred_target_cosine", "val_predicted_vector_norm"]
+                        if col in train_df.columns
+                    ]
+                    live_chart.line_chart(train_df.set_index("epoch")[chart_cols])
 
                 history = train_predictor(config, progress_callback=on_train_epoch)
                 train_status.success("Training completed")
@@ -913,8 +976,13 @@ def main() -> None:
                     f"({history.get('parameter_count', 0):,} params, device={history.get('device')})"
                 )
                 history_df = pd.DataFrame(history["epochs"])
+                chart_cols = [
+                    col
+                    for col in ["train_loss", "val_loss", "val_pred_target_cosine", "val_predicted_vector_norm"]
+                    if col in history_df.columns
+                ]
                 st.plotly_chart(
-                    px.line(history_df, x="epoch", y=["train_loss", "val_loss", "val_cosine"]),
+                    px.line(history_df, x="epoch", y=chart_cols),
                     width="stretch",
                 )
             except Exception as exc:  # noqa: BLE001
@@ -946,6 +1014,7 @@ def main() -> None:
             try:
                 live_output = st.empty()
                 stream_callback = make_stream_callback(live_output)
+                generation_details: dict[str, Any] = {}
                 if mode == "LLM only":
                     output = generate_llm_only(
                         config,
@@ -957,7 +1026,7 @@ def main() -> None:
                         scene_preset=scene_preset,
                     )
                 elif mode == "RAG + LLM":
-                    output = generate_with_rag(
+                    result = generate_with_rag(
                         config,
                         client,
                         world,
@@ -965,9 +1034,12 @@ def main() -> None:
                         previous_scene,
                         stream_callback=stream_callback,
                         scene_preset=scene_preset,
+                        return_details=True,
                     )
+                    output = str(result["text"])
+                    generation_details = result.get("rag", {})
                 else:
-                    output = generate_with_jepa(
+                    result = generate_with_jepa(
                         config,
                         client,
                         world,
@@ -975,8 +1047,20 @@ def main() -> None:
                         previous_scene,
                         stream_callback=stream_callback,
                         scene_preset=scene_preset,
+                        return_details=True,
                     )
+                    output = str(result["text"])
+                    generation_details = result.get("planner", {})
                 live_output.markdown(output)
+                if generation_details:
+                    st.markdown("#### Retrieval / Planner diagnostics")
+                    if generation_details.get("direction"):
+                        st.info(f"Predicted direction: {generation_details['direction']}")
+                    if "predicted_vector_norm" in generation_details:
+                        st.metric("predicted vector norm", f"{generation_details['predicted_vector_norm']:.4f}")
+                    retrieved = generation_details.get("retrieved", [])
+                    if retrieved:
+                        st.dataframe(pd.DataFrame(retrieval_preview_rows(retrieved)), hide_index=True, width="stretch")
             except Exception as exc:  # noqa: BLE001
                 show_error("Generation failed", exc)
 

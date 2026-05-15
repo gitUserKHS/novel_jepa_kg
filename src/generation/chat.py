@@ -48,7 +48,13 @@ def _retrieve_examples(
             examples = [item["sample"]["scene_t_plus_1"]["summary"] for item in retrieved[: config.generation.rag_context_limit]]
             return "검색된 유사 장면의 전환 논리를 참고해 다음 갈등을 확장한다.", examples, retrieved
 
-        predicted = predict_next_embedding(config, client, previous_scene)
+        predicted = predict_next_embedding(
+            config,
+            client,
+            previous_scene,
+            world=session.get("world", ""),
+            characters=session.get("characters", ""),
+        )
         retrieved = retrieve_by_vector(config, predicted, config.generation.top_k)
         examples = [item["sample"]["scene_t_plus_1"]["summary"] for item in retrieved[: config.generation.rag_context_limit]]
         direction = examples[0] if examples else "예측된 다음 장면 방향에 맞춰 갈등을 한 단계 진전시킨다."

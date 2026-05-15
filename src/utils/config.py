@@ -47,6 +47,13 @@ class TrainingConfig(BaseModel):
     early_stopping_patience: int = 8
     gradient_clip_norm: float = 1.0
     use_amp: bool = False
+    use_context_dropout: bool = True
+    context_dropout_prob: float = 0.15
+    field_dropout_prob: float = 0.20
+    normalize_prediction: bool = True
+    predict_delta: bool = True
+    loss_mse_weight: float = 0.05
+    loss_norm_weight: float = 0.001
 
 
 class GenerationConfig(BaseModel):
@@ -64,6 +71,14 @@ class EvaluationConfig(BaseModel):
     report_dir: str = "reports/runs"
     target_min_chars: int = 600
     target_max_chars: int = 1600
+    planner_ablation_modes: list[str] = Field(
+        default_factory=lambda: [
+            "rag_current_embedding",
+            "jepa_predicted_target",
+            "jepa_delta_predictor",
+            "jepa_no_context_dropout",
+        ]
+    )
 
 
 class ChatConfig(BaseModel):

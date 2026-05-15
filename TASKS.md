@@ -35,6 +35,8 @@
 - [x] Show loss chart in GUI.
 - [x] Add practical residual MLP sizing and CUDA FP32 training.
 - [x] Add dropout, weight decay, gradient clipping, and early stopping.
+- [x] Refactor predictor into JEPA-inspired context/target representation prediction modules.
+- [x] Add context/field dropout, delta prediction, output normalization, and configurable representation loss.
 
 ## Phase 4 - Generation
 
@@ -51,6 +53,7 @@
 - [x] Add optional name consistency repair after generation.
 - [x] Stream generated prose into the UI during generation.
 - [x] Apply selected genre scene presets to LLM-only, RAG, JEPA, and Chat generation.
+- [x] Build compact JEPA planner beat cards from predicted target retrieval.
 
 ## Phase 4.5 - Chat Memory
 
@@ -68,6 +71,7 @@
 - [x] Name consistency score and issue list.
 - [x] Simple contradiction checklist.
 - [x] Add lexical diversity, novelty, progression, length fit, dialogue ratio, sentence stats, ranking, and pairwise output diversity.
+- [x] Add planner diagnostics to comparison reports.
 - [ ] Optional LLM judge.
 - [x] Markdown report export.
 
@@ -82,5 +86,6 @@
 - [x] Reset scene presets and one-click defaults when the selected genre changes.
 - [x] Add Ollama partial-offload controls and runtime VRAM visibility.
 - [x] Store JEPA predictor training metadata with the checkpoint.
+- [x] Add JEPA-inspired smoke checks for builders, loss, retrieval, and dry-run pipeline.
 - [x] Add final demo report.
 - [x] Commit stable version.

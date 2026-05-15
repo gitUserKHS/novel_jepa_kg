@@ -22,6 +22,7 @@ from src.evaluation.metrics import (
 )
 from src.generation.consistency import check_name_consistency
 from src.llm.ollama_client import OllamaClient
+from src.planner.predict import evaluate_planner_diagnostics
 from src.utils.config import AppConfig
 from src.utils.paths import resolve_path
 
@@ -85,6 +86,7 @@ def evaluate_and_write_report(
     report_dir = resolve_path(config, config.evaluation.report_dir)
     report_dir.mkdir(parents=True, exist_ok=True)
     metrics = evaluate_outputs(config, client, previous_scene, outputs, characters=characters)
+    planner_diagnostics = evaluate_planner_diagnostics(config, top_k=config.generation.top_k)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = report_dir / f"comparison_{timestamp}.md"
     lines = [
@@ -96,6 +98,12 @@ def evaluate_and_write_report(
         f"- Characters: {characters or '(not provided)'}",
         f"- Ranking: {', '.join(metrics['ranking'])}",
         f"- Pairwise output diversity: {metrics['pairwise_output_diversity']:.4f}",
+        "",
+        "## Planner Diagnostics",
+        "",
+        "```json",
+        json.dumps(planner_diagnostics, ensure_ascii=False, indent=2),
+        "```",
         "",
         "## Metrics",
         "",

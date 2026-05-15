@@ -8,7 +8,7 @@ This project provides a Streamlit GUI where a user can generate synthetic Korean
 2. RAG + LLM
 3. JEPA-inspired Planner + RAG + LLM
 
-The local LLM is not fine-tuned. Only a small PyTorch MLP learns to map the current scene embedding to the next scene embedding.
+The local LLM is not fine-tuned. Only a small PyTorch MLP learns to predict the next narrative-state representation from a structured current narrative context.
 
 ## Workflow
 
@@ -16,9 +16,9 @@ The local LLM is not fine-tuned. Only a small PyTorch MLP learns to map the curr
 Streamlit GUI button
 -> Ollama generates synthetic scene transition JSONL
 -> pydantic validates and filters samples
--> Ollama embeds current and next scene summaries
+-> Ollama embeds structured current context and next-state target text
 -> FAISS indexes next-scene embeddings
--> PyTorch predictor trains in latent space
+-> PyTorch predictor trains to predict target representations in latent space
 -> predictor retrieves likely next-scene directions
 -> local LLM writes Korean prose
 -> metrics compare LLM-only, RAG, and JEPA modes
@@ -196,9 +196,27 @@ Keep `Reuse cached data` on. The first run is slower; later runs reuse samples a
 - Evaluate: write a Markdown comparison report
 - Reports: view saved reports
 
+## JEPA-Inspired Planner
+
+This project is not a faithful reproduction of Meta JEPA. It is a JEPA-inspired narrative latent planner for Korean long-form novel generation:
+
+- Frozen text embedding model: provides the representation space.
+- Trainable PyTorch MLP predictor: predicts the next narrative-state representation from structured context.
+- FAISS: retrieves likely target scene directions from the predicted representation.
+- Local LLM: writes the final Korean prose from the beat card and retrieved direction.
+
+The comparison modes mean:
+
+- LLM-only: tests pure local LLM generation.
+- RAG + LLM: retrieves examples from the current scene/context representation.
+- JEPA-inspired Planner + RAG + LLM: predicts a likely next-state representation first, then retrieves target-scene directions.
+
 ## Current Pipeline Behavior
 
 - Synthetic samples are diversified with genre-specific scene presets. Each built-in genre has multiple preset situations with plot function, emotion arc, conflict, motif, relationship tension, scene goal, and next hook.
+- The embedding stage builds structured context encoder input from world, character, current scene, and preset metadata, and target encoder input from the next narrative state.
+- Training supports context/field dropout, delta prediction, output normalization, and a JEPA-style representation prediction loss.
+- Evaluation reports include a `Planner Diagnostics` section with predicted-target cosine, retrieval hit@k, retrieval overlap, diversity, and predicted vector norm.
 - Project, Dataset, Generate, and Chat tabs can apply the same scene preset idea, so the training data and generated prose can follow matching genre situations.
 - Changing genre resets stale scene preset selections to `자동 순환` and refreshes one-click demo inputs with matching world, characters, and previous scene defaults.
 - Project and Dataset tabs provide genre presets plus a custom genre option.
