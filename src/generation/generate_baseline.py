@@ -15,13 +15,21 @@ def generate_llm_only(
     characters: str,
     previous_scene: str,
     stream_callback: Callable[[str], None] | None = None,
+    scene_preset: dict[str, str] | None = None,
 ) -> str:
     prompt = prose_prompt(
         world,
         characters,
         previous_scene,
         config.generation.style,
-        beat_card=build_beat_card("LLM only", None, [], characters, config.generation.rag_context_limit),
+        beat_card=build_beat_card(
+            "LLM only",
+            None,
+            [],
+            characters,
+            config.generation.rag_context_limit,
+            scene_preset=scene_preset,
+        ),
         consistency_rules=allowed_name_instruction(characters),
     )
     text = client.chat(

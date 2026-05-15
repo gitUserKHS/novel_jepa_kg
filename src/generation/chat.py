@@ -64,6 +64,7 @@ def generate_chat_turn(
     user_instruction: str,
     mode: str,
     stream_callback: Callable[[str], None] | None = None,
+    scene_preset: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if mode not in CHAT_MODES:
         raise ValueError(f"Unknown chat generation mode: {mode}")
@@ -81,7 +82,14 @@ def generate_chat_turn(
         style=config.generation.style,
         direction=direction,
         examples=examples,
-        beat_card=build_beat_card(mode, direction, examples, session.get("characters", ""), config.generation.rag_context_limit),
+        beat_card=build_beat_card(
+            mode,
+            direction,
+            examples,
+            session.get("characters", ""),
+            config.generation.rag_context_limit,
+            scene_preset=scene_preset,
+        ),
         consistency_rules=allowed_name_instruction(session.get("characters", "")),
     )
     assistant_text = client.chat(
@@ -107,6 +115,8 @@ def generate_chat_turn(
         metadata={
             "retrieved_count": len(retrieved),
             "direction": direction,
+            "scene_preset_id": scene_preset.get("id", "") if scene_preset else "",
+            "scene_preset_label": scene_preset.get("label", "") if scene_preset else "",
         },
     )
     scene_summary = summarize_scene(config, client, assistant_text)

@@ -55,16 +55,26 @@ def build_beat_card(
     examples: list[str],
     characters: str,
     context_limit: int,
+    scene_preset: dict[str, str] | None = None,
 ) -> str:
     names = extract_character_names(characters)
     active_names = ", ".join(names) if names else "입력 인물표의 인물"
     evidence = examples[: max(0, context_limit)]
     evidence_lines = "\n".join(f"  - {item}" for item in evidence) if evidence else "  - 참고 예시 없음"
+    preset_lines = []
+    if scene_preset:
+        preset_lines = [
+            f"- Scene preset: {scene_preset.get('label', scene_preset.get('id', 'selected'))}",
+            f"- Preset goal: {scene_preset.get('scene_goal', '')}",
+            f"- Preset hook: {scene_preset.get('next_hook', '')}",
+            f"- Preset conflict: {scene_preset.get('conflict', '')}",
+        ]
     return "\n".join(
         [
             f"- 생성 모드: {mode}",
             f"- 중심 인물: {active_names}",
             f"- 다음 의미 방향: {direction or '이전 장면의 갈등을 한 단계 진전'}",
+            *preset_lines,
             "- 장면 목표: 한 장면 안에서 하나의 핵심 사건만 전진시킨다.",
             "- 필수 beat: 목표 확인 -> 위험/저항 발생 -> 새 단서 또는 선택 압박 -> 다음 훅.",
             "- RAG 근거는 사실 복사가 아니라 전환 논리만 참고한다.",

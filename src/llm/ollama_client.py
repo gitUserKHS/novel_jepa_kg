@@ -205,6 +205,20 @@ class OllamaClient:
             idx_match = re.search(r"sample\s*#?(\d+)", prompt, flags=re.IGNORECASE)
             idx = int(idx_match.group(1)) if idx_match else 1
             plan = diversity_plan(idx)
+            prompt_keys = {
+                "세부 장르": "subgenre",
+                "장면 기능": "plot_function",
+                "감정 변화": "emotion_arc",
+                "핵심 갈등": "conflict",
+                "모티프": "motif",
+                "관계 긴장": "relationship",
+                "장면 목표": "scene_goal",
+                "다음 훅": "next_hook",
+            }
+            for label, key in prompt_keys.items():
+                match = re.search(rf"-\s*{label}:\s*(.+)", prompt)
+                if match:
+                    plan[key] = match.group(1).strip()
             names = [
                 ("서윤", "기억 복원가"),
                 ("이린", "궁중 기록관"),

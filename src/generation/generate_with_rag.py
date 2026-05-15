@@ -16,6 +16,7 @@ def generate_with_rag(
     characters: str,
     previous_scene: str,
     stream_callback: Callable[[str], None] | None = None,
+    scene_preset: dict[str, str] | None = None,
 ) -> str:
     retrieved = retrieve_by_text(config, client, previous_scene, config.generation.top_k)
     examples = [item["sample"]["scene_t_plus_1"]["summary"] for item in retrieved[: config.generation.rag_context_limit]]
@@ -27,7 +28,14 @@ def generate_with_rag(
         config.generation.style,
         direction=direction,
         examples=examples,
-        beat_card=build_beat_card("RAG + LLM", direction, examples, characters, config.generation.rag_context_limit),
+        beat_card=build_beat_card(
+            "RAG + LLM",
+            direction,
+            examples,
+            characters,
+            config.generation.rag_context_limit,
+            scene_preset=scene_preset,
+        ),
         consistency_rules=allowed_name_instruction(characters),
     )
     text = client.chat(

@@ -121,10 +121,11 @@ Use the sidebar `Ollama runtime` expander to check loaded models, approximate GP
 Open the `Project` tab.
 
 1. Pick a genre preset, or choose `직접 입력` and enter your own genre.
-2. Set `Samples` to `8` to `20` for a first real test.
-3. Turn on `Create fresh dataset for this run` when you want to ignore the synthetic sample cache and make a new dataset.
-4. Fill in world, characters, and previous scene.
-5. Click `Run Full Pipeline`.
+2. Pick a `Scene preset`. Use `자동 순환` to rotate several scene situations for the selected genre, or choose one preset when you want focused training data.
+3. Set `Samples` to `8` to `20` for a first real test.
+4. Turn on `Create fresh dataset for this run` when you want to ignore the synthetic sample cache and make a new dataset.
+5. Fill in world, characters, and previous scene.
+6. Click `Run Full Pipeline`.
 
 The app runs:
 
@@ -143,10 +144,11 @@ generate synthetic data
 Open the `Chat` tab.
 
 1. Create a new session.
-2. Fill in title, world setting, and characters.
+2. Pick the session genre, then fill in title, world setting, and characters.
 3. Choose `JEPA Planner + RAG + LLM` for the default long-form mode.
-4. Write a next-scene instruction.
-5. Click `Generate next scene`.
+4. Pick a scene preset when you want the next scene to follow a specific situation.
+5. Write a next-scene instruction.
+6. Click `Generate next scene`.
 
 Example instruction:
 
@@ -197,7 +199,8 @@ Keep `Reuse cached data` on. The first run is slower; later runs reuse samples a
 
 ## Current Pipeline Behavior
 
-- Synthetic samples are diversified with rotating scene plans: subgenre, plot function, emotion arc, conflict, motif, and relationship tension.
+- Synthetic samples are diversified with genre-specific scene presets. Each built-in genre has multiple preset situations with plot function, emotion arc, conflict, motif, relationship tension, scene goal, and next hook.
+- Project, Dataset, Generate, and Chat tabs can apply the same scene preset idea, so the training data and generated prose can follow matching genre situations.
 - Project and Dataset tabs provide genre presets plus a custom genre option.
 - The sidebar can load installed Ollama models from `/api/tags`, and Ollama API errors include the endpoint, model, HTTP status, and response detail.
 - Synthetic data generation requests Ollama JSON mode and extracts the first valid balanced JSON object if the model still adds surrounding text.

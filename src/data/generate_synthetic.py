@@ -47,10 +47,12 @@ def _write_cache(path: Path, cache: dict[str, dict[str, Any]]) -> None:
 def _cache_key(config: AppConfig, genre: str, sample_id: int, plan: dict[str, str]) -> str:
     return _json_hash(
         {
-            "schema": "scene-transition-v2",
+            "schema": "scene-transition-v3-genre-presets",
             "chat_model": config.ollama.chat_model,
             "genre": genre,
             "sample_id": sample_id,
+            "scene_preset_id": plan.get("id"),
+            "scene_preset_label": plan.get("label"),
             "plan": plan,
         }
     )
@@ -61,13 +63,22 @@ def _attach_metadata(sample: dict[str, Any], key: str, genre: str, sample_id: in
     sample["metadata"] = {
         "dataset_key": key,
         "genre_input": genre,
+        "genre_preset": plan.get("genre_key", ""),
+        "scene_preset_id": plan.get("id", ""),
+        "scene_preset_label": plan.get("label", ""),
         "diversity_plan": plan,
         "diversity_label": compact_plan_text(plan),
     }
     return sample
 
 
-def generate_synthetic_dataset(config: AppConfig, client: OllamaClient, genre: str, count: int) -> dict[str, int]:
+def generate_synthetic_dataset(
+    config: AppConfig,
+    client: OllamaClient,
+    genre: str,
+    count: int,
+    scene_preset: str | None = None,
+) -> dict[str, int]:
     output_path = resolve_path(config, config.data.synthetic_path)
     cache_path = resolve_path(config, config.data.sample_cache_path)
     ensure_parent(output_path)
@@ -81,7 +92,7 @@ def generate_synthetic_dataset(config: AppConfig, client: OllamaClient, genre: s
 
     selected_samples: list[dict[str, Any]] = []
     for sample_id in range(1, count + 1):
-        plan = diversity_plan(sample_id, config.data.diversity_buckets)
+        plan = diversity_plan(sample_id, config.data.diversity_buckets, genre=genre, preset_label=scene_preset)
         key = _cache_key(config, genre, sample_id, plan)
         cached = cache.get(key)
         if cached and config.data.reuse_existing:

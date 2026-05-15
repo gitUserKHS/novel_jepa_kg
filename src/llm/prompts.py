@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.llm.scene_presets import compact_plan_text as compact_scene_plan_text
+from src.llm.scene_presets import resolve_scene_preset
+
 
 DIVERSITY_PLANS: list[dict[str, str]] = [
     {
@@ -104,13 +107,17 @@ DIVERSITY_PLANS: list[dict[str, str]] = [
 ]
 
 
-def diversity_plan(sample_index: int, bucket_count: int | None = None) -> dict[str, str]:
-    plans = DIVERSITY_PLANS[: bucket_count or len(DIVERSITY_PLANS)]
-    return plans[(sample_index - 1) % len(plans)]
+def diversity_plan(
+    sample_index: int,
+    bucket_count: int | None = None,
+    genre: str | None = None,
+    preset_label: str | None = None,
+) -> dict[str, str]:
+    return resolve_scene_preset(genre, preset_label, sample_index=sample_index, bucket_count=bucket_count)
 
 
 def synthetic_sample_prompt(genre: str, sample_index: int, plan: dict[str, str] | None = None) -> str:
-    selected = plan or diversity_plan(sample_index)
+    selected = plan or diversity_plan(sample_index, genre=genre)
     return f"""
 한국어 소설 장면 전환 학습 데이터를 JSON 한 개로 작성하세요. sample #{sample_index}
 
@@ -122,6 +129,8 @@ def synthetic_sample_prompt(genre: str, sample_index: int, plan: dict[str, str] 
 - 핵심 갈등: {selected["conflict"]}
 - 모티프: {selected["motif"]}
 - 관계 긴장: {selected["relationship"]}
+- 장면 목표: {selected.get("scene_goal", "장면의 핵심 사건을 전진시킨다")}
+- 다음 훅: {selected.get("next_hook", "다음 장면으로 이어질 압박을 남긴다")}
 
 반드시 아래 최상위 필드를 포함하세요:
 - world: genre, premise, rules
@@ -196,4 +205,4 @@ def report_header(outputs: dict[str, str]) -> str:
 
 
 def compact_plan_text(plan: dict[str, Any]) -> str:
-    return " / ".join(str(value) for value in plan.values())
+    return compact_scene_plan_text(plan)

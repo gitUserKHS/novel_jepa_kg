@@ -35,13 +35,14 @@ def session_path(config: AppConfig, session_id: str) -> Path:
     return session_dir(config) / f"{session_id}.json"
 
 
-def default_session(title: str, world: str = "", characters: str = "") -> dict[str, Any]:
+def default_session(title: str, world: str = "", characters: str = "", genre: str = "") -> dict[str, Any]:
     timestamp = now_iso()
     return {
         "session_id": safe_session_id(title),
         "title": title.strip() or "Untitled session",
         "created_at": timestamp,
         "updated_at": timestamp,
+        "genre": genre.strip(),
         "world": world.strip(),
         "characters": characters.strip(),
         "messages": [],
@@ -112,8 +113,14 @@ def save_session(config: AppConfig, session: dict[str, Any]) -> dict[str, Any]:
     return session
 
 
-def create_session(config: AppConfig, title: str, world: str = "", characters: str = "") -> dict[str, Any]:
-    session = default_session(title, world, characters)
+def create_session(
+    config: AppConfig,
+    title: str,
+    world: str = "",
+    characters: str = "",
+    genre: str = "",
+) -> dict[str, Any]:
+    session = default_session(title, world, characters, genre)
     return save_session(config, session)
 
 
@@ -163,6 +170,7 @@ def export_session_markdown(config: AppConfig, session: dict[str, Any]) -> str:
         "",
         f"- Session ID: {session['session_id']}",
         f"- Updated: {session.get('updated_at', '')}",
+        f"- Genre: {session.get('genre', '') or '(empty)'}",
         "",
         "## World",
         "",

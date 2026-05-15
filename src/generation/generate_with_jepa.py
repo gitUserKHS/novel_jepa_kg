@@ -17,6 +17,7 @@ def generate_with_jepa(
     characters: str,
     previous_scene: str,
     stream_callback: Callable[[str], None] | None = None,
+    scene_preset: dict[str, str] | None = None,
 ) -> str:
     predicted = predict_next_embedding(config, client, previous_scene)
     retrieved = retrieve_by_vector(config, predicted, config.generation.top_k)
@@ -35,6 +36,7 @@ def generate_with_jepa(
             examples,
             characters,
             config.generation.rag_context_limit,
+            scene_preset=scene_preset,
         ),
         consistency_rules=allowed_name_instruction(characters),
     )

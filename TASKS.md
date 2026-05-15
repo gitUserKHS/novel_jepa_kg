@@ -16,6 +16,7 @@
 - [x] Add preview table in Streamlit.
 - [x] Diversify samples with rotating narrative plans.
 - [x] Reuse cached samples by dataset key.
+- [x] Add genre-specific scene presets for dataset generation.
 
 ## Phase 2 - Embeddings
 
@@ -49,6 +50,7 @@
 - [x] Limit retrieved examples injected into prompts.
 - [x] Add optional name consistency repair after generation.
 - [x] Stream generated prose into the UI during generation.
+- [x] Apply selected genre scene presets to LLM-only, RAG, JEPA, and Chat generation.
 
 ## Phase 4.5 - Chat Memory
 
@@ -76,6 +78,7 @@
 - [x] Add clear error handling.
 - [x] Add intuitive pipeline progress, artifact status, cache counters, and live training progress.
 - [x] Add a full-pipeline fresh dataset option.
+- [x] Add scene preset controls to Project, Dataset, Generate, and Chat tabs.
 - [x] Add Ollama partial-offload controls and runtime VRAM visibility.
 - [x] Store JEPA predictor training metadata with the checkpoint.
 - [x] Add final demo report.

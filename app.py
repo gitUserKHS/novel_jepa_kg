@@ -19,6 +19,7 @@ from src.generation.chat import CHAT_MODES, generate_chat_turn
 from src.generation.generate_baseline import generate_llm_only
 from src.generation.generate_with_jepa import generate_with_jepa
 from src.generation.generate_with_rag import generate_with_rag
+from src.llm.scene_presets import AUTO_SCENE_PRESET, resolve_scene_preset, scene_preset_labels
 from src.llm.ollama_client import OllamaClient
 from src.memory.context import compress_session_memory, extract_knowledge_graph, graph_tables, graph_to_mermaid
 from src.planner.train import train_predictor
@@ -124,6 +125,15 @@ def genre_selector(label: str, default: str, key: str) -> str:
         custom = st.text_input("Custom genre", default if default not in GENRE_PRESETS else "", key=f"{key}_custom")
         return custom.strip() or default
     return selected
+
+
+def scene_preset_selector(label: str, genre: str, key: str) -> str:
+    options = [AUTO_SCENE_PRESET] + scene_preset_labels(genre)
+    state_key = f"{key}_scene_preset"
+    current = st.session_state.get(state_key)
+    if current is not None and current not in options:
+        st.session_state[state_key] = AUTO_SCENE_PRESET
+    return st.selectbox(label, options, index=0, key=state_key)
 
 
 @st.cache_data(show_spinner=False)
@@ -363,8 +373,14 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
     return config, dry_run
 
 
-def run_dataset_stage(config: AppConfig, client: OllamaClient, genre: str, count: int) -> dict[str, Any]:
-    raw = generate_synthetic_dataset(config, client, genre=genre, count=count)
+def run_dataset_stage(
+    config: AppConfig,
+    client: OllamaClient,
+    genre: str,
+    count: int,
+    scene_preset_label: str | None = None,
+) -> dict[str, Any]:
+    raw = generate_synthetic_dataset(config, client, genre=genre, count=count, scene_preset=scene_preset_label)
     filtered = filter_jsonl(config)
     read_jsonl.clear()
     return {"generated": raw, "filtered": filtered}
@@ -377,6 +393,7 @@ def run_generation_bundle(
     characters: str,
     previous_scene: str,
     stream_callbacks: dict[str, Callable[[str], None]] | None = None,
+    scene_preset: dict[str, str] | None = None,
 ) -> dict[str, str]:
     stream_callbacks = stream_callbacks or {}
     return {
@@ -387,6 +404,7 @@ def run_generation_bundle(
             characters,
             previous_scene,
             stream_callback=stream_callbacks.get("llm_only"),
+            scene_preset=scene_preset,
         ),
         "rag": generate_with_rag(
             config,
@@ -395,6 +413,7 @@ def run_generation_bundle(
             characters,
             previous_scene,
             stream_callback=stream_callbacks.get("rag"),
+            scene_preset=scene_preset,
         ),
         "jepa": generate_with_jepa(
             config,
@@ -403,6 +422,7 @@ def run_generation_bundle(
             characters,
             previous_scene,
             stream_callback=stream_callbacks.get("jepa"),
+            scene_preset=scene_preset,
         ),
     }
 
@@ -421,6 +441,7 @@ def render_chat_session(config: AppConfig, client: OllamaClient) -> None:
 
     with st.expander("Create new session", expanded=not list_sessions(config)):
         new_title = st.text_input("Session title", "기억 잔향 연재 세션", key="new_chat_title")
+        new_genre = genre_selector("Session genre", "한국형 SF 미스터리", "new_chat_genre")
         new_world = st.text_area("World setting", "기억이 물리적 흔적으로 남는 근미래 서울.", height=90, key="new_chat_world")
         new_characters = st.text_area(
             "Characters",
@@ -429,7 +450,7 @@ def render_chat_session(config: AppConfig, client: OllamaClient) -> None:
             key="new_chat_characters",
         )
         if st.button("Create session", type="primary"):
-            session = create_session(config, new_title, new_world, new_characters)
+            session = create_session(config, new_title, new_world, new_characters, genre=new_genre)
             st.session_state["chat_session_id"] = session["session_id"]
             st.rerun()
 
@@ -452,6 +473,11 @@ def render_chat_session(config: AppConfig, client: OllamaClient) -> None:
     with left:
         with st.expander("Session settings", expanded=False):
             session["title"] = st.text_input("Title", session.get("title", ""), key=f"title_{session_id}")
+            session["genre"] = genre_selector(
+                "Genre",
+                session.get("genre", "한국형 SF 미스터리"),
+                f"genre_{session_id}",
+            )
             session["world"] = st.text_area("World", session.get("world", ""), height=100, key=f"world_{session_id}")
             session["characters"] = st.text_area(
                 "Characters",
@@ -473,6 +499,8 @@ def render_chat_session(config: AppConfig, client: OllamaClient) -> None:
                 st.markdown(message.get("content", ""))
 
         mode = st.radio("Generation mode", CHAT_MODES, index=2, horizontal=True, key=f"mode_{session_id}")
+        scene_preset_label = scene_preset_selector("Scene preset", session.get("genre", ""), f"chat_{session_id}")
+        scene_preset = resolve_scene_preset(session.get("genre", ""), scene_preset_label)
         user_instruction = st.text_area(
             "Next instruction",
             "이전 장면의 감정선을 이어서 다음 장면을 써 주세요. 새 단서와 선택 압박을 포함해 주세요.",
@@ -490,6 +518,7 @@ def render_chat_session(config: AppConfig, client: OllamaClient) -> None:
                         user_instruction,
                         mode,
                         stream_callback=make_stream_callback(live_output),
+                        scene_preset=scene_preset,
                     )
                     live_output.markdown(result["assistant_text"])
                     status.update(label="Saved scene, summary, and memory", state="complete")
@@ -568,6 +597,7 @@ def main() -> None:
         st.subheader("One-click experiment")
         st.write("합성 서사 데이터 생성부터 평가 리포트까지 작은 샘플로 실행합니다.")
         genre = genre_selector("Genre", "한국형 SF 미스터리", "project_genre")
+        scene_preset_label = scene_preset_selector("Scene preset", genre, "project")
         sample_count = st.number_input("Samples", min_value=2, max_value=100, value=8, step=1)
         fresh_dataset = st.checkbox(
             "Create fresh dataset for this run",
@@ -600,8 +630,10 @@ def main() -> None:
                 dataset_mode = "Generating fresh samples" if fresh_dataset else "Generating or reusing samples"
                 update_stage(stage_rows, stage_table, 0, "running", dataset_mode)
                 current_step.info("Step 1/6: Dataset generation and validation")
-                dataset_result = run_dataset_stage(config, client, genre, int(sample_count))
+                dataset_result = run_dataset_stage(config, client, genre, int(sample_count), scene_preset_label)
                 run_summary["fresh_dataset"] = fresh_dataset
+                run_summary["genre"] = genre
+                run_summary["scene_preset"] = scene_preset_label
                 run_summary["dataset"] = dataset_result
                 dataset_detail = (
                     f"{cache_summary('samples', dataset_result['generated'])} | "
@@ -684,6 +716,7 @@ def main() -> None:
                         key: make_stream_callback(placeholder)
                         for key, placeholder in generation_placeholders.items()
                     },
+                    scene_preset=resolve_scene_preset(genre, scene_preset_label),
                 )
                 for key, output in outputs.items():
                     generation_placeholders[key].markdown(output or "(empty)")
@@ -720,10 +753,11 @@ def main() -> None:
     with tabs[2]:
         st.subheader("Dataset")
         genre = genre_selector("Dataset genre", "한국형 판타지 미스터리", "dataset_genre")
+        scene_preset_label = scene_preset_selector("Dataset scene preset", genre, "dataset")
         count = st.number_input("Number of samples", min_value=1, max_value=500, value=10, step=1)
         if st.button("Generate dataset"):
             try:
-                result = run_dataset_stage(config, client, genre, int(count))
+                result = run_dataset_stage(config, client, genre, int(count), scene_preset_label)
                 generated = result["generated"]
                 cols = st.columns(4)
                 cols[0].metric("written", generated["written"])
@@ -840,6 +874,9 @@ def main() -> None:
 
     with tabs[5]:
         st.subheader("Generate")
+        generation_genre = genre_selector("Generation genre", "한국형 SF 미스터리", "generation_genre")
+        scene_preset_label = scene_preset_selector("Scene preset", generation_genre, "generation")
+        scene_preset = resolve_scene_preset(generation_genre, scene_preset_label)
         world = st.text_area("World", "기억 조각을 거래하는 근미래 도시.", height=80, key="gen_world")
         characters = st.text_area("Characters", "하린: 실종된 언니를 찾는 복원사. 도겸: 기억 암시장의 브로커.", height=80, key="gen_chars")
         previous_scene = st.text_area(
@@ -861,6 +898,7 @@ def main() -> None:
                         characters,
                         previous_scene,
                         stream_callback=stream_callback,
+                        scene_preset=scene_preset,
                     )
                 elif mode == "RAG + LLM":
                     output = generate_with_rag(
@@ -870,6 +908,7 @@ def main() -> None:
                         characters,
                         previous_scene,
                         stream_callback=stream_callback,
+                        scene_preset=scene_preset,
                     )
                 else:
                     output = generate_with_jepa(
@@ -879,6 +918,7 @@ def main() -> None:
                         characters,
                         previous_scene,
                         stream_callback=stream_callback,
+                        scene_preset=scene_preset,
                     )
                 live_output.markdown(output)
             except Exception as exc:  # noqa: BLE001
