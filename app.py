@@ -19,7 +19,7 @@ from src.generation.chat import CHAT_MODES, generate_chat_turn
 from src.generation.generate_baseline import generate_llm_only
 from src.generation.generate_with_jepa import generate_with_jepa
 from src.generation.generate_with_rag import generate_with_rag
-from src.llm.scene_presets import AUTO_SCENE_PRESET, resolve_scene_preset, scene_preset_labels
+from src.llm.scene_presets import AUTO_SCENE_PRESET, demo_defaults_for_genre, resolve_scene_preset, scene_preset_labels
 from src.llm.ollama_client import OllamaClient
 from src.memory.context import compress_session_memory, extract_knowledge_graph, graph_tables, graph_to_mermaid
 from src.planner.train import train_predictor
@@ -130,10 +130,33 @@ def genre_selector(label: str, default: str, key: str) -> str:
 def scene_preset_selector(label: str, genre: str, key: str) -> str:
     options = [AUTO_SCENE_PRESET] + scene_preset_labels(genre)
     state_key = f"{key}_scene_preset"
+    genre_key = f"{state_key}_genre"
+    if st.session_state.get(genre_key) != genre:
+        st.session_state[state_key] = AUTO_SCENE_PRESET
+        st.session_state[genre_key] = genre
     current = st.session_state.get(state_key)
     if current is not None and current not in options:
         st.session_state[state_key] = AUTO_SCENE_PRESET
     return st.selectbox(label, options, index=0, key=state_key)
+
+
+def sync_genre_text_defaults(
+    key_prefix: str,
+    genre: str,
+    field_keys: dict[str, str],
+    source_values: dict[str, str] | None = None,
+) -> None:
+    defaults = demo_defaults_for_genre(genre)
+    genre_state_key = f"{key_prefix}_defaults_genre"
+    previous_genre = st.session_state.get(genre_state_key)
+    genre_changed = previous_genre is not None and previous_genre != genre
+    for field, state_key in field_keys.items():
+        if genre_changed:
+            st.session_state[state_key] = defaults[field]
+        elif state_key not in st.session_state:
+            initial_values = source_values or defaults
+            st.session_state[state_key] = initial_values.get(field, defaults[field])
+    st.session_state[genre_state_key] = genre
 
 
 @st.cache_data(show_spinner=False)
@@ -442,10 +465,17 @@ def render_chat_session(config: AppConfig, client: OllamaClient) -> None:
     with st.expander("Create new session", expanded=not list_sessions(config)):
         new_title = st.text_input("Session title", "기억 잔향 연재 세션", key="new_chat_title")
         new_genre = genre_selector("Session genre", "한국형 SF 미스터리", "new_chat_genre")
-        new_world = st.text_area("World setting", "기억이 물리적 흔적으로 남는 근미래 서울.", height=90, key="new_chat_world")
+        sync_genre_text_defaults(
+            "new_chat",
+            new_genre,
+            {
+                "world": "new_chat_world",
+                "characters": "new_chat_characters",
+            },
+        )
+        new_world = st.text_area("World setting", height=90, key="new_chat_world")
         new_characters = st.text_area(
             "Characters",
-            "서윤: 동생을 찾는 기록 복원가. 민재: 진실을 숨긴 연구원.",
             height=90,
             key="new_chat_characters",
         )
@@ -473,15 +503,27 @@ def render_chat_session(config: AppConfig, client: OllamaClient) -> None:
     with left:
         with st.expander("Session settings", expanded=False):
             session["title"] = st.text_input("Title", session.get("title", ""), key=f"title_{session_id}")
-            session["genre"] = genre_selector(
+            session_genre = genre_selector(
                 "Genre",
                 session.get("genre", "한국형 SF 미스터리"),
                 f"genre_{session_id}",
             )
-            session["world"] = st.text_area("World", session.get("world", ""), height=100, key=f"world_{session_id}")
+            sync_genre_text_defaults(
+                f"session_{session_id}",
+                session_genre,
+                {
+                    "world": f"world_{session_id}",
+                    "characters": f"characters_{session_id}",
+                },
+                source_values={
+                    "world": session.get("world", ""),
+                    "characters": session.get("characters", ""),
+                },
+            )
+            session["genre"] = session_genre
+            session["world"] = st.text_area("World", height=100, key=f"world_{session_id}")
             session["characters"] = st.text_area(
                 "Characters",
-                session.get("characters", ""),
                 height=100,
                 key=f"characters_{session_id}",
             )
@@ -597,6 +639,15 @@ def main() -> None:
         st.subheader("One-click experiment")
         st.write("합성 서사 데이터 생성부터 평가 리포트까지 작은 샘플로 실행합니다.")
         genre = genre_selector("Genre", "한국형 SF 미스터리", "project_genre")
+        sync_genre_text_defaults(
+            "project",
+            genre,
+            {
+                "world": "project_world",
+                "characters": "project_characters",
+                "previous_scene": "project_previous_scene",
+            },
+        )
         scene_preset_label = scene_preset_selector("Scene preset", genre, "project")
         sample_count = st.number_input("Samples", min_value=2, max_value=100, value=8, step=1)
         fresh_dataset = st.checkbox(
@@ -604,13 +655,10 @@ def main() -> None:
             value=False,
             help="Ignore the synthetic sample cache for the full pipeline run and overwrite generated/filtered JSONL.",
         )
-        previous_scene = st.text_area(
-            "Previous scene",
-            "주인공은 폐쇄된 연구동에서 사라진 동생의 이름이 적힌 실험 기록을 발견한다.",
-            height=100,
-        )
-        world = st.text_area("World setting", "기억이 물리적 흔적으로 남는 근미래 서울.", height=80)
-        characters = st.text_area("Characters", "서윤: 동생을 찾는 기록 복원가. 민재: 진실을 숨긴 연구원.", height=80)
+        with st.expander("Advanced inputs", expanded=False):
+            previous_scene = st.text_area("Previous scene", height=100, key="project_previous_scene")
+            world = st.text_area("World setting", height=80, key="project_world")
+            characters = st.text_area("Characters", height=80, key="project_characters")
         st.caption("Artifact snapshot")
         st.dataframe(artifact_status(config), hide_index=True, width="stretch")
         if st.button("Run Full Pipeline", type="primary"):
@@ -875,13 +923,21 @@ def main() -> None:
     with tabs[5]:
         st.subheader("Generate")
         generation_genre = genre_selector("Generation genre", "한국형 SF 미스터리", "generation_genre")
+        sync_genre_text_defaults(
+            "generation",
+            generation_genre,
+            {
+                "world": "gen_world",
+                "characters": "gen_chars",
+                "previous_scene": "gen_prev",
+            },
+        )
         scene_preset_label = scene_preset_selector("Scene preset", generation_genre, "generation")
         scene_preset = resolve_scene_preset(generation_genre, scene_preset_label)
-        world = st.text_area("World", "기억 조각을 거래하는 근미래 도시.", height=80, key="gen_world")
-        characters = st.text_area("Characters", "하린: 실종된 언니를 찾는 복원사. 도겸: 기억 암시장의 브로커.", height=80, key="gen_chars")
+        world = st.text_area("World", height=80, key="gen_world")
+        characters = st.text_area("Characters", height=80, key="gen_chars")
         previous_scene = st.text_area(
             "Previous scene summary",
-            "하린은 언니의 기억 조각이 불법 경매에 올라왔다는 사실을 알게 된다.",
             height=100,
             key="gen_prev",
         )

@@ -79,6 +79,7 @@
 - [x] Add intuitive pipeline progress, artifact status, cache counters, and live training progress.
 - [x] Add a full-pipeline fresh dataset option.
 - [x] Add scene preset controls to Project, Dataset, Generate, and Chat tabs.
+- [x] Reset scene presets and one-click defaults when the selected genre changes.
 - [x] Add Ollama partial-offload controls and runtime VRAM visibility.
 - [x] Store JEPA predictor training metadata with the checkpoint.
 - [x] Add final demo report.
