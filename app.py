@@ -222,12 +222,97 @@ def render_diversity_report(report: dict[str, Any]) -> None:
 def format_size(path: Path) -> str:
     if not path.exists():
         return "-"
-    size = path.stat().st_size
+    size = path_total_size(path)
+    return format_bytes(size)
+
+
+def format_bytes(size: int) -> str:
     if size < 1024:
         return f"{size} B"
     if size < 1024 * 1024:
         return f"{size / 1024:.1f} KB"
-    return f"{size / (1024 * 1024):.1f} MB"
+    if size < 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    return f"{size / (1024 * 1024 * 1024):.2f} GB"
+
+
+def path_total_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.is_file():
+        return path.stat().st_size
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def cache_inventory(config: AppConfig) -> list[dict[str, Any]]:
+    items = [
+        ("Synthetic JSONL", config.data.synthetic_path, "generated data"),
+        ("Filtered JSONL", config.data.filtered_path, "generated data"),
+        ("Sample cache", config.data.sample_cache_path, "cache"),
+        ("Embeddings NPZ", config.data.embeddings_path, "cache"),
+        ("Embedding cache", config.data.embedding_cache_path, "cache"),
+        ("Current context FAISS", config.data.current_context_index_path, "index"),
+        ("Next scene FAISS", config.data.faiss_index_path, "index"),
+        ("Predictor checkpoint", config.training.checkpoint_path, "model artifact"),
+        ("Model card", "checkpoints/predictor/model_card.json", "model artifact"),
+        ("Chat sessions", config.chat.session_dir, "sessions"),
+    ]
+    rows = []
+    for label, relative_path, kind in items:
+        path = resolve_path(config, relative_path)
+        size = path_total_size(path)
+        rows.append(
+            {
+                "label": label,
+                "kind": kind,
+                "path": str(path),
+                "exists": path.exists(),
+                "size_bytes": size,
+                "size": format_bytes(size),
+                "modified": path.stat().st_mtime if path.exists() else 0,
+            }
+        )
+    return rows
+
+
+def report_inventory(report_dir: Path) -> list[dict[str, Any]]:
+    if not report_dir.exists():
+        return []
+    files = [path for path in report_dir.iterdir() if path.is_file() and path.suffix.lower() in {".md", ".log", ".txt"}]
+    rows = []
+    for path in sorted(files, key=lambda item: item.stat().st_mtime, reverse=True):
+        stat = path.stat()
+        rows.append(
+            {
+                "name": path.name,
+                "path": str(path),
+                "size_bytes": stat.st_size,
+                "size": format_bytes(stat.st_size),
+                "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                "mtime": stat.st_mtime,
+            }
+        )
+    return rows
+
+
+def delete_known_paths(paths: list[str]) -> tuple[int, int]:
+    deleted = 0
+    freed = 0
+    for raw_path in paths:
+        path = Path(raw_path)
+        if not path.exists():
+            continue
+        freed += path_total_size(path)
+        if path.is_dir():
+            for item in sorted(path.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+                if item.is_file():
+                    item.unlink(missing_ok=True)
+                elif item.is_dir():
+                    item.rmdir()
+        else:
+            path.unlink(missing_ok=True)
+        deleted += 1
+    return deleted, freed
 
 
 def artifact_status(config: AppConfig) -> pd.DataFrame:
@@ -1331,12 +1416,100 @@ def main() -> None:
                 show_error("Evaluation failed", exc)
 
     with tabs[7]:
-        st.subheader("Reports")
+        st.subheader("Reports / Storage")
         report_dir = resolve_path(config, config.evaluation.report_dir)
-        reports = sorted(report_dir.glob("*.md")) if report_dir.exists() else []
-        selected = st.selectbox("Report", [p.name for p in reports]) if reports else None
-        if selected:
-            st.markdown((report_dir / selected).read_text(encoding="utf-8"))
+        storage_tabs = st.tabs(["Cache / artifacts", "Report cleanup", "Report viewer"])
+
+        with storage_tabs[0]:
+            rows = cache_inventory(config)
+            total_size = sum(row["size_bytes"] for row in rows)
+            st.metric("tracked storage", format_bytes(total_size))
+            budget_mb = st.number_input("Cache budget MB", min_value=1, max_value=100000, value=2048, step=128)
+            budget_bytes = int(budget_mb * 1024 * 1024)
+            if total_size > budget_bytes:
+                st.warning(f"Tracked files exceed budget by {format_bytes(total_size - budget_bytes)}.")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "label": row["label"],
+                            "kind": row["kind"],
+                            "exists": row["exists"],
+                            "size": row["size"],
+                            "path": row["path"],
+                        }
+                        for row in rows
+                    ]
+                ),
+                hide_index=True,
+                width="stretch",
+            )
+            delete_labels = st.multiselect(
+                "Cache/artifact files to delete",
+                [row["label"] for row in rows if row["exists"]],
+                help="Deletes only known project files listed above. Deleted artifacts can be regenerated by the pipeline.",
+            )
+            confirm_cache_delete = st.checkbox("Confirm cache/artifact deletion")
+            if st.button("Delete selected cache/artifact files", type="secondary"):
+                if not confirm_cache_delete:
+                    st.warning("Check the confirmation box first.")
+                else:
+                    selected_paths = [row["path"] for row in rows if row["label"] in delete_labels]
+                    deleted, freed = delete_known_paths(selected_paths)
+                    st.success(f"Deleted {deleted} item(s), freed {format_bytes(freed)}.")
+                    st.rerun()
+
+        with storage_tabs[1]:
+            report_rows = report_inventory(report_dir)
+            report_total = sum(row["size_bytes"] for row in report_rows)
+            cols = st.columns(3)
+            cols[0].metric("report files", len(report_rows))
+            cols[1].metric("report storage", format_bytes(report_total))
+            cols[2].metric("report directory", str(report_dir))
+            if report_rows:
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "name": row["name"],
+                                "size": row["size"],
+                                "modified": row["modified"],
+                            }
+                            for row in report_rows
+                        ]
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )
+            keep_latest = st.number_input("Keep latest report/log files", min_value=0, max_value=500, value=10, step=1)
+            delete_report_names = st.multiselect(
+                "Specific report/log files to delete",
+                [row["name"] for row in report_rows],
+            )
+            confirm_report_delete = st.checkbox("Confirm report cleanup")
+            report_actions = st.columns(2)
+            if report_actions[0].button("Delete selected reports/logs"):
+                if not confirm_report_delete:
+                    st.warning("Check the confirmation box first.")
+                else:
+                    selected_paths = [row["path"] for row in report_rows if row["name"] in delete_report_names]
+                    deleted, freed = delete_known_paths(selected_paths)
+                    st.success(f"Deleted {deleted} report/log file(s), freed {format_bytes(freed)}.")
+                    st.rerun()
+            if report_actions[1].button("Keep latest and delete older"):
+                if not confirm_report_delete:
+                    st.warning("Check the confirmation box first.")
+                else:
+                    old_paths = [row["path"] for row in sorted(report_rows, key=lambda item: item["mtime"], reverse=True)[int(keep_latest) :]]
+                    deleted, freed = delete_known_paths(old_paths)
+                    st.success(f"Deleted {deleted} older report/log file(s), freed {format_bytes(freed)}.")
+                    st.rerun()
+
+        with storage_tabs[2]:
+            reports = sorted(report_dir.glob("*.md")) if report_dir.exists() else []
+            selected = st.selectbox("Report", [p.name for p in reports]) if reports else None
+            if selected:
+                st.markdown((report_dir / selected).read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
