@@ -17,6 +17,13 @@ class OllamaConfig(BaseModel):
     num_batch: int = 128
     keep_alive: str = "30s"
     manage_vram: bool = True
+    retry_attempts: int = 1
+    retry_backoff_sec: float = 2.0
+    fallback_num_ctx: int = 3072
+    fallback_num_gpu: int = 35
+    fallback_num_batch: int = 64
+    fallback_max_tokens: int = 1200
+    fallback_keep_alive: str = "10s"
 
 
 class DataConfig(BaseModel):

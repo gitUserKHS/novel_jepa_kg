@@ -13,6 +13,13 @@ ollama:
   num_batch: 128
   keep_alive: "30s"
   manage_vram: true
+  retry_attempts: 1
+  retry_backoff_sec: 2.0
+  fallback_num_ctx: 3072
+  fallback_num_gpu: 35
+  fallback_num_batch: 64
+  fallback_max_tokens: 1200
+  fallback_keep_alive: "10s"
 
 data:
   synthetic_path: "data/synthetic/generated.jsonl"

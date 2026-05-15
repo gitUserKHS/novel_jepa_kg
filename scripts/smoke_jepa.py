@@ -80,7 +80,25 @@ def test_builders_and_loss() -> None:
     assert norm.item() >= 0
 
     config = AppConfig()
-    client = OllamaClient(config.ollama.base_url, config.ollama.chat_model, config.ollama.embed_model, dry_run=True)
+    client = OllamaClient(
+        config.ollama.base_url,
+        config.ollama.chat_model,
+        config.ollama.embed_model,
+        num_ctx=4096,
+        num_gpu=40,
+        num_batch=128,
+        retry_attempts=1,
+        fallback_num_ctx=3072,
+        fallback_num_gpu=35,
+        fallback_num_batch=64,
+        fallback_max_tokens=1200,
+        dry_run=True,
+    )
+    fallback_options = client._chat_options(0.8, 1600, recovery_mode=True)
+    assert fallback_options["num_ctx"] == 3072
+    assert fallback_options["num_gpu"] == 35
+    assert fallback_options["num_batch"] == 64
+    assert fallback_options["num_predict"] == 1200
     analysis = analyze_current_scene(
         config,
         client,

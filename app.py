@@ -329,6 +329,13 @@ def make_client(config: AppConfig, dry_run: bool) -> OllamaClient:
         keep_alive=config.ollama.keep_alive,
         manage_vram=config.ollama.manage_vram,
         dry_run=dry_run,
+        retry_attempts=config.ollama.retry_attempts,
+        retry_backoff_sec=config.ollama.retry_backoff_sec,
+        fallback_num_ctx=config.ollama.fallback_num_ctx,
+        fallback_num_gpu=config.ollama.fallback_num_gpu,
+        fallback_num_batch=config.ollama.fallback_num_batch,
+        fallback_max_tokens=config.ollama.fallback_max_tokens,
+        fallback_keep_alive=config.ollama.fallback_keep_alive,
     )
 
 
@@ -368,6 +375,63 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
     )
     config.ollama.keep_alive = st.sidebar.text_input("Ollama keep alive", config.ollama.keep_alive)
     config.ollama.manage_vram = st.sidebar.checkbox("Unload other Ollama model before calls", value=config.ollama.manage_vram)
+    with st.sidebar.expander("Ollama 500 recovery", expanded=False):
+        config.ollama.retry_attempts = int(
+            st.number_input(
+                "Retry attempts after runner error",
+                min_value=0,
+                max_value=5,
+                value=config.ollama.retry_attempts,
+                step=1,
+                help="Retries only before any streaming text has been delivered.",
+            )
+        )
+        config.ollama.retry_backoff_sec = float(
+            st.number_input(
+                "Retry backoff seconds",
+                min_value=0.0,
+                max_value=30.0,
+                value=float(config.ollama.retry_backoff_sec),
+                step=0.5,
+            )
+        )
+        config.ollama.fallback_num_ctx = int(
+            st.number_input(
+                "Fallback context length",
+                min_value=1024,
+                max_value=32768,
+                value=config.ollama.fallback_num_ctx,
+                step=1024,
+            )
+        )
+        config.ollama.fallback_num_gpu = int(
+            st.number_input(
+                "Fallback GPU layers",
+                min_value=0,
+                max_value=99,
+                value=config.ollama.fallback_num_gpu,
+                step=1,
+            )
+        )
+        config.ollama.fallback_num_batch = int(
+            st.number_input(
+                "Fallback batch size",
+                min_value=16,
+                max_value=1024,
+                value=config.ollama.fallback_num_batch,
+                step=16,
+            )
+        )
+        config.ollama.fallback_max_tokens = int(
+            st.number_input(
+                "Fallback max output tokens",
+                min_value=256,
+                max_value=8192,
+                value=config.ollama.fallback_max_tokens,
+                step=256,
+            )
+        )
+        config.ollama.fallback_keep_alive = st.text_input("Fallback keep alive", config.ollama.fallback_keep_alive)
     with st.sidebar.expander("Ollama runtime", expanded=False):
         try:
             running = running_ollama_models(config.ollama.base_url, config.ollama.timeout_sec)

@@ -3,10 +3,21 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from typing import Any, Callable
 
 import numpy as np
 import requests
+
+
+class OllamaHTTPError(RuntimeError):
+    def __init__(self, endpoint: str, status_code: int, detail: str, model: str | None = None) -> None:
+        self.endpoint = endpoint
+        self.status_code = status_code
+        self.detail = detail
+        self.model = model
+        model_part = f" for model '{model}'" if model else ""
+        super().__init__(f"Ollama {endpoint} failed{model_part}: HTTP {status_code}. {detail}")
 
 
 class OllamaClient:
@@ -22,6 +33,13 @@ class OllamaClient:
         keep_alive: str | None = None,
         manage_vram: bool = True,
         dry_run: bool = False,
+        retry_attempts: int = 1,
+        retry_backoff_sec: float = 2.0,
+        fallback_num_ctx: int | None = 3072,
+        fallback_num_gpu: int | None = 35,
+        fallback_num_batch: int | None = 64,
+        fallback_max_tokens: int | None = 1200,
+        fallback_keep_alive: str | None = "10s",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.chat_model = chat_model
@@ -33,6 +51,13 @@ class OllamaClient:
         self.keep_alive = keep_alive
         self.manage_vram = manage_vram
         self.dry_run = dry_run
+        self.retry_attempts = max(0, retry_attempts)
+        self.retry_backoff_sec = max(0.0, retry_backoff_sec)
+        self.fallback_num_ctx = fallback_num_ctx
+        self.fallback_num_gpu = fallback_num_gpu
+        self.fallback_num_batch = fallback_num_batch
+        self.fallback_max_tokens = fallback_max_tokens
+        self.fallback_keep_alive = fallback_keep_alive
 
     def list_models(self) -> list[str]:
         try:
@@ -92,41 +117,63 @@ class OllamaClient:
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        options: dict[str, Any] = {"temperature": temperature, "num_predict": max_tokens}
-        if self.num_ctx:
-            options["num_ctx"] = self.num_ctx
-        if self.num_gpu is not None:
-            options["num_gpu"] = self.num_gpu
-        if self.num_batch:
-            options["num_batch"] = self.num_batch
-        body = {
-            "model": self.chat_model,
-            "messages": messages,
-            "stream": stream_callback is not None,
-            "think": False,
-            "options": options,
-        }
-        if self.keep_alive:
-            body["keep_alive"] = self.keep_alive
-        if json_mode:
-            body["format"] = "json"
-        try:
-            response = requests.post(
-                f"{self.base_url}/api/chat",
-                json=body,
-                timeout=self.timeout_sec,
-                stream=stream_callback is not None,
-            )
-            self._raise_for_status(response, "/api/chat", self.chat_model)
+        last_error: Exception | None = None
+        total_attempts = 1 + self.retry_attempts
+        for attempt in range(total_attempts):
+            recovery_mode = attempt > 0
+            body = {
+                "model": self.chat_model,
+                "messages": messages,
+                "stream": stream_callback is not None,
+                "think": False,
+                "options": self._chat_options(temperature, max_tokens, recovery_mode=recovery_mode),
+            }
+            keep_alive = self._effective_keep_alive(recovery_mode=recovery_mode)
+            if keep_alive:
+                body["keep_alive"] = keep_alive
+            if json_mode:
+                body["format"] = "json"
+
+            delivered = {"any": False}
+            callback = stream_callback
             if stream_callback is not None:
-                content, payload = self._read_streaming_chat(response, stream_callback)
-            else:
-                payload = response.json()
-                content = payload.get("message", {}).get("content", "")
-        except requests.RequestException as exc:
-            raise RuntimeError(f"Could not reach Ollama /api/chat at {self.base_url}: {exc}") from exc
-        except ValueError as exc:
-            raise RuntimeError("Ollama /api/chat returned invalid JSON.") from exc
+
+                def tracking_callback(chunk: str) -> None:
+                    delivered["any"] = True
+                    stream_callback(chunk)
+
+                callback = tracking_callback
+
+            try:
+                response = requests.post(
+                    f"{self.base_url}/api/chat",
+                    json=body,
+                    timeout=self.timeout_sec,
+                    stream=callback is not None,
+                )
+                self._raise_for_status(response, "/api/chat", self.chat_model)
+                if callback is not None:
+                    content, payload = self._read_streaming_chat(response, callback)
+                else:
+                    payload = response.json()
+                    content = payload.get("message", {}).get("content", "")
+                break
+            except OllamaHTTPError as exc:
+                last_error = exc
+                if not self._should_retry_chat_error(exc, attempt, total_attempts, delivered["any"]):
+                    if attempt > 0 or exc.status_code >= 500:
+                        raise self._with_recovery_hint(exc) from exc
+                    raise exc
+                self._prepare_chat_retry(attempt)
+            except requests.RequestException as exc:
+                last_error = exc
+                if delivered["any"] or attempt >= total_attempts - 1:
+                    raise RuntimeError(f"Could not reach Ollama /api/chat at {self.base_url}: {exc}") from exc
+                self._prepare_chat_retry(attempt)
+            except ValueError as exc:
+                raise RuntimeError("Ollama /api/chat returned invalid JSON.") from exc
+        else:
+            raise RuntimeError(f"Ollama /api/chat failed after retry. Last error: {last_error}")
 
         message = payload.get("message", {})
         if not content.strip():
@@ -186,6 +233,79 @@ class OllamaClient:
             raise RuntimeError("Ollama /api/embed returned no embeddings.")
         return np.asarray(vectors, dtype="float32")
 
+    def _chat_options(self, temperature: float, max_tokens: int, recovery_mode: bool = False) -> dict[str, Any]:
+        num_predict = max_tokens
+        num_ctx = self.num_ctx
+        num_gpu = self.num_gpu
+        num_batch = self.num_batch
+        if recovery_mode:
+            if self.fallback_max_tokens:
+                num_predict = min(num_predict, self.fallback_max_tokens)
+            if self.fallback_num_ctx and num_ctx:
+                num_ctx = min(num_ctx, self.fallback_num_ctx)
+            elif self.fallback_num_ctx:
+                num_ctx = self.fallback_num_ctx
+            if self.fallback_num_gpu is not None and num_gpu is not None:
+                num_gpu = min(num_gpu, self.fallback_num_gpu)
+            elif self.fallback_num_gpu is not None:
+                num_gpu = self.fallback_num_gpu
+            if self.fallback_num_batch and num_batch:
+                num_batch = min(num_batch, self.fallback_num_batch)
+            elif self.fallback_num_batch:
+                num_batch = self.fallback_num_batch
+        options: dict[str, Any] = {"temperature": temperature, "num_predict": num_predict}
+        if num_ctx:
+            options["num_ctx"] = num_ctx
+        if num_gpu is not None:
+            options["num_gpu"] = num_gpu
+        if num_batch:
+            options["num_batch"] = num_batch
+        return options
+
+    def _effective_keep_alive(self, recovery_mode: bool = False) -> str | None:
+        if recovery_mode and self.fallback_keep_alive is not None:
+            return self.fallback_keep_alive
+        return self.keep_alive
+
+    def _should_retry_chat_error(
+        self,
+        exc: OllamaHTTPError,
+        attempt: int,
+        total_attempts: int,
+        stream_delivered: bool,
+    ) -> bool:
+        if stream_delivered or attempt >= total_attempts - 1:
+            return False
+        detail = exc.detail.lower()
+        if exc.status_code in {500, 502, 503, 504}:
+            return True
+        return any(
+            marker in detail
+            for marker in [
+                "model runner",
+                "resource",
+                "memory",
+                "cuda",
+                "gpu",
+                "unexpectedly stopped",
+            ]
+        )
+
+    def _prepare_chat_retry(self, attempt: int) -> None:
+        if self.manage_vram:
+            self.unload_model(self.chat_model)
+            if self.embed_model and self.embed_model != self.chat_model:
+                self.unload_model(self.embed_model)
+        if self.retry_backoff_sec:
+            time.sleep(self.retry_backoff_sec * (attempt + 1))
+
+    def _with_recovery_hint(self, exc: OllamaHTTPError) -> RuntimeError:
+        hint = (
+            "The app retried after unloading Ollama models with conservative fallback options. "
+            "If this keeps happening, lower Ollama context length, GPU layers, batch size, or generation max tokens."
+        )
+        return RuntimeError(f"{exc} {hint}")
+
     def _raise_for_status(self, response: requests.Response, endpoint: str, model: str | None = None) -> None:
         if response.ok:
             return
@@ -195,8 +315,7 @@ class OllamaClient:
             detail = payload.get("error") or detail
         except ValueError:
             pass
-        model_part = f" for model '{model}'" if model else ""
-        raise RuntimeError(f"Ollama {endpoint} failed{model_part}: HTTP {response.status_code}. {detail}")
+        raise OllamaHTTPError(endpoint, response.status_code, detail, model)
 
     def _dry_chat(self, prompt: str) -> str:
         if "JSON" in prompt.upper() or "json" in prompt:

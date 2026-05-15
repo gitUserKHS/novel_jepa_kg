@@ -115,6 +115,7 @@ Embedding model: embeddinggemma:latest
 If Ollama is reachable, the sidebar shows installed models as dropdowns. You can still choose `직접 입력` when you want to type a model name manually.
 The default chat model is `gemma4:e4b`. On the target RTX 4060 8GB setup this model should be treated as a partial-offload model, not a full-VRAM model. The app sends controlled Ollama options by default: `num_gpu=40`, `num_ctx=4096`, `num_batch=128`, and `keep_alive=30s`.
 Use the sidebar `Ollama runtime` expander to check loaded models, approximate GPU residency, VRAM size, and context length. If `model runner has unexpectedly stopped` appears, lower `Ollama GPU layers`, `Ollama context length`, or `Ollama batch size`.
+The `Ollama 500 recovery` expander controls the automatic recovery path for intermittent runner crashes. When `/api/chat` returns a recoverable 500-class error before any streamed text is shown, the app unloads the chat and embedding models, waits briefly, then retries once with conservative fallback options: `num_gpu=35`, `num_ctx=3072`, `num_batch=64`, `num_predict=1200`, and `keep_alive=10s`.
 
 ### 5. Run the full experiment
 
@@ -235,6 +236,7 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - Name consistency checks compare generated outputs against the character list and report unknown or likely misspelled names.
 - Optional auto-repair rewrites only detected name inconsistencies before the output is saved.
 - Ollama calls can unload the embedding model before chat calls, and unload the chat model before embedding calls, to keep VRAM pressure predictable.
+- Chat generation has a recovery retry for Ollama 500-class runner failures. The retry is only attempted before streamed output begins, so the UI does not duplicate partially generated prose.
 - The trained JEPA predictor checkpoint stores model weights plus training metadata/history; `checkpoints/predictor/model_card.json` mirrors the latest training summary for inspection.
 - `data/synthetic/sample_cache.jsonl` stores generated samples by model, genre, sample id, and diversity plan. Re-running the same request reuses matching samples instead of calling Ollama again.
 - `data/embeddings/embedding_cache.jsonl` stores text embeddings by embedding model and text hash. The embedding stage only calls Ollama for missing vectors.
