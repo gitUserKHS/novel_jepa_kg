@@ -39,6 +39,40 @@ def _load_cache(path: Path) -> dict[str, dict[str, Any]]:
     return cache
 
 
+def _compatible_cache_key(genre: str, sample_id: int, plan: dict[str, Any]) -> str:
+    return _json_hash(
+        {
+            "genre": genre,
+            "sample_id": sample_id,
+            "scene_preset_id": plan.get("id") or "",
+            "scene_preset_label": plan.get("label") or "",
+            "subgenre": plan.get("subgenre") or "",
+            "plot_function": plan.get("plot_function") or "",
+        }
+    )
+
+
+def _sample_compatible_cache_key(sample: dict[str, Any]) -> str:
+    metadata = sample.get("metadata", {}) or {}
+    plan = metadata.get("diversity_plan") or {}
+    genre = metadata.get("genre_input") or sample.get("world", {}).get("genre", "")
+    sample_id = int(sample.get("id", 0) or 0)
+    merged_plan = {
+        **plan,
+        "id": metadata.get("scene_preset_id") or plan.get("id") or "",
+        "label": metadata.get("scene_preset_label") or plan.get("label") or "",
+    }
+    return _compatible_cache_key(str(genre), sample_id, merged_plan)
+
+
+def _build_compatible_cache(cache: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    compatible: dict[str, dict[str, Any]] = {}
+    for sample in cache.values():
+        key = _sample_compatible_cache_key(sample)
+        compatible.setdefault(key, sample)
+    return compatible
+
+
 def _write_cache(path: Path, cache: dict[str, dict[str, Any]]) -> None:
     ensure_parent(path)
     with path.open("w", encoding="utf-8") as f:
@@ -60,7 +94,14 @@ def _cache_key(config: AppConfig, genre: str, sample_id: int, plan: dict[str, st
     )
 
 
-def _attach_metadata(sample: dict[str, Any], key: str, genre: str, sample_id: int, plan: dict[str, str]) -> dict[str, Any]:
+def _attach_metadata(
+    sample: dict[str, Any],
+    key: str,
+    genre: str,
+    sample_id: int,
+    plan: dict[str, str],
+    cache_source: str = "generated",
+) -> dict[str, Any]:
     sample["id"] = sample_id
     sample["metadata"] = {
         "dataset_key": key,
@@ -70,6 +111,7 @@ def _attach_metadata(sample: dict[str, Any], key: str, genre: str, sample_id: in
         "scene_preset_label": plan.get("label", ""),
         "diversity_plan": plan,
         "diversity_label": compact_plan_text(plan),
+        "cache_source": cache_source,
     }
     return sample
 
@@ -86,8 +128,11 @@ def generate_synthetic_dataset(
     ensure_parent(output_path)
 
     cache = _load_cache(cache_path) if config.data.reuse_existing else {}
+    compatible_cache = _build_compatible_cache(cache) if config.data.reuse_existing else {}
     written = 0
     reused = 0
+    exact_reused = 0
+    compatible_reused = 0
     generated = 0
     failures = 0
     candidate_limit = max(count, math.ceil(count * max(1.0, config.data.synthetic_candidate_multiplier)))
@@ -102,11 +147,20 @@ def generate_synthetic_dataset(
         plan = diversity_plan(sample_id, config.data.diversity_buckets, genre=genre, preset_label=scene_preset)
         key = _cache_key(config, genre, sample_id, plan)
         cached = cache.get(key)
+        cache_source = "exact"
+        if cached is None and config.data.reuse_existing and config.data.allow_legacy_sample_cache:
+            cached = compatible_cache.get(_compatible_cache_key(genre, sample_id, plan))
+            cache_source = "legacy-compatible"
         if cached and config.data.reuse_existing:
             sample = dict(cached)
-            sample["id"] = sample_id
+            sample = _attach_metadata(sample, key, genre, sample_id, plan, cache_source=cache_source)
             selected_samples.append(sample)
+            cache[key] = sample
             reused += 1
+            if cache_source == "exact":
+                exact_reused += 1
+            else:
+                compatible_reused += 1
             written += 1
             continue
 
@@ -122,7 +176,7 @@ def generate_synthetic_dataset(
                 )
                 payload = parse_json_object(text)
                 sample = validate_sample(payload).to_jsonable(sample_id)
-                sample = _attach_metadata(sample, key, genre, sample_id, plan)
+                sample = _attach_metadata(sample, key, genre, sample_id, plan, cache_source="generated")
                 selected_samples.append(sample)
                 cache[key] = sample
                 generated += 1
@@ -147,6 +201,8 @@ def generate_synthetic_dataset(
         "written": written,
         "generated": generated,
         "reused": reused,
+        "exact_reused": exact_reused,
+        "compatible_reused": compatible_reused,
         "failures": failures,
         "diversity": diversity_report_from_samples(selected_samples),
     }

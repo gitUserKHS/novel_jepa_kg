@@ -37,6 +37,7 @@ class DataConfig(BaseModel):
     min_summary_chars: int = 20
     max_retries: int = 3
     reuse_existing: bool = True
+    allow_legacy_sample_cache: bool = True
     diversity_buckets: int = 12
     synthetic_temperature: float = 0.9
     synthetic_max_tokens: int = 1200

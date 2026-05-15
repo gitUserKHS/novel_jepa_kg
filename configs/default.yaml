@@ -32,6 +32,7 @@ data:
   min_summary_chars: 20
   max_retries: 3
   reuse_existing: true
+  allow_legacy_sample_cache: true
   diversity_buckets: 12
   synthetic_temperature: 0.9
   synthetic_max_tokens: 1200

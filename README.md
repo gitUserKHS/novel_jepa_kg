@@ -243,6 +243,7 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - Chat generation has a recovery retry for Ollama 500-class runner failures. The retry is only attempted before streamed output begins, so the UI does not duplicate partially generated prose.
 - The trained JEPA predictor checkpoint stores model weights plus training metadata/history; `checkpoints/predictor/model_card.json` mirrors the latest training summary for inspection.
 - `data/synthetic/sample_cache.jsonl` stores generated samples by model, genre, sample id, and diversity plan. Re-running the same request reuses matching samples instead of calling Ollama again.
+- The GUI includes a sample cache browser under `Reports / Storage -> Cache / artifacts`, so you can inspect cached sample ids, genre, preset, plot function, and key prefix. Exact cache reuse requires the same schema/model/genre/sample slot/diversity plan; legacy-compatible reuse can reuse older cache rows when the genre/sample slot/preset/plot function still line up.
 - `data/embeddings/embedding_cache.jsonl` stores text embeddings by embedding model and text hash. The embedding stage only calls Ollama for missing vectors.
 - Dry-run embeddings and real Ollama embeddings are cached under separate backend keys, so a dry-run FAISS index is not reused for real RAG retrieval.
 - `data/embeddings/scenes.npz` is reused when the filtered dataset and embedding model are unchanged.

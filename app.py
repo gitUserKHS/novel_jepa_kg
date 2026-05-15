@@ -275,6 +275,40 @@ def cache_inventory(config: AppConfig) -> list[dict[str, Any]]:
     return rows
 
 
+def sample_cache_preview(config: AppConfig, limit: int = 5000) -> list[dict[str, Any]]:
+    cache_path = resolve_path(config, config.data.sample_cache_path)
+    if not cache_path.exists():
+        return []
+    rows = []
+    with cache_path.open("r", encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
+            if line_no > limit:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                sample = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            metadata = sample.get("metadata", {}) or {}
+            plan = metadata.get("diversity_plan") or {}
+            rows.append(
+                {
+                    "line": line_no,
+                    "id": sample.get("id", ""),
+                    "genre_input": metadata.get("genre_input", ""),
+                    "world_genre": sample.get("world", {}).get("genre", ""),
+                    "preset": metadata.get("scene_preset_label") or plan.get("label", ""),
+                    "plot_function": plan.get("plot_function", ""),
+                    "cache_source": metadata.get("cache_source", ""),
+                    "key_prefix": str(metadata.get("dataset_key", ""))[:10],
+                    "summary": sample.get("scene_t", {}).get("summary", "")[:120],
+                }
+            )
+    return rows
+
+
 def report_inventory(report_dir: Path) -> list[dict[str, Any]]:
     if not report_dir.exists():
         return []
@@ -595,6 +629,11 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
                 step=0.05,
                 help="Allows extra candidate ids when samples fail validation or generation.",
             )
+        )
+        config.data.allow_legacy_sample_cache = st.checkbox(
+            "Allow legacy-compatible sample cache reuse",
+            value=config.data.allow_legacy_sample_cache,
+            help="Reuse older cached samples when exact v4 diversity cache keys do not match but genre/sample slot/preset are compatible.",
         )
         config.data.synthetic_temperature = float(
             st.number_input(
@@ -942,6 +981,7 @@ def main() -> None:
                 diversity = dataset_result.get("diversity", {})
                 dataset_detail = (
                     f"{cache_summary('samples', dataset_result['generated'])} | "
+                    f"legacy={dataset_result['generated'].get('compatible_reused', 0)} | "
                     f"kept={dataset_result['filtered']['kept']} | rejected={dataset_result['filtered']['rejected']} | "
                     f"diversity={diversity.get('unique_signatures', 0)} signatures"
                 )
@@ -1080,6 +1120,9 @@ def main() -> None:
                 cols[1].metric("new", generated.get("generated", 0))
                 cols[2].metric("reused", generated.get("reused", 0))
                 cols[3].metric("kept", result["filtered"]["kept"])
+                reuse_cols = st.columns(2)
+                reuse_cols[0].metric("exact cache reused", generated.get("exact_reused", 0))
+                reuse_cols[1].metric("legacy-compatible reused", generated.get("compatible_reused", 0))
                 st.caption(
                     f"Checked {generated.get('candidates_checked', generated.get('written', 0))} "
                     f"of {generated.get('candidate_limit', generated.get('requested', 0))} candidate ids."
@@ -1444,6 +1487,33 @@ def main() -> None:
                 hide_index=True,
                 width="stretch",
             )
+            with st.expander("Sample cache browser", expanded=False):
+                cache_rows = sample_cache_preview(config)
+                if cache_rows:
+                    cache_filter = st.text_input("Filter cache rows by genre/preset/plot", "")
+                    filtered_cache_rows = cache_rows
+                    if cache_filter.strip():
+                        needle = cache_filter.strip().lower()
+                        filtered_cache_rows = [
+                            row
+                            for row in cache_rows
+                            if needle
+                            in " ".join(
+                                str(row.get(key, ""))
+                                for key in ["genre_input", "world_genre", "preset", "plot_function", "summary"]
+                            ).lower()
+                        ]
+                    metric_cols = st.columns(3)
+                    metric_cols[0].metric("cached samples shown", len(filtered_cache_rows))
+                    metric_cols[1].metric("cached samples total", len(cache_rows))
+                    metric_cols[2].metric("legacy reuse", "on" if config.data.allow_legacy_sample_cache else "off")
+                    st.dataframe(pd.DataFrame(filtered_cache_rows), hide_index=True, width="stretch")
+                    st.caption(
+                        "Exact reuse requires the current schema/model/genre/sample slot/diversity plan key. "
+                        "Legacy-compatible reuse can reuse older rows when genre, sample slot, preset, and plot function line up."
+                    )
+                else:
+                    st.caption("No sample cache rows found.")
             delete_labels = st.multiselect(
                 "Cache/artifact files to delete",
                 [row["label"] for row in rows if row["exists"]],
