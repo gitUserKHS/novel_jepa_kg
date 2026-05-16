@@ -151,6 +151,8 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
     best_val = -1.0
     best_epoch = 0
     stale_epochs = 0
+    early_stopped = False
+    stopped_reason = "max_epochs"
     epochs: list[dict[str, Any]] = []
     param_count = count_parameters(model)
     mse_weight = float(config.training.loss_mse_weight)
@@ -222,18 +224,9 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
             "val_pred_target_cosine": float(val_cosine),
             "val_predicted_vector_norm": float(val_pred_norm),
         }
-        epochs.append(row)
-        if progress_callback is not None:
-            progress_callback(
-                {
-                    **row,
-                    "total_epochs": config.training.epochs,
-                    "best_val_cosine": max(best_val, float(val_cosine)),
-                    "parameter_count": param_count,
-                    "device": str(device),
-                }
-            )
-        if val_cosine > best_val:
+        improved = val_cosine > best_val
+        should_stop = False
+        if improved:
             best_val = float(val_cosine)
             best_epoch = epoch
             stale_epochs = 0
@@ -262,7 +255,31 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
         else:
             stale_epochs += 1
             if config.training.early_stopping_patience > 0 and stale_epochs >= config.training.early_stopping_patience:
-                break
+                early_stopped = True
+                stopped_reason = f"early_stopping_patience_{config.training.early_stopping_patience}"
+                should_stop = True
+        row.update(
+            {
+                "is_best": improved,
+                "best_val_cosine": best_val,
+                "best_epoch": best_epoch,
+                "stale_epochs": stale_epochs,
+                "early_stopping_patience": int(config.training.early_stopping_patience),
+                "early_stop_triggered": should_stop,
+            }
+        )
+        epochs.append(row)
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    **row,
+                    "total_epochs": config.training.epochs,
+                    "parameter_count": param_count,
+                    "device": str(device),
+                }
+            )
+        if should_stop:
+            break
 
     trained_at = datetime.now().isoformat(timespec="seconds")
     history = {
@@ -271,6 +288,11 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
         "best_val_cosine": best_val,
         "best_pred_target_cosine": best_val,
         "best_epoch": best_epoch,
+        "requested_epochs": int(config.training.epochs),
+        "completed_epochs": len(epochs),
+        "early_stopped": early_stopped,
+        "stopped_reason": stopped_reason,
+        "early_stopping_patience": int(config.training.early_stopping_patience),
         "device": str(device),
         "amp_enabled": amp_enabled,
         "parameter_count": param_count,

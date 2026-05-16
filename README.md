@@ -255,6 +255,7 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - The full pipeline and Generate tab stream prose output while Ollama is generating, then replace the live text with the final consistency-checked text.
 - In the Generate tab and the full-pipeline `RAG live` / `JEPA live` tabs, RAG and JEPA modes show a live pipeline trace before and during the answer: scene analysis, retrieval, JEPA target prediction, prompt assembly, generation, and consistency repair. This is a system trace, not hidden model chain-of-thought.
 - The full pipeline has its own training controls in the Project tab. The default predictor training budget is 80 epochs with early stopping patience 12, so the small JEPA-inspired MLP can train longer without always running every epoch.
+- If the training graph ends before the requested epoch count, early stopping fired because validation cosine did not improve for the patience window. Set patience to `0` or enable `Run all requested epochs` to force the full epoch count.
 - Chat sessions are stored as JSON files under `data/sessions/` and keep messages, scene summaries, a long-term memory summary, story state, and a knowledge graph.
 - Long-form generation uses hybrid context compression: recent messages + accumulated summary + graph nodes/edges + optional RAG/JEPA retrieval.
 - The Chat tab can compress memory on demand, rebuild the graph, show graph nodes/edges plus Mermaid text, and export a session Markdown file.

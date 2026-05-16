@@ -988,8 +988,11 @@ def main() -> None:
                     max_value=100,
                     value=config.training.early_stopping_patience,
                     step=1,
+                    help="Set to 0 to force all requested epochs.",
                 )
             )
+            if st.checkbox("Run all requested epochs", value=config.training.early_stopping_patience == 0):
+                config.training.early_stopping_patience = 0
             config.training.batch_size = int(
                 st.number_input(
                     "Pipeline batch size",
@@ -999,7 +1002,7 @@ def main() -> None:
                     step=1,
                 )
             )
-            st.caption("Default is now 80 epochs with early stopping, so longer training is allowed without forcing all epochs.")
+            st.caption("Default is 80 epochs with early stopping. If the graph stops early, validation stopped improving for the patience window.")
         fresh_dataset = st.checkbox(
             "Create fresh dataset for this run",
             value=False,
@@ -1070,12 +1073,16 @@ def main() -> None:
                     epoch = int(row["epoch"])
                     total = int(row["total_epochs"])
                     progress.progress(48 + int(22 * epoch / max(1, total)))
+                    stale = int(row.get("stale_epochs", 0))
+                    patience = int(row.get("early_stopping_patience", config.training.early_stopping_patience))
+                    stop_note = " | early stop pending" if row.get("early_stop_triggered") else ""
                     update_stage(
                         stage_rows,
                         stage_table,
                         3,
                         "running",
-                        f"epoch={epoch}/{total} | val_cosine={row['val_cosine']:.4f} | best={row['best_val_cosine']:.4f}",
+                        f"epoch={epoch}/{total} | val_cosine={row['val_cosine']:.4f} | "
+                        f"best={row['best_val_cosine']:.4f} | stale={stale}/{patience or 'off'}{stop_note}",
                     )
                     train_df = pd.DataFrame(train_points)
                     train_chart.line_chart(train_df.set_index("epoch")[["train_loss", "val_loss", "val_cosine"]])
@@ -1087,15 +1094,20 @@ def main() -> None:
                     "device": history.get("device"),
                     "parameter_count": history.get("parameter_count"),
                     "best_val_cosine": history.get("best_val_cosine"),
-                    "epochs": len(history.get("epochs", [])),
+                    "completed_epochs": history.get("completed_epochs", len(history.get("epochs", []))),
+                    "requested_epochs": history.get("requested_epochs", config.training.epochs),
+                    "early_stopped": history.get("early_stopped", False),
+                    "stopped_reason": history.get("stopped_reason", ""),
                 }
+                stop_suffix = " | early_stopped=yes" if history.get("early_stopped") else ""
                 update_stage(
                     stage_rows,
                     stage_table,
                     3,
                     "done",
                     f"device={history.get('device')} | params={history.get('parameter_count', 0):,} | "
-                    f"best_val_cosine={history.get('best_val_cosine', 0):.4f}",
+                    f"epochs={history.get('completed_epochs', len(history.get('epochs', [])))}/{history.get('requested_epochs', config.training.epochs)} | "
+                    f"best_val_cosine={history.get('best_val_cosine', 0):.4f}{stop_suffix}",
                 )
                 artifact_table.dataframe(artifact_status(config), hide_index=True, width="stretch")
                 progress.progress(70)
@@ -1281,8 +1293,11 @@ def main() -> None:
                     min_value=0,
                     max_value=100,
                     value=config.training.early_stopping_patience,
+                    help="Set to 0 to force all requested epochs.",
                 )
             )
+            if st.checkbox("Run all requested epochs", value=config.training.early_stopping_patience == 0, key="train_run_all_epochs"):
+                config.training.early_stopping_patience = 0
             config.training.use_amp = st.checkbox("Use AMP on CUDA", value=config.training.use_amp)
             config.training.predict_delta = st.checkbox("Predict delta", value=config.training.predict_delta)
             config.training.normalize_prediction = st.checkbox("Normalize prediction", value=config.training.normalize_prediction)
@@ -1321,8 +1336,13 @@ def main() -> None:
                 model_card = json.loads(model_card_path.read_text(encoding="utf-8"))
                 summary_cols = st.columns(3)
                 summary_cols[0].metric("validation pred_target_cosine", f"{model_card.get('best_pred_target_cosine', 0.0):.4f}")
-                summary_cols[1].metric("effective norm weight", f"{model_card.get('effective_loss_norm_weight', 0.0):.4f}")
+                summary_cols[1].metric(
+                    "epochs",
+                    f"{model_card.get('completed_epochs', model_card.get('epoch_count', 0))}/{model_card.get('requested_epochs', '-')}",
+                )
                 summary_cols[2].metric("params", f"{model_card.get('parameter_count', 0):,}")
+                if model_card.get("early_stopped"):
+                    st.warning(f"Last training stopped early: {model_card.get('stopped_reason')} at epoch {model_card.get('completed_epochs')}.")
                 st.json(model_card)
         try:
             diagnostics = evaluate_planner_diagnostics(config, top_k=config.generation.top_k)
@@ -1345,9 +1365,12 @@ def main() -> None:
                     epoch = int(row["epoch"])
                     total = int(row["total_epochs"])
                     train_progress.progress(int(100 * epoch / max(1, total)))
+                    stale = int(row.get("stale_epochs", 0))
+                    patience = int(row.get("early_stopping_patience", config.training.early_stopping_patience))
+                    stop_note = " | early stop" if row.get("early_stop_triggered") else ""
                     train_status.info(
                         f"epoch={epoch}/{total} | pred_target_cosine={row.get('val_pred_target_cosine', row['val_cosine']):.4f} | "
-                        f"best={row['best_val_cosine']:.4f}"
+                        f"best={row['best_val_cosine']:.4f} | stale={stale}/{patience or 'off'}{stop_note}"
                     )
                     train_df = pd.DataFrame(train_points)
                     chart_cols = [
@@ -1359,6 +1382,11 @@ def main() -> None:
 
                 history = train_predictor(config, progress_callback=on_train_epoch)
                 train_status.success("Training completed")
+                if history.get("early_stopped"):
+                    st.warning(
+                        f"Training stopped early at epoch {history.get('completed_epochs')} of "
+                        f"{history.get('requested_epochs')} because {history.get('stopped_reason')}."
+                    )
                 st.success(
                     f"Best checkpoint saved to {resolve_path(config, config.training.checkpoint_path)} "
                     f"({history.get('parameter_count', 0):,} params, device={history.get('device')})"
