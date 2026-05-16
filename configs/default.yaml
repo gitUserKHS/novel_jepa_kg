@@ -41,7 +41,7 @@ data:
 training:
   model_type: "residual_mlp"
   input_window: 1
-  epochs: 30
+  epochs: 80
   batch_size: 32
   learning_rate: 0.0001
   val_ratio: 0.15
@@ -50,7 +50,7 @@ training:
   num_layers: 4
   dropout: 0.1
   weight_decay: 0.01
-  early_stopping_patience: 8
+  early_stopping_patience: 12
   gradient_clip_norm: 1.0
   use_amp: false
   use_context_dropout: true

@@ -970,6 +970,36 @@ def main() -> None:
         plan_cols[3].metric("robust", sample_plan["robust"])
         st.caption(sample_plan["rationale"])
         sample_count = st.number_input("Samples", min_value=2, max_value=500, value=sample_plan["quick"], step=1)
+        with st.expander("Full pipeline training controls", expanded=False):
+            config.training.epochs = int(
+                st.number_input(
+                    "Pipeline predictor epochs",
+                    min_value=1,
+                    max_value=500,
+                    value=config.training.epochs,
+                    step=5,
+                    help="The full pipeline uses this value immediately when you click Run Full Pipeline.",
+                )
+            )
+            config.training.early_stopping_patience = int(
+                st.number_input(
+                    "Pipeline early stop patience",
+                    min_value=0,
+                    max_value=100,
+                    value=config.training.early_stopping_patience,
+                    step=1,
+                )
+            )
+            config.training.batch_size = int(
+                st.number_input(
+                    "Pipeline batch size",
+                    min_value=1,
+                    max_value=512,
+                    value=config.training.batch_size,
+                    step=1,
+                )
+            )
+            st.caption("Default is now 80 epochs with early stopping, so longer training is allowed without forcing all epochs.")
         fresh_dataset = st.checkbox(
             "Create fresh dataset for this run",
             value=False,

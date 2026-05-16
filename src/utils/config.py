@@ -47,7 +47,7 @@ class DataConfig(BaseModel):
 class TrainingConfig(BaseModel):
     model_type: str = "residual_mlp"
     input_window: int = 1
-    epochs: int = 30
+    epochs: int = 80
     batch_size: int = 32
     learning_rate: float = 1e-4
     val_ratio: float = 0.15
@@ -56,7 +56,7 @@ class TrainingConfig(BaseModel):
     num_layers: int = 4
     dropout: float = 0.1
     weight_decay: float = 0.01
-    early_stopping_patience: int = 8
+    early_stopping_patience: int = 12
     gradient_clip_norm: float = 1.0
     use_amp: bool = False
     use_context_dropout: bool = True
