@@ -725,9 +725,11 @@ def run_generation_bundle(
     characters: str,
     previous_scene: str,
     stream_callbacks: dict[str, Callable[[str], None]] | None = None,
+    trace_callbacks: dict[str, Callable[[str, str, dict[str, Any] | None], None]] | None = None,
     scene_preset: dict[str, str] | None = None,
 ) -> dict[str, str]:
     stream_callbacks = stream_callbacks or {}
+    trace_callbacks = trace_callbacks or {}
     return {
         "llm_only": generate_llm_only(
             config,
@@ -745,6 +747,7 @@ def run_generation_bundle(
             characters,
             previous_scene,
             stream_callback=stream_callbacks.get("rag"),
+            trace_callback=trace_callbacks.get("rag"),
             scene_preset=scene_preset,
         ),
         "jepa": generate_with_jepa(
@@ -754,6 +757,7 @@ def run_generation_bundle(
             characters,
             previous_scene,
             stream_callback=stream_callbacks.get("jepa"),
+            trace_callback=trace_callbacks.get("jepa"),
             scene_preset=scene_preset,
         ),
     }
@@ -1070,11 +1074,16 @@ def main() -> None:
                 current_step.info("Step 5/6: LLM-only, RAG, and JEPA generation")
                 generation_views = st.tabs(["LLM only live", "RAG live", "JEPA live"])
                 generation_placeholders = {}
+                trace_placeholders = {}
                 with generation_views[0]:
                     generation_placeholders["llm_only"] = st.empty()
                 with generation_views[1]:
+                    st.caption("Pipeline trace shows RAG analysis/retrieval/prompt/generation steps.")
+                    trace_placeholders["rag"] = st.empty()
                     generation_placeholders["rag"] = st.empty()
                 with generation_views[2]:
+                    st.caption("Pipeline trace shows JEPA prediction/retrieval/prompt/generation steps.")
+                    trace_placeholders["jepa"] = st.empty()
                     generation_placeholders["jepa"] = st.empty()
                 outputs = run_generation_bundle(
                     config,
@@ -1085,6 +1094,10 @@ def main() -> None:
                     stream_callbacks={
                         key: make_stream_callback(placeholder)
                         for key, placeholder in generation_placeholders.items()
+                    },
+                    trace_callbacks={
+                        key: make_generation_trace_callback(placeholder)
+                        for key, placeholder in trace_placeholders.items()
                     },
                     scene_preset=resolve_scene_preset(genre, scene_preset_label),
                 )
