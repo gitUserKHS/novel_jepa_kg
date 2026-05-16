@@ -253,6 +253,7 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - Evaluation reports include mode ranking, embedding continuity, repetition profile, keyword consistency, novelty from previous scene, lexical diversity, length fit, progression score, dialogue ratio, sentence stats, contradiction checks, and pairwise output diversity.
 - The full pipeline view shows a live stage table, current step message, artifact snapshot, cache reuse counts, and live training loss/cosine charts while training runs.
 - The full pipeline and Generate tab stream prose output while Ollama is generating, then replace the live text with the final consistency-checked text.
+- In the Generate tab, RAG and JEPA modes show a live pipeline trace before and during the answer: scene analysis, retrieval, JEPA target prediction, prompt assembly, generation, and consistency repair. This is a system trace, not hidden model chain-of-thought.
 - Chat sessions are stored as JSON files under `data/sessions/` and keep messages, scene summaries, a long-term memory summary, story state, and a knowledge graph.
 - Long-form generation uses hybrid context compression: recent messages + accumulated summary + graph nodes/edges + optional RAG/JEPA retrieval.
 - The Chat tab can compress memory on demand, rebuild the graph, show graph nodes/edges plus Mermaid text, and export a session Markdown file.

@@ -418,6 +418,27 @@ def update_stage(
     render_stage_table(placeholder, rows)
 
 
+def make_generation_trace_callback(placeholder: Any) -> Callable[[str, str, dict[str, Any] | None], None]:
+    rows: list[dict[str, str]] = []
+    stage_to_index: dict[str, int] = {}
+
+    def format_detail(detail: dict[str, Any] | None) -> str:
+        if not detail:
+            return ""
+        return " | ".join(f"{key}={value}" for key, value in detail.items())
+
+    def on_trace(stage: str, status: str, detail: dict[str, Any] | None = None) -> None:
+        if stage not in stage_to_index:
+            stage_to_index[stage] = len(rows)
+            rows.append({"stage": stage, "status": "waiting", "detail": ""})
+        row = rows[stage_to_index[stage]]
+        row["status"] = status
+        row["detail"] = format_detail(detail)
+        placeholder.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    return on_trace
+
+
 def cache_summary(label: str, data: dict[str, Any]) -> str:
     parts = [label]
     if "generated" in data:
@@ -1336,6 +1357,10 @@ def main() -> None:
         mode = st.radio("Mode", ["LLM only", "RAG + LLM", "JEPA Planner + RAG + LLM"], horizontal=True)
         if st.button("Generate prose"):
             try:
+                trace_box = st.empty()
+                trace_callback = make_generation_trace_callback(trace_box)
+                if mode != "LLM only":
+                    st.caption("Pipeline trace shows system retrieval/planning steps, not hidden model chain-of-thought.")
                 live_output = st.empty()
                 stream_callback = make_stream_callback(live_output)
                 generation_details: dict[str, Any] = {}
@@ -1359,6 +1384,7 @@ def main() -> None:
                         stream_callback=stream_callback,
                         scene_preset=scene_preset,
                         return_details=True,
+                        trace_callback=trace_callback,
                     )
                     output = str(result["text"])
                     generation_details = result.get("rag", {})
@@ -1372,6 +1398,7 @@ def main() -> None:
                         stream_callback=stream_callback,
                         scene_preset=scene_preset,
                         return_details=True,
+                        trace_callback=trace_callback,
                     )
                     output = str(result["text"])
                     generation_details = result.get("planner", {})

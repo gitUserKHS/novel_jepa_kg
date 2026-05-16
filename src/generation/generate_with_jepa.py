@@ -8,6 +8,13 @@ from src.llm.prompts import prose_prompt
 from src.planner.predict import predict_next_embedding_with_diagnostics
 from src.utils.config import AppConfig
 
+TraceCallback = Callable[[str, str, dict[str, Any] | None], None]
+
+
+def _emit(trace_callback: TraceCallback | None, stage: str, status: str, detail: dict[str, Any] | None = None) -> None:
+    if trace_callback is not None:
+        trace_callback(stage, status, detail)
+
 
 def _first_transition(retrieved: list[dict[str, Any]]) -> dict[str, Any]:
     if not retrieved:
@@ -65,7 +72,9 @@ def plan_jepa_generation(
     characters: str,
     previous_scene: str,
     scene_preset: dict[str, str] | None = None,
+    trace_callback: TraceCallback | None = None,
 ) -> dict[str, Any]:
+    _emit(trace_callback, "Analyze scene and predict target", "running", {"planner": "JEPA-inspired MLP"})
     diagnostics = predict_next_embedding_with_diagnostics(
         config,
         client,
@@ -74,9 +83,19 @@ def plan_jepa_generation(
         characters=characters,
         scene_preset=scene_preset,
     )
+    _emit(
+        trace_callback,
+        "Analyze scene and predict target",
+        "done",
+        {
+            "retrieved": len(diagnostics.get("retrieved", [])),
+            "vector_norm": round(float(diagnostics.get("predicted_vector_norm", 0.0)), 4),
+        },
+    )
     retrieved = diagnostics["retrieved"]
     transition = _first_transition(retrieved)
     direction = str(transition.get("summary") or "이전 장면의 갈등을 한 단계 진전시킨다.")
+    _emit(trace_callback, "Build JEPA beat card", "running", {"retrieved_examples": len(retrieved)})
     beat_card = build_jepa_beat_card(
         direction,
         retrieved,
@@ -84,6 +103,7 @@ def plan_jepa_generation(
         config.generation.rag_context_limit,
         scene_preset=scene_preset,
     )
+    _emit(trace_callback, "Build JEPA beat card", "done", {"beat_card_chars": len(beat_card)})
     return {
         **diagnostics,
         "direction": direction,
@@ -101,8 +121,18 @@ def generate_with_jepa(
     stream_callback: Callable[[str], None] | None = None,
     scene_preset: dict[str, str] | None = None,
     return_details: bool = False,
+    trace_callback: TraceCallback | None = None,
 ) -> str | dict[str, Any]:
-    plan = plan_jepa_generation(config, client, world, characters, previous_scene, scene_preset=scene_preset)
+    plan = plan_jepa_generation(
+        config,
+        client,
+        world,
+        characters,
+        previous_scene,
+        scene_preset=scene_preset,
+        trace_callback=trace_callback,
+    )
+    _emit(trace_callback, "Assemble JEPA prompt", "running", {"examples": len(plan["examples"])})
     prompt = prose_prompt(
         world,
         characters,
@@ -113,6 +143,8 @@ def generate_with_jepa(
         beat_card=plan["beat_card"],
         consistency_rules=allowed_name_instruction(characters),
     )
+    _emit(trace_callback, "Assemble JEPA prompt", "done", {"prompt_chars": len(prompt)})
+    _emit(trace_callback, "Generate prose", "running", {"model": config.ollama.chat_model})
     text = client.chat(
         prompt,
         system="당신은 한국어 장편 웹소설 작가입니다.",
@@ -120,7 +152,10 @@ def generate_with_jepa(
         max_tokens=config.generation.max_tokens,
         stream_callback=stream_callback,
     )
+    _emit(trace_callback, "Generate prose", "done", {"raw_chars": len(text)})
+    _emit(trace_callback, "Consistency repair", "running", {"enabled": config.generation.enable_consistency_repair})
     repaired = repair_name_consistency(config, client, text, world, characters, previous_scene)
+    _emit(trace_callback, "Consistency repair", "done", {"final_chars": len(repaired)})
     if return_details:
         return {"text": repaired, "planner": {key: value for key, value in plan.items() if key != "predicted_embedding"}}
     return repaired
