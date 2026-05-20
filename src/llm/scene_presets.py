@@ -231,6 +231,43 @@ def demo_defaults_for_genre(genre: str | None) -> dict[str, str]:
     return {**COMMON_DEMO_DEFAULTS, **defaults}
 
 
+def _matching_scene_preset(genre: str | None, preset_label: str | None) -> dict[str, str] | None:
+    if not preset_label or preset_label == AUTO_SCENE_PRESET:
+        return None
+    for preset in presets_for_genre(genre):
+        if preset_label in {preset["label"], preset["id"]}:
+            return {**preset, "genre_key": genre_key(genre)}
+    return None
+
+
+def _custom_scene_preset(
+    genre: str | None,
+    preset_label: str | None,
+    sample_index: int = 1,
+    bucket_count: int | None = None,
+) -> dict[str, str]:
+    label = str(preset_label or "").strip() or "직접 입력"
+    presets = presets_for_genre(genre)
+    selected_presets = presets[: bucket_count or len(presets)]
+    if not selected_presets:
+        selected_presets = COMMON_SCENE_PRESETS
+    base = selected_presets[(sample_index - 1) % len(selected_presets)]
+    return {
+        **base,
+        "id": "custom-scene-preset",
+        "label": label,
+        "subgenre": label,
+        "plot_function": label,
+        "conflict": f"사용자 직접 입력 신 프리셋 '{label}'의 핵심 갈등",
+        "motif": f"사용자 지정 모티프: {label}",
+        "relationship": f"사용자 직접 입력 프리셋 '{label}'에 맞춘 관계 긴장",
+        "scene_goal": f"사용자 직접 입력 신 프리셋 '{label}'에 맞춰 장면 목표를 설정한다.",
+        "next_hook": f"다음 장면은 직접 입력 프리셋 '{label}'의 핵심 사건으로 이어진다.",
+        "genre_key": genre_key(genre),
+        "custom": "true",
+    }
+
+
 def resolve_scene_preset(
     genre: str | None,
     preset_label: str | None = None,
@@ -243,12 +280,53 @@ def resolve_scene_preset(
         selected_presets = COMMON_SCENE_PRESETS
 
     if preset_label and preset_label != AUTO_SCENE_PRESET:
-        for preset in presets:
-            if preset_label in {preset["label"], preset["id"]}:
-                return {**preset, "genre_key": genre_key(genre)}
+        matched = _matching_scene_preset(genre, preset_label)
+        if matched:
+            return matched
+        return _custom_scene_preset(genre, preset_label, sample_index, bucket_count)
 
     preset = selected_presets[(sample_index - 1) % len(selected_presets)]
     return {**preset, "genre_key": genre_key(genre)}
+
+
+def demo_defaults_for_scene_preset(genre: str | None, preset_label: str | None) -> dict[str, str]:
+    defaults = demo_defaults_for_genre(genre)
+    if not preset_label or preset_label == AUTO_SCENE_PRESET:
+        return defaults
+
+    preset = resolve_scene_preset(genre, preset_label)
+    label = preset.get("label", str(preset_label))
+    plot_function = preset.get("plot_function", label)
+    emotion_arc = preset.get("emotion_arc", "")
+    conflict = preset.get("conflict", "")
+    motif = preset.get("motif", "")
+    relationship = preset.get("relationship", "")
+    scene_goal = preset.get("scene_goal", "")
+    next_hook = preset.get("next_hook", "")
+
+    world = (
+        f"{defaults['world']}\n\n"
+        f"[신 프리셋: {label}]\n"
+        f"- 장면 기능: {plot_function}\n"
+        f"- 정서 흐름: {emotion_arc}\n"
+        f"- 핵심 갈등: {conflict}\n"
+        f"- 반복 모티프: {motif}"
+    )
+    characters = (
+        f"{defaults['characters']}\n\n"
+        f"[프리셋 관계 긴장]\n{relationship or '선택한 신 프리셋에 맞춰 인물 간 신뢰와 의심을 조정한다.'}"
+    )
+    previous_scene = (
+        f"{defaults['previous_scene']}\n\n"
+        f"[프리셋 시작 상황]\n{scene_goal}\n\n"
+        f"[다음 훅]\n{next_hook}"
+    )
+    return {
+        "world": world,
+        "characters": characters,
+        "previous_scene": previous_scene,
+        "scene_preset_label": label,
+    }
 
 
 def compact_plan_text(plan: dict[str, Any]) -> str:

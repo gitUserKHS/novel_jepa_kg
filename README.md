@@ -123,7 +123,7 @@ Open the `Project` tab.
 
 1. Pick a genre preset, or choose `직접 입력` and enter your own genre.
 2. Leave `Scene preset` on `자동 순환` for a first run. The preset list resets automatically when the genre changes.
-3. Use the sample recommendation row in the UI. `quick` is for smoke checks, `balanced` is the default JEPA diagnostic range, `research` is better for a graduation-project comparison, and `robust` is for slower but stabler retrieval experiments.
+3. Use the sample recommendation row in the UI. `quick` is for smoke checks, `balanced` is the default JEPA diagnostic range, `research` is better for a graduation-project comparison, and `robust` is for slower but stabler retrieval experiments. You can also choose a custom scene preset; when a preset changes, the advanced world, characters, and previous-scene fields refresh for that preset.
 4. Turn on `Create fresh dataset for this run` when you want to ignore the synthetic sample cache and make a new dataset.
 5. Click `Run Full Pipeline`. The app fills genre-matched world, characters, and previous scene defaults automatically.
 
@@ -228,6 +228,8 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - The project builds both `current_context.faiss` and `next_scene.faiss` indexes.
 - Project, Dataset, Generate, and Chat tabs can apply the same scene preset idea, so the training data and generated prose can follow matching genre situations.
 - Changing genre resets stale scene preset selections to `자동 순환` and refreshes one-click demo inputs with matching world, characters, and previous scene defaults.
+- Changing the scene preset now refreshes Project and Generate advanced inputs with preset-specific world notes, relationship tension, scene goal, and next hook.
+- Scene preset selectors support custom direct input; custom labels are passed through as custom scene-preset metadata instead of being silently replaced by automatic rotation.
 - Project and Dataset tabs provide genre presets plus a custom genre option.
 - The sidebar can load installed Ollama models from `/api/tags`, and Ollama API errors include the endpoint, model, HTTP status, and response detail.
 - Synthetic data generation requests Ollama JSON mode and extracts the first valid balanced JSON object if the model still adds surrounding text.

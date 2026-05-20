@@ -20,7 +20,13 @@ from src.generation.chat import CHAT_MODES, generate_chat_turn
 from src.generation.generate_baseline import generate_llm_only
 from src.generation.generate_with_jepa import generate_with_jepa
 from src.generation.generate_with_rag import generate_with_rag, plan_rag_generation
-from src.llm.scene_presets import AUTO_SCENE_PRESET, demo_defaults_for_genre, resolve_scene_preset, scene_preset_labels
+from src.llm.scene_presets import (
+    AUTO_SCENE_PRESET,
+    demo_defaults_for_genre,
+    demo_defaults_for_scene_preset,
+    resolve_scene_preset,
+    scene_preset_labels,
+)
 from src.llm.ollama_client import OllamaClient
 from src.memory.context import compress_session_memory, extract_knowledge_graph, graph_tables, graph_to_mermaid
 from src.planner.train import train_predictor
@@ -130,16 +136,26 @@ def genre_selector(label: str, default: str, key: str) -> str:
 
 
 def scene_preset_selector(label: str, genre: str, key: str) -> str:
-    options = [AUTO_SCENE_PRESET] + scene_preset_labels(genre)
+    preset_options = [AUTO_SCENE_PRESET] + scene_preset_labels(genre)
+    options = preset_options + [CUSTOM_OPTION]
     state_key = f"{key}_scene_preset"
     genre_key = f"{state_key}_genre"
+    custom_key = f"{state_key}_custom"
     if st.session_state.get(genre_key) != genre:
         st.session_state[state_key] = AUTO_SCENE_PRESET
+        st.session_state[custom_key] = ""
         st.session_state[genre_key] = genre
     current = st.session_state.get(state_key)
     if current is not None and current not in options:
-        st.session_state[state_key] = AUTO_SCENE_PRESET
-    return st.selectbox(label, options, index=0, key=state_key)
+        st.session_state[custom_key] = str(current)
+        st.session_state[state_key] = CUSTOM_OPTION
+    selected = st.selectbox(label, options, key=state_key)
+    if selected == CUSTOM_OPTION:
+        if custom_key not in st.session_state:
+            st.session_state[custom_key] = ""
+        custom = st.text_input("직접 입력 신 프리셋", key=custom_key)
+        return custom.strip() or AUTO_SCENE_PRESET
+    return selected
 
 
 def sync_genre_text_defaults(
@@ -159,6 +175,27 @@ def sync_genre_text_defaults(
             initial_values = source_values or defaults
             st.session_state[state_key] = initial_values.get(field, defaults[field])
     st.session_state[genre_state_key] = genre
+
+
+def sync_scene_text_defaults(
+    key_prefix: str,
+    genre: str,
+    scene_preset_label: str,
+    field_keys: dict[str, str],
+    source_values: dict[str, str] | None = None,
+) -> None:
+    defaults = demo_defaults_for_scene_preset(genre, scene_preset_label)
+    marker = f"{genre}\n{scene_preset_label}"
+    marker_state_key = f"{key_prefix}_defaults_scene_marker"
+    previous_marker = st.session_state.get(marker_state_key)
+    marker_changed = previous_marker is not None and previous_marker != marker
+    for field, state_key in field_keys.items():
+        if marker_changed:
+            st.session_state[state_key] = defaults[field]
+        elif state_key not in st.session_state:
+            initial_values = source_values or defaults
+            st.session_state[state_key] = initial_values.get(field, defaults[field])
+    st.session_state[marker_state_key] = marker
 
 
 @st.cache_data(show_spinner=False)
@@ -952,16 +989,17 @@ def main() -> None:
         st.subheader("One-click experiment")
         st.write("합성 서사 데이터 생성부터 평가 리포트까지 작은 샘플로 실행합니다.")
         genre = genre_selector("Genre", "한국형 SF 미스터리", "project_genre")
-        sync_genre_text_defaults(
+        scene_preset_label = scene_preset_selector("Scene preset", genre, "project")
+        sync_scene_text_defaults(
             "project",
             genre,
+            scene_preset_label,
             {
                 "world": "project_world",
                 "characters": "project_characters",
                 "previous_scene": "project_previous_scene",
             },
         )
-        scene_preset_label = scene_preset_selector("Scene preset", genre, "project")
         sample_plan = training_scale_recommendations(genre, scene_preset_label, config.data.diversity_buckets)
         plan_cols = st.columns(4)
         plan_cols[0].metric("quick", sample_plan["quick"])
@@ -1407,16 +1445,17 @@ def main() -> None:
     with tabs[5]:
         st.subheader("Generate")
         generation_genre = genre_selector("Generation genre", "한국형 SF 미스터리", "generation_genre")
-        sync_genre_text_defaults(
+        scene_preset_label = scene_preset_selector("Scene preset", generation_genre, "generation")
+        sync_scene_text_defaults(
             "generation",
             generation_genre,
+            scene_preset_label,
             {
                 "world": "gen_world",
                 "characters": "gen_chars",
                 "previous_scene": "gen_prev",
             },
         )
-        scene_preset_label = scene_preset_selector("Scene preset", generation_genre, "generation")
         scene_preset = resolve_scene_preset(generation_genre, scene_preset_label)
         world = st.text_area("World", height=80, key="gen_world")
         characters = st.text_area("Characters", height=80, key="gen_chars")
