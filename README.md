@@ -228,7 +228,7 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - The project builds both `current_context.faiss` and `next_scene.faiss` indexes.
 - Project, Dataset, Generate, and Chat tabs can apply the same scene preset idea, so the training data and generated prose can follow matching genre situations.
 - Changing genre resets stale scene preset selections to `자동 순환` and refreshes one-click demo inputs with matching world, characters, and previous scene defaults.
-- Changing the scene preset now refreshes Project and Generate advanced inputs with preset-specific world notes, relationship tension, scene goal, and next hook.
+- Changing the scene preset refreshes Project and Generate advanced inputs with preset-specific world notes, relationship tension, scene goal, and next hook. If a browser session keeps stale text, click `Apply selected scene preset` to force-reset the visible inputs.
 - Scene preset selectors support custom direct input; custom labels are passed through as custom scene-preset metadata instead of being silently replaced by automatic rotation.
 - Project and Dataset tabs provide genre presets plus a custom genre option.
 - The sidebar can load installed Ollama models from `/api/tags`, and Ollama API errors include the endpoint, model, HTTP status, and response detail.

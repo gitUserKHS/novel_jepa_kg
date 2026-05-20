@@ -188,14 +188,27 @@ def sync_scene_text_defaults(
     marker = f"{genre}\n{scene_preset_label}"
     marker_state_key = f"{key_prefix}_defaults_scene_marker"
     previous_marker = st.session_state.get(marker_state_key)
-    marker_changed = previous_marker is not None and previous_marker != marker
+    marker_changed = previous_marker != marker
+    should_refresh = marker_changed and (previous_marker is not None or scene_preset_label != AUTO_SCENE_PRESET)
     for field, state_key in field_keys.items():
-        if marker_changed:
+        if should_refresh:
             st.session_state[state_key] = defaults[field]
         elif state_key not in st.session_state:
             initial_values = source_values or defaults
             st.session_state[state_key] = initial_values.get(field, defaults[field])
     st.session_state[marker_state_key] = marker
+
+
+def apply_scene_text_defaults(
+    key_prefix: str,
+    genre: str,
+    scene_preset_label: str,
+    field_keys: dict[str, str],
+) -> None:
+    defaults = demo_defaults_for_scene_preset(genre, scene_preset_label)
+    for field, state_key in field_keys.items():
+        st.session_state[state_key] = defaults[field]
+    st.session_state[f"{key_prefix}_defaults_scene_marker"] = f"{genre}\n{scene_preset_label}"
 
 
 @st.cache_data(show_spinner=False)
@@ -1047,6 +1060,17 @@ def main() -> None:
             help="Ignore the synthetic sample cache for the full pipeline run and overwrite generated/filtered JSONL.",
         )
         with st.expander("Advanced inputs", expanded=False):
+            if st.button("Apply selected scene preset", key="project_apply_scene_defaults"):
+                apply_scene_text_defaults(
+                    "project",
+                    genre,
+                    scene_preset_label,
+                    {
+                        "world": "project_world",
+                        "characters": "project_characters",
+                        "previous_scene": "project_previous_scene",
+                    },
+                )
             previous_scene = st.text_area("Previous scene", height=100, key="project_previous_scene")
             world = st.text_area("World setting", height=80, key="project_world")
             characters = st.text_area("Characters", height=80, key="project_characters")
@@ -1457,6 +1481,17 @@ def main() -> None:
             },
         )
         scene_preset = resolve_scene_preset(generation_genre, scene_preset_label)
+        if st.button("Apply selected scene preset", key="generation_apply_scene_defaults"):
+            apply_scene_text_defaults(
+                "generation",
+                generation_genre,
+                scene_preset_label,
+                {
+                    "world": "gen_world",
+                    "characters": "gen_chars",
+                    "previous_scene": "gen_prev",
+                },
+            )
         world = st.text_area("World", height=80, key="gen_world")
         characters = st.text_area("Characters", height=80, key="gen_chars")
         previous_scene = st.text_area(

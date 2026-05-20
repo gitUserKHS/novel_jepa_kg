@@ -306,20 +306,27 @@ def demo_defaults_for_scene_preset(genre: str | None, preset_label: str | None) 
 
     world = (
         f"{defaults['world']}\n\n"
-        f"[신 프리셋: {label}]\n"
-        f"- 장면 기능: {plot_function}\n"
-        f"- 정서 흐름: {emotion_arc}\n"
-        f"- 핵심 갈등: {conflict}\n"
-        f"- 반복 모티프: {motif}"
+        f"[선택된 신 프리셋: {label}]\n"
+        f"이번 입력은 '{plot_function}' 장면을 기준으로 맞춘다. "
+        f"장면의 감정선은 {emotion_arc or '긴장 상승'}이고, 핵심 갈등은 '{conflict}'이다. "
+        f"프롬프트와 합성 샘플은 {motif or label} 모티프가 눈에 띄게 드러나도록 구성한다."
     )
     characters = (
         f"{defaults['characters']}\n\n"
-        f"[프리셋 관계 긴장]\n{relationship or '선택한 신 프리셋에 맞춰 인물 간 신뢰와 의심을 조정한다.'}"
+        f"[이 프리셋에서의 인물 압력]\n"
+        f"{relationship or '선택한 신 프리셋에 맞춰 인물 간 신뢰와 의심을 조정한다.'}\n"
+        f"각 인물은 '{plot_function}' 상황에서 서로 다른 목적을 드러내며, "
+        f"대화와 행동은 '{conflict}'를 피하지 않고 밀어붙인다."
     )
     previous_scene = (
-        f"{defaults['previous_scene']}\n\n"
-        f"[프리셋 시작 상황]\n{scene_goal}\n\n"
-        f"[다음 훅]\n{next_hook}"
+        f"[{label}] 프리셋용 직전 장면\n"
+        f"장면 목표: {scene_goal or plot_function}\n"
+        f"현재 압력: {conflict or '선택한 프리셋의 갈등이 바로 시작된다'}\n"
+        f"감정 전환: {emotion_arc or '불안에서 결단으로'}\n"
+        f"반복 이미지: {motif or label}\n\n"
+        f"직전 장면에서는 주인공이 '{plot_function}' 장면으로 넘어가는 국면에 들어섰다. "
+        f"{scene_goal or '사건의 다음 단서가 구체적인 행동을 요구한다'}. "
+        f"이 장면의 끝은 '{next_hook or '다음 장면으로 이어지는 압박'}'로 이어져야 한다."
     )
     return {
         "world": world,
