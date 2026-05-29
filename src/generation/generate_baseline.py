@@ -31,6 +31,9 @@ def generate_llm_only(
             scene_preset=scene_preset,
         ),
         consistency_rules=allowed_name_instruction(characters),
+        sectioned_output=config.generation.sectioned_output,
+        section_count=config.generation.section_count,
+        section_min_chars=config.generation.section_min_chars,
     )
     text = client.chat(
         prompt,

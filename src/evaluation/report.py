@@ -9,6 +9,7 @@ from src.evaluation.metrics import (
     contradiction_check,
     cosine_similarity,
     dialogue_ratio,
+    hallucination_metrics,
     keyword_consistency,
     length_fit,
     lexical_diversity,
@@ -18,6 +19,7 @@ from src.evaluation.metrics import (
     progression_score,
     repetition_profile,
     repetition_rate,
+    section_structure_metrics,
     sentence_stats,
 )
 from src.generation.consistency import check_name_consistency
@@ -63,8 +65,22 @@ def evaluate_outputs(
             "known_names": consistency.known_names,
             "name_consistency_issues": consistency.issues,
             "name_consistency_score": consistency.score,
+            **section_structure_metrics(
+                text,
+                expected_sections=config.generation.section_count,
+                min_chars_per_section=config.generation.section_min_chars,
+            ),
             **sentence_stats(text),
         }
+        row.update(
+            hallucination_metrics(
+                previous_scene,
+                text,
+                target_novelty=config.generation.hallucination_target,
+                contradictions=row["contradictions"],
+                name_consistency_score=consistency.score,
+            )
+        )
         row["overall_score"] = overall_score(row)
         rows[name] = row
     ranking = sorted(rows, key=lambda key: rows[key]["overall_score"], reverse=True)
@@ -116,9 +132,48 @@ def evaluate_and_write_report(
         json.dumps(metrics, ensure_ascii=False, indent=2),
         "```",
         "",
-        "## Consistency Findings",
+        "## Controlled Hallucination Metrics",
+        "",
+        "Creative expansion is the ratio of generated content tokens not seen in the previous scene. "
+        "Useful hallucination rewards novel material that remains consistent and advances the scene.",
         "",
     ]
+    for name, row in metrics["modes"].items():
+        lines.extend(
+            [
+                f"### {name}",
+                "",
+                f"- creative_expansion_rate: {row.get('creative_expansion_rate', 0.0):.4f}",
+                f"- hallucination_presence: {row.get('hallucination_presence', 'none')}",
+                f"- hallucination_target_alignment: {row.get('hallucination_target_alignment', 0.0):.4f}",
+                f"- useful_hallucination_score: {row.get('useful_hallucination_score', 0.0):.4f}",
+                f"- hallucination_risk: {row.get('hallucination_risk', 0.0):.4f}",
+                "",
+            ]
+        )
+    lines.extend([
+        "## Section Structure Metrics",
+        "",
+        "These metrics check whether the output is shaped like a sectioned novel scene with titled parts and substantial body text.",
+        "",
+    ])
+    for name, row in metrics["modes"].items():
+        lines.extend(
+            [
+                f"### {name}",
+                "",
+                f"- section_count: {row.get('section_count', 0)}",
+                f"- section_count_fit: {row.get('section_count_fit', 0.0):.4f}",
+                f"- sections_with_body: {row.get('sections_with_body', 0)}",
+                f"- section_body_coverage: {row.get('section_body_coverage', 0.0):.4f}",
+                f"- avg_section_body_chars: {row.get('avg_section_body_chars', 0.0):.2f}",
+                "",
+            ]
+        )
+    lines.extend([
+        "## Consistency Findings",
+        "",
+    ])
     for name, row in metrics["modes"].items():
         issues = row.get("name_consistency_issues", [])
         lines.extend([f"### {name}", ""])

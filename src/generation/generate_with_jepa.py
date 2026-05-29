@@ -142,6 +142,9 @@ def generate_with_jepa(
         examples=plan["examples"],
         beat_card=plan["beat_card"],
         consistency_rules=allowed_name_instruction(characters),
+        sectioned_output=config.generation.sectioned_output,
+        section_count=config.generation.section_count,
+        section_min_chars=config.generation.section_min_chars,
     )
     _emit(trace_callback, "Assemble JEPA prompt", "done", {"prompt_chars": len(prompt)})
     _emit(trace_callback, "Generate prose", "running", {"model": config.ollama.chat_model})

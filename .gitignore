@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 *.pyo
 *.log
+hf_access_token.txt
+shared_artifacts/
 
 data/raw/*
 data/synthetic/*

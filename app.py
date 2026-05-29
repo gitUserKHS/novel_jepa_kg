@@ -20,6 +20,7 @@ from src.generation.chat import CHAT_MODES, generate_chat_turn
 from src.generation.generate_baseline import generate_llm_only
 from src.generation.generate_with_jepa import generate_with_jepa
 from src.generation.generate_with_rag import generate_with_rag, plan_rag_generation
+from src.generation.hallucination import CREATIVE_HALLUCINATION_MODE, generate_with_controlled_hallucination
 from src.llm.scene_presets import (
     AUTO_SCENE_PRESET,
     demo_defaults_for_genre,
@@ -50,7 +51,7 @@ PIPELINE_STAGES = [
     {"stage": "Embedding", "work": "Reuse or create scene embeddings, then prepare vectors"},
     {"stage": "Index", "work": "Reuse or build FAISS current-context and next-scene indexes"},
     {"stage": "Train", "work": "Train residual predictor and save best checkpoint"},
-    {"stage": "Generate", "work": "Create LLM-only, RAG, and JEPA outputs"},
+    {"stage": "Generate", "work": "Create LLM-only, RAG, JEPA, and controlled hallucination outputs"},
     {"stage": "Evaluate", "work": "Score outputs and write Markdown report"},
 ]
 
@@ -741,6 +742,48 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
         config.generation.max_tokens = int(
             st.number_input("Max output tokens", min_value=256, max_value=8192, value=config.generation.max_tokens, step=128)
         )
+        config.generation.sectioned_output = st.checkbox(
+            "Write as titled sections",
+            value=config.generation.sectioned_output,
+            help="Generate novel prose as section subtitles followed by substantial body text.",
+        )
+        config.generation.section_count = int(
+            st.number_input(
+                "Section count",
+                min_value=1,
+                max_value=8,
+                value=int(config.generation.section_count),
+                step=1,
+            )
+        )
+        config.generation.section_min_chars = int(
+            st.number_input(
+                "Min chars per section",
+                min_value=100,
+                max_value=1500,
+                value=int(config.generation.section_min_chars),
+                step=50,
+            )
+        )
+        config.generation.hallucination_target = float(
+            st.slider(
+                "Creative hallucination target",
+                min_value=0.0,
+                max_value=0.8,
+                value=float(config.generation.hallucination_target),
+                step=0.05,
+                help="Target share of novel-but-plausible material in controlled hallucination mode.",
+            )
+        )
+        config.generation.hallucination_temperature_delta = float(
+            st.number_input(
+                "Hallucination temperature delta",
+                min_value=0.0,
+                max_value=0.5,
+                value=float(config.generation.hallucination_temperature_delta),
+                step=0.05,
+            )
+        )
         config.generation.enable_consistency_repair = st.checkbox(
             "Auto-repair name consistency",
             value=config.generation.enable_consistency_repair,
@@ -808,6 +851,16 @@ def run_generation_bundle(
             previous_scene,
             stream_callback=stream_callbacks.get("jepa"),
             trace_callback=trace_callbacks.get("jepa"),
+            scene_preset=scene_preset,
+        ),
+        "creative_jepa": generate_with_controlled_hallucination(
+            config,
+            client,
+            world,
+            characters,
+            previous_scene,
+            stream_callback=stream_callbacks.get("creative_jepa"),
+            trace_callback=trace_callbacks.get("creative_jepa"),
             scene_preset=scene_preset,
         ),
     }
@@ -1175,8 +1228,8 @@ def main() -> None:
                 progress.progress(70)
 
                 update_stage(stage_rows, stage_table, 4, "running", "Generating comparison outputs")
-                current_step.info("Step 5/6: LLM-only, RAG, and JEPA generation")
-                generation_views = st.tabs(["LLM only live", "RAG live", "JEPA live"])
+                current_step.info("Step 5/6: LLM-only, RAG, JEPA, and controlled hallucination generation")
+                generation_views = st.tabs(["LLM only live", "RAG live", "JEPA live", "Creative hallucination live"])
                 generation_placeholders = {}
                 trace_placeholders = {}
                 with generation_views[0]:
@@ -1189,6 +1242,10 @@ def main() -> None:
                     st.caption("Pipeline trace shows JEPA prediction/retrieval/prompt/generation steps.")
                     trace_placeholders["jepa"] = st.empty()
                     generation_placeholders["jepa"] = st.empty()
+                with generation_views[3]:
+                    st.caption("Pipeline trace shows JEPA planning plus the controlled hallucination contract.")
+                    trace_placeholders["creative_jepa"] = st.empty()
+                    generation_placeholders["creative_jepa"] = st.empty()
                 outputs = run_generation_bundle(
                     config,
                     client,
@@ -1499,7 +1556,7 @@ def main() -> None:
             height=100,
             key="gen_prev",
         )
-        mode = st.radio("Mode", ["LLM only", "RAG + LLM", "JEPA Planner + RAG + LLM"], horizontal=True)
+        mode = st.radio("Mode", ["LLM only", "RAG + LLM", "JEPA Planner + RAG + LLM", CREATIVE_HALLUCINATION_MODE], horizontal=True)
         if st.button("Generate prose"):
             try:
                 trace_box = st.empty()
@@ -1533,8 +1590,30 @@ def main() -> None:
                     )
                     output = str(result["text"])
                     generation_details = result.get("rag", {})
-                else:
+                elif mode == "JEPA Planner + RAG + LLM":
                     result = generate_with_jepa(
+                        config,
+                        client,
+                        world,
+                        characters,
+                        previous_scene,
+                        stream_callback=stream_callback,
+                        scene_preset=scene_preset,
+                        return_details=True,
+                        trace_callback=trace_callback,
+                    )
+                    output = str(result["text"])
+                    generation_details = result.get("planner", {})
+                    generation_details["rag_baselines"] = plan_rag_generation(
+                        config,
+                        client,
+                        world,
+                        characters,
+                        previous_scene,
+                        scene_preset=scene_preset,
+                    )
+                else:
+                    result = generate_with_controlled_hallucination(
                         config,
                         client,
                         world,
@@ -1564,10 +1643,13 @@ def main() -> None:
                         st.json(analyzed_scene)
                     if generation_details.get("direction"):
                         st.info(f"Predicted direction: {generation_details['direction']}")
+                    if generation_details.get("hallucination_contract"):
+                        st.markdown("##### Controlled hallucination contract")
+                        st.code(generation_details["hallucination_contract"])
                     if "predicted_vector_norm" in generation_details:
                         st.metric("predicted vector norm", f"{generation_details['predicted_vector_norm']:.4f}")
                     retrieved = generation_details.get("retrieved", [])
-                    if retrieved and mode == "JEPA Planner + RAG + LLM":
+                    if retrieved and mode in {"JEPA Planner + RAG + LLM", CREATIVE_HALLUCINATION_MODE}:
                         st.markdown("##### JEPA retrieved examples")
                         st.dataframe(pd.DataFrame(retrieval_preview_rows(retrieved)), hide_index=True, width="stretch")
                     if generation_details.get("current_retrieved"):
@@ -1615,9 +1697,10 @@ def main() -> None:
         llm_only = st.text_area("LLM-only output", height=120)
         rag = st.text_area("RAG output", height=120)
         jepa = st.text_area("JEPA output", height=120)
+        creative_jepa = st.text_area("Controlled hallucination output", height=120)
         if st.button("Write evaluation report"):
             try:
-                outputs = {"llm_only": llm_only, "rag": rag, "jepa": jepa}
+                outputs = {"llm_only": llm_only, "rag": rag, "jepa": jepa, "creative_jepa": creative_jepa}
                 report_path = evaluate_and_write_report(
                     config,
                     client,

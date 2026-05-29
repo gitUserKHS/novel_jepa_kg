@@ -71,8 +71,13 @@ class TrainingConfig(BaseModel):
 class GenerationConfig(BaseModel):
     top_k: int = 5
     rag_context_limit: int = 3
-    max_tokens: int = 1600
+    max_tokens: int = 2600
     temperature: float = 0.8
+    sectioned_output: bool = True
+    section_count: int = 4
+    section_min_chars: int = 450
+    hallucination_target: float = 0.35
+    hallucination_temperature_delta: float = 0.15
     enable_consistency_repair: bool = True
     use_scene_analyzer: bool = True
     style: str = "한국어 웹소설 문체. 감정선은 선명하게, 장면 전환은 자연스럽게."
@@ -82,8 +87,8 @@ class EvaluationConfig(BaseModel):
     use_llm_judge: bool = False
     repetition_ngram: int = 4
     report_dir: str = "reports/runs"
-    target_min_chars: int = 600
-    target_max_chars: int = 1600
+    target_min_chars: int = 1600
+    target_max_chars: int = 4200
     planner_ablation_modes: list[str] = Field(
         default_factory=lambda: [
             "rag_current_index",

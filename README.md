@@ -2,11 +2,12 @@
 
 JEPA-inspired latent planner + local LLM Korean novel generation lab.
 
-This project provides a Streamlit GUI where a user can generate synthetic Korean narrative transition data, validate/filter it, embed scene summaries, train a small embedding-space predictor, and compare three generation modes:
+This project provides a Streamlit GUI where a user can generate synthetic Korean narrative transition data, validate/filter it, embed scene summaries, train a small embedding-space predictor, and compare four generation modes:
 
 1. LLM-only
 2. RAG + LLM
 3. JEPA-inspired Planner + RAG + LLM
+4. Controlled Hallucination + JEPA
 
 The local LLM is not fine-tuned. Only a small PyTorch MLP learns to predict the next narrative-state representation from a structured current narrative context.
 
@@ -21,7 +22,7 @@ Streamlit GUI button
 -> PyTorch predictor trains to predict target representations in latent space
 -> predictor retrieves likely next-scene directions
 -> local LLM writes Korean prose
--> metrics compare LLM-only, RAG, and JEPA modes
+-> metrics compare LLM-only, RAG, JEPA, and controlled hallucination modes
 ```
 
 ## Installation
@@ -193,7 +194,7 @@ Keep `Reuse cached data` on. The first run is slower; later runs reuse samples a
 - Dataset: generate and filter JSONL transition samples
 - Embedding: embed summaries and build the FAISS index
 - Train: train the JEPA-inspired MLP predictor
-- Generate: run LLM-only, RAG, or JEPA planner generation
+- Generate: run LLM-only, RAG, JEPA planner, or controlled hallucination generation
 - Evaluate: write a Markdown comparison report
 - Reports: view saved reports
 
@@ -238,6 +239,8 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - Dataset generation uses a candidate multiplier. If some samples fail JSON/schema validation, the generator can try extra candidate ids without requiring a manual rerun.
 - Synthetic JSON generation defaults to a lower max token budget than prose generation to speed up sample creation while keeping the schema compact.
 - RAG/JEPA generation now feeds the LLM a compact beat card instead of dumping all retrieved context into prose.
+- Prose generation defaults to longer sectioned output: each scene can be written as titled sections with substantial body text under every subtitle.
+- Controlled Hallucination + JEPA adds a fourth creative generation mode: JEPA keeps the next-scene direction grounded, while the prompt asks the LLM to add plausible new clues, symbols, sensory details, or emotional inferences.
 - `Prompt examples` limits how many retrieved examples enter the prompt, while `Retrieval top K` still controls the search pool.
 - Name consistency checks compare generated outputs against the character list and report unknown or likely misspelled names.
 - Optional auto-repair rewrites only detected name inconsistencies before the output is saved.
@@ -252,7 +255,7 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - The FAISS index is reused when it is newer than the embedding file.
 - The predictor defaults to a practical residual MLP: hidden dim 1024, 4 layers, dropout, weight decay, early stopping, gradient clipping, and CUDA FP32 when available.
 - AMP is optional and disabled by default because the small predictor usually does not benefit enough to justify CUDA compatibility risk.
-- Evaluation reports include mode ranking, embedding continuity, repetition profile, keyword consistency, novelty from previous scene, lexical diversity, length fit, progression score, dialogue ratio, sentence stats, contradiction checks, and pairwise output diversity.
+- Evaluation reports include mode ranking, embedding continuity, repetition profile, keyword consistency, novelty from previous scene, lexical diversity, length fit, progression score, dialogue ratio, sentence stats, section structure metrics, contradiction checks, controlled hallucination metrics, and pairwise output diversity.
 - The full pipeline view shows a live stage table, current step message, artifact snapshot, cache reuse counts, and live training loss/cosine charts while training runs.
 - The full pipeline and Generate tab stream prose output while Ollama is generating, then replace the live text with the final consistency-checked text.
 - In the Generate tab and the full-pipeline `RAG live` / `JEPA live` tabs, RAG and JEPA modes show a live pipeline trace before and during the answer: scene analysis, retrieval, JEPA target prediction, prompt assembly, generation, and consistency repair. This is a system trace, not hidden model chain-of-thought.

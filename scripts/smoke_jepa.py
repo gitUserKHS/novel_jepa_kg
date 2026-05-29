@@ -19,6 +19,7 @@ from src.embedding.embed_scenes import embed_dataset
 from src.embedding.vector_store import build_current_context_index, build_next_scene_index, retrieve_by_vector
 from src.generation.generate_with_jepa import generate_with_jepa
 from src.generation.generate_with_rag import generate_with_rag
+from src.generation.hallucination import generate_with_controlled_hallucination
 from src.llm.ollama_client import OllamaClient
 from src.planner.jepa_dataset import MASK_TOKEN, build_context_text, build_target_text
 from src.planner.jepa_model import JEPAPredictor
@@ -190,6 +191,15 @@ def test_dry_run_pipeline() -> None:
         )
         assert isinstance(output, str)
         assert output.strip()
+        creative_output = generate_with_controlled_hallucination(
+            config,
+            client,
+            "湲곗뼲 ?뷀뼢??臾쇰━???붿쟻?쇰줈 ?⑤뒗 洹쇰????쒖슱.",
+            "?쒖쑄: ?숈깮??李얜뒗 湲곕줉 蹂듭썝媛. 誘쇱옱: 吏꾩떎???④릿 ?곌뎄??",
+            "?쒖쑄? ?먯뇙 ?곌뎄?숈뿉???먯긽??濡쒓렇瑜?諛쒓껄?쒕떎.",
+        )
+        assert isinstance(creative_output, str)
+        assert creative_output.strip()
         rag_output = generate_with_rag(
             config,
             client,

@@ -54,10 +54,12 @@
 - [x] Limit retrieved examples injected into prompts.
 - [x] Add optional name consistency repair after generation.
 - [x] Stream generated prose into the UI during generation.
+- [x] Add longer sectioned novel output with titled sections and per-section body targets.
 - [x] Apply selected genre scene presets to LLM-only, RAG, JEPA, and Chat generation.
 - [x] Build compact JEPA planner beat cards from predicted target retrieval.
 - [x] Split RAG baselines into current-context index and next-scene index retrieval.
 - [x] Add synthetic sample diversity axes for JEPA planner training.
+- [x] Add controlled hallucination generation mode for creative but planner-grounded expansion.
 
 ## Phase 4.5 - Chat Memory
 
@@ -66,6 +68,7 @@
 - [x] Extract and merge knowledge graph nodes/edges.
 - [x] Show graph tables and Mermaid text.
 - [x] Support LLM-only, RAG, and JEPA modes in chat generation.
+- [x] Support controlled hallucination mode in chat generation.
 
 ## Phase 5 - Evaluation
 
@@ -77,6 +80,8 @@
 - [x] Add lexical diversity, novelty, progression, length fit, dialogue ratio, sentence stats, ranking, and pairwise output diversity.
 - [x] Add planner diagnostics to comparison reports.
 - [x] Report validation-first planner metrics and RAG-current/RAG-next/JEPA-next baseline overlap.
+- [x] Measure creative expansion, hallucination presence, useful hallucination score, and hallucination risk.
+- [x] Measure section count fit and per-section body coverage.
 - [ ] Optional LLM judge.
 - [x] Markdown report export.
 

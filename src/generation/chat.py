@@ -4,6 +4,11 @@ from typing import Any, Callable
 
 from src.embedding.vector_store import retrieve_by_text, retrieve_by_vector
 from src.generation.consistency import allowed_name_instruction, build_beat_card, repair_name_consistency
+from src.generation.hallucination import (
+    CREATIVE_HALLUCINATION_MODE,
+    build_hallucination_contract,
+    hallucination_temperature,
+)
 from src.llm.ollama_client import OllamaClient
 from src.llm.prompts import prose_prompt
 from src.memory.context import (
@@ -18,7 +23,7 @@ from src.session.store import append_message, append_scene_summary, save_session
 from src.utils.config import AppConfig
 
 
-CHAT_MODES = ["LLM only", "RAG + LLM", "JEPA Planner + RAG + LLM"]
+CHAT_MODES = ["LLM only", "RAG + LLM", "JEPA Planner + RAG + LLM", CREATIVE_HALLUCINATION_MODE]
 
 
 def _previous_scene_for_retrieval(session: dict[str, Any], user_instruction: str) -> str:
@@ -81,6 +86,16 @@ def generate_chat_turn(
     append_message(session, "user", user_instruction, mode=mode)
     memory_context = build_memory_prompt(config, session, user_instruction)
     direction, examples, retrieved = _retrieve_examples(config, client, session, user_instruction, mode)
+    beat_card = build_beat_card(
+        mode,
+        direction,
+        examples,
+        session.get("characters", ""),
+        config.generation.rag_context_limit,
+        scene_preset=scene_preset,
+    )
+    if mode == CREATIVE_HALLUCINATION_MODE:
+        beat_card = "\n".join([beat_card, build_hallucination_contract(config.generation.hallucination_target)])
     prompt = prose_prompt(
         world=session.get("world", ""),
         characters=session.get("characters", ""),
@@ -88,20 +103,17 @@ def generate_chat_turn(
         style=config.generation.style,
         direction=direction,
         examples=examples,
-        beat_card=build_beat_card(
-            mode,
-            direction,
-            examples,
-            session.get("characters", ""),
-            config.generation.rag_context_limit,
-            scene_preset=scene_preset,
-        ),
+        beat_card=beat_card,
         consistency_rules=allowed_name_instruction(session.get("characters", "")),
+        sectioned_output=config.generation.sectioned_output,
+        section_count=config.generation.section_count,
+        section_min_chars=config.generation.section_min_chars,
     )
+    temperature = hallucination_temperature(config) if mode == CREATIVE_HALLUCINATION_MODE else config.generation.temperature
     assistant_text = client.chat(
         prompt,
         system="당신은 장편 한국어 웹소설을 세션 메모리와 설정에 맞춰 이어 쓰는 작가입니다.",
-        temperature=config.generation.temperature,
+        temperature=temperature,
         max_tokens=config.generation.max_tokens,
         stream_callback=stream_callback,
     ).strip()
@@ -123,6 +135,7 @@ def generate_chat_turn(
             "direction": direction,
             "scene_preset_id": scene_preset.get("id", "") if scene_preset else "",
             "scene_preset_label": scene_preset.get("label", "") if scene_preset else "",
+            "hallucination_target": config.generation.hallucination_target if mode == CREATIVE_HALLUCINATION_MODE else None,
         },
     )
     scene_summary = summarize_scene(config, client, assistant_text)

@@ -176,15 +176,43 @@ def prose_prompt(
     examples: list[str] | None = None,
     beat_card: str | None = None,
     consistency_rules: str | None = None,
+    sectioned_output: bool = False,
+    section_count: int = 1,
+    section_min_chars: int = 0,
 ) -> str:
     example_text = "\n".join(f"- {example}" for example in (examples or []))
-    natural_prose_rules = """
+    safe_section_count = max(1, min(8, int(section_count)))
+    safe_section_min_chars = max(0, int(section_min_chars))
+    if sectioned_output:
+        target_min_chars = safe_section_count * safe_section_min_chars
+        natural_prose_rules = f"""
+- Beat Card and retrieved examples are private planning notes, not visible output.
+- Write the final answer as a sectioned Korean novel scene.
+- Use exactly {safe_section_count} sections.
+- Start every section with a short Korean subtitle in this format: ### subtitle.
+- After each subtitle, write immersive prose paragraphs, not bullet points or summaries.
+- Each section should contain at least {safe_section_min_chars} Korean characters of story content.
+- Target at least {target_min_chars} Korean characters total, unless the model token limit stops earlier.
+- Make each section perform a different narrative job: opening pressure, discovery/escalation, emotional turn, and hook.
+- Do not leave any subtitle without body text.
+- Do not write analysis, planning notes, numbered beats, or explanations.
+- Do not mechanically include every retrieved clue. Pick only the details that fit the current scene.
+- Keep the prose sensory and continuous: action, perception, dialogue, hesitation, and consequence.
+- Vary sentence length. Avoid repetitive transition phrases and template-like scene openings.
+"""
+    else:
+        natural_prose_rules = """
 - Beat Card and retrieved examples are private planning notes, not visible output.
 - Do not write headings, bullet points, numbered beats, analysis, or summaries.
 - Do not mechanically include every retrieved clue. Pick only the details that fit the current scene.
 - Keep the prose sensory and continuous: action, perception, dialogue, hesitation, and consequence.
 - Vary sentence length. Avoid repetitive transition phrases and template-like scene openings.
 """
+    length_rule = (
+        f"- Use exactly {safe_section_count} titled sections with substantial body text."
+        if sectioned_output
+        else "- Write one continuous prose scene."
+    )
     return f"""
 아래 설정을 바탕으로 다음 장면의 한국어 웹소설 본문을 작성하세요.
 
@@ -215,9 +243,13 @@ def prose_prompt(
 [Natural prose rules]
 {natural_prose_rules}
 
+[Output structure]
+- Write in Korean.
+{length_rule}
+
 출력 조건:
 - 본문만 출력합니다.
-- 1200자 이내.
+- Token budget is controlled by the app setting; prefer complete sections over abrupt cutoff.
 - 새 단서, 감정 변화, 다음 선택지를 포함합니다.
 - 이전 장면을 반복 요약하지 말고, 사건의 상태를 한 단계 바꿉니다.
 - 입력 인물표에 없는 이름을 만들지 않습니다.

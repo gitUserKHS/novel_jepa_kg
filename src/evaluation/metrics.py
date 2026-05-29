@@ -9,6 +9,8 @@ import numpy as np
 TOKEN_RE = re.compile(r"[가-힣A-Za-z0-9]+")
 SENTENCE_RE = re.compile(r"[^.!?。！？\n]+[.!?。！？]?")
 
+SECTION_HEADING_RE = re.compile(r"(?m)^#{2,3}\s+(.+?)\s*$")
+
 
 def tokenize(text: str) -> list[str]:
     return TOKEN_RE.findall(text)
@@ -45,6 +47,36 @@ def sentence_stats(text: str) -> dict[str, float]:
     }
 
 
+def section_structure_metrics(text: str, expected_sections: int = 4, min_chars_per_section: int = 450) -> dict[str, float | int]:
+    matches = list(SECTION_HEADING_RE.finditer(text))
+    if not matches:
+        return {
+            "section_count": 0,
+            "section_count_fit": 0.0,
+            "sections_with_body": 0,
+            "section_body_coverage": 0.0,
+            "avg_section_body_chars": 0.0,
+        }
+
+    body_lengths: list[int] = []
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        body_lengths.append(len(text[start:end].strip()))
+
+    expected = max(1, expected_sections)
+    min_chars = max(1, min_chars_per_section)
+    sections_with_body = sum(1 for length in body_lengths if length >= min_chars)
+    count_fit = 1.0 - min(1.0, abs(len(matches) - expected) / expected)
+    return {
+        "section_count": len(matches),
+        "section_count_fit": round(max(0.0, count_fit), 4),
+        "sections_with_body": sections_with_body,
+        "section_body_coverage": round(sections_with_body / max(1, len(matches)), 4),
+        "avg_section_body_chars": round(sum(body_lengths) / max(1, len(body_lengths)), 2),
+    }
+
+
 def dialogue_ratio(text: str) -> float:
     if not text:
         return 0.0
@@ -67,6 +99,54 @@ def novelty_from_previous(reference: str, generated: str) -> float:
         return 0.0
     overlap = len(ref_words & gen_words) / max(1, len(gen_words))
     return max(0.0, min(1.0, 1.0 - overlap))
+
+
+def hallucination_metrics(
+    reference: str,
+    generated: str,
+    *,
+    target_novelty: float = 0.35,
+    contradictions: list[str] | None = None,
+    name_consistency_score: float = 1.0,
+) -> dict[str, float | str]:
+    ref_words = {word.lower() for word in tokenize(reference) if len(word) >= 2}
+    gen_words = [word.lower() for word in tokenize(generated) if len(word) >= 2]
+    if not gen_words:
+        return {
+            "supported_token_ratio": 0.0,
+            "creative_expansion_rate": 0.0,
+            "hallucination_presence": "none",
+            "hallucination_target_alignment": 0.0,
+            "useful_hallucination_score": 0.0,
+            "hallucination_risk": 0.0,
+        }
+
+    novel_count = sum(1 for word in gen_words if word not in ref_words)
+    creative_expansion = novel_count / max(1, len(gen_words))
+    supported_ratio = 1.0 - creative_expansion
+    contradiction_count = len(contradictions or [])
+    contradiction_penalty = min(1.0, contradiction_count * 0.25)
+    consistency_factor = max(0.0, min(1.0, name_consistency_score)) * (1.0 - contradiction_penalty)
+    progression_factor = 0.5 + 0.5 * progression_score(generated)
+    useful_score = creative_expansion * consistency_factor * progression_factor
+    target = max(0.0, min(1.0, target_novelty))
+    target_alignment = 1.0 - min(1.0, abs(creative_expansion - target))
+    risk = max(0.0, creative_expansion - keyword_consistency(reference, generated)) + contradiction_penalty
+    risk = max(0.0, min(1.0, risk))
+    if creative_expansion < 0.15:
+        presence = "low"
+    elif creative_expansion < 0.35:
+        presence = "moderate"
+    else:
+        presence = "high"
+    return {
+        "supported_token_ratio": round(supported_ratio, 4),
+        "creative_expansion_rate": round(creative_expansion, 4),
+        "hallucination_presence": presence,
+        "hallucination_target_alignment": round(target_alignment, 4),
+        "useful_hallucination_score": round(max(0.0, min(1.0, useful_score)), 4),
+        "hallucination_risk": round(risk, 4),
+    }
 
 
 def length_fit(text: str, target_min_chars: int, target_max_chars: int) -> float:
@@ -137,6 +217,10 @@ def overall_score(metrics: dict[str, float | int | list | dict]) -> float:
     lexical = min(1.0, float(metrics.get("lexical_diversity", 0.0)) / 0.75)
     length = float(metrics.get("length_fit", 0.0))
     consistency = float(metrics.get("name_consistency_score", 1.0))
+    section_fit = float(metrics.get("section_count_fit", 0.0))
+    section_body = float(metrics.get("section_body_coverage", 0.0))
+    useful_hallucination = float(metrics.get("useful_hallucination_score", 0.0))
+    hallucination_risk = float(metrics.get("hallucination_risk", 0.0))
     repetition = float(metrics.get("repetition_rate", 0.0))
     contradictions = metrics.get("contradictions", [])
     contradiction_penalty = min(0.25, 0.08 * len(contradictions)) if isinstance(contradictions, list) else 0.0
@@ -148,7 +232,11 @@ def overall_score(metrics: dict[str, float | int | list | dict]) -> float:
         + 0.10 * lexical
         + 0.13 * length
         + 0.12 * consistency
+        + 0.05 * section_body
+        + 0.03 * section_fit
+        + 0.08 * useful_hallucination
         - 0.25 * repetition
+        - 0.08 * hallucination_risk
         - contradiction_penalty
     )
     return round(max(0.0, min(1.0, score)), 4)

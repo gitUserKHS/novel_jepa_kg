@@ -104,6 +104,9 @@ def generate_with_rag(
             scene_preset=scene_preset,
         ),
         consistency_rules=allowed_name_instruction(characters),
+        sectioned_output=config.generation.sectioned_output,
+        section_count=config.generation.section_count,
+        section_min_chars=config.generation.section_min_chars,
     )
     _emit(trace_callback, "Assemble RAG prompt", "done", {"prompt_chars": len(prompt)})
     _emit(trace_callback, "Generate prose", "running", {"model": config.ollama.chat_model})
