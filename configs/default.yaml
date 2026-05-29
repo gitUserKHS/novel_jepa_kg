@@ -8,9 +8,9 @@ ollama:
   chat_model: "gemma4:e4b"
   embed_model: "embeddinggemma:latest"
   timeout_sec: 120
-  num_ctx: 4096
-  num_gpu: 40
-  num_batch: 128
+  num_ctx: 3072
+  num_gpu: 35
+  num_batch: 64
   keep_alive: "30s"
   manage_vram: true
   retry_attempts: 1
@@ -64,11 +64,11 @@ training:
 generation:
   top_k: 5
   rag_context_limit: 3
-  max_tokens: 2600
+  max_tokens: 2200
   temperature: 0.8
   sectioned_output: true
   section_count: 4
-  section_min_chars: 450
+  section_min_chars: 400
   hallucination_target: 0.35
   hallucination_temperature_delta: 0.15
   enable_consistency_repair: true
@@ -79,8 +79,8 @@ evaluation:
   use_llm_judge: false
   repetition_ngram: 4
   report_dir: "reports/runs"
-  target_min_chars: 1600
-  target_max_chars: 4200
+  target_min_chars: 1400
+  target_max_chars: 3600
   planner_ablation_modes:
     - "rag_current_index"
     - "rag_next_index"

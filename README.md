@@ -2,12 +2,10 @@
 
 JEPA-inspired latent planner + local LLM Korean novel generation lab.
 
-This project provides a Streamlit GUI where a user can generate synthetic Korean narrative transition data, validate/filter it, embed scene summaries, train a small embedding-space predictor, and compare four generation modes:
+This project provides a Streamlit GUI where a user can generate synthetic Korean narrative transition data, validate/filter it, embed scene summaries, train a small embedding-space predictor, and compare the two main planner-backed generation modes:
 
-1. LLM-only
-2. RAG + LLM
-3. JEPA-inspired Planner + RAG + LLM
-4. Controlled Hallucination + JEPA
+1. JEPA-inspired Planner + RAG + LLM
+2. Controlled Hallucination + JEPA
 
 The local LLM is not fine-tuned. Only a small PyTorch MLP learns to predict the next narrative-state representation from a structured current narrative context.
 
@@ -22,7 +20,7 @@ Streamlit GUI button
 -> PyTorch predictor trains to predict target representations in latent space
 -> predictor retrieves likely next-scene directions
 -> local LLM writes Korean prose
--> metrics compare LLM-only, RAG, JEPA, and controlled hallucination modes
+-> metrics compare JEPA and controlled hallucination modes
 ```
 
 ## Installation
@@ -114,7 +112,7 @@ Embedding model: embeddinggemma:latest
 ```
 
 If Ollama is reachable, the sidebar shows installed models as dropdowns. You can still choose `직접 입력` when you want to type a model name manually.
-The default chat model is `gemma4:e4b`. On the target RTX 4060 8GB setup this model should be treated as a partial-offload model, not a full-VRAM model. The app sends controlled Ollama options by default: `num_gpu=40`, `num_ctx=4096`, `num_batch=128`, and `keep_alive=30s`.
+The default chat model is `gemma4:e4b`. On the target RTX 4060 8GB setup this model should be treated as a partial-offload model, not a full-VRAM model. The app sends controlled Ollama options by default: `num_gpu=35`, `num_ctx=3072`, `num_batch=64`, and `keep_alive=30s`.
 Use the sidebar `Ollama runtime` expander to check loaded models, approximate GPU residency, VRAM size, and context length. If `model runner has unexpectedly stopped` appears, lower `Ollama GPU layers`, `Ollama context length`, or `Ollama batch size`.
 The `Ollama 500 recovery` expander controls the automatic recovery path for intermittent runner crashes. When `/api/chat` returns a recoverable 500-class error before any streamed text is shown, the app unloads the chat and embedding models, waits briefly, then retries once with conservative fallback options: `num_gpu=35`, `num_ctx=3072`, `num_batch=64`, `num_predict=1200`, and `keep_alive=10s`.
 
@@ -257,8 +255,9 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - AMP is optional and disabled by default because the small predictor usually does not benefit enough to justify CUDA compatibility risk.
 - Evaluation reports include mode ranking, embedding continuity, repetition profile, keyword consistency, novelty from previous scene, lexical diversity, length fit, progression score, dialogue ratio, sentence stats, section structure metrics, contradiction checks, controlled hallucination metrics, and pairwise output diversity.
 - The full pipeline view shows a live stage table, current step message, artifact snapshot, cache reuse counts, and live training loss/cosine charts while training runs.
+- The full pipeline streams only the JEPA and Controlled Hallucination + JEPA outputs to reduce local Ollama VRAM pressure.
 - The full pipeline and Generate tab stream prose output while Ollama is generating, then replace the live text with the final consistency-checked text.
-- In the Generate tab and the full-pipeline `RAG live` / `JEPA live` tabs, RAG and JEPA modes show a live pipeline trace before and during the answer: scene analysis, retrieval, JEPA target prediction, prompt assembly, generation, and consistency repair. This is a system trace, not hidden model chain-of-thought.
+- In the Generate tab and the full-pipeline `JEPA live` / `Creative hallucination live` tabs, planner-backed modes show a live pipeline trace before and during the answer: scene analysis, retrieval, JEPA target prediction, prompt assembly, generation, and consistency repair. This is a system trace, not hidden model chain-of-thought.
 - The full pipeline has its own training controls in the Project tab. The default predictor training budget is 80 epochs with early stopping patience 12, so the small JEPA-inspired MLP can train longer without always running every epoch.
 - If the training graph ends before the requested epoch count, early stopping fired because validation cosine did not improve for the patience window. Set patience to `0` or enable `Run all requested epochs` to force the full epoch count.
 - Chat sessions are stored as JSON files under `data/sessions/` and keep messages, scene summaries, a long-term memory summary, story state, and a knowledge graph.

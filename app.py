@@ -51,7 +51,7 @@ PIPELINE_STAGES = [
     {"stage": "Embedding", "work": "Reuse or create scene embeddings, then prepare vectors"},
     {"stage": "Index", "work": "Reuse or build FAISS current-context and next-scene indexes"},
     {"stage": "Train", "work": "Train residual predictor and save best checkpoint"},
-    {"stage": "Generate", "work": "Create LLM-only, RAG, JEPA, and controlled hallucination outputs"},
+    {"stage": "Generate", "work": "Create JEPA and controlled hallucination outputs"},
     {"stage": "Evaluate", "work": "Score outputs and write Markdown report"},
 ]
 
@@ -824,25 +824,6 @@ def run_generation_bundle(
     stream_callbacks = stream_callbacks or {}
     trace_callbacks = trace_callbacks or {}
     return {
-        "llm_only": generate_llm_only(
-            config,
-            client,
-            world,
-            characters,
-            previous_scene,
-            stream_callback=stream_callbacks.get("llm_only"),
-            scene_preset=scene_preset,
-        ),
-        "rag": generate_with_rag(
-            config,
-            client,
-            world,
-            characters,
-            previous_scene,
-            stream_callback=stream_callbacks.get("rag"),
-            trace_callback=trace_callbacks.get("rag"),
-            scene_preset=scene_preset,
-        ),
         "jepa": generate_with_jepa(
             config,
             client,
@@ -1228,21 +1209,15 @@ def main() -> None:
                 progress.progress(70)
 
                 update_stage(stage_rows, stage_table, 4, "running", "Generating comparison outputs")
-                current_step.info("Step 5/6: LLM-only, RAG, JEPA, and controlled hallucination generation")
-                generation_views = st.tabs(["LLM only live", "RAG live", "JEPA live", "Creative hallucination live"])
+                current_step.info("Step 5/6: JEPA and controlled hallucination generation")
+                generation_views = st.tabs(["JEPA live", "Creative hallucination live"])
                 generation_placeholders = {}
                 trace_placeholders = {}
                 with generation_views[0]:
-                    generation_placeholders["llm_only"] = st.empty()
-                with generation_views[1]:
-                    st.caption("Pipeline trace shows RAG analysis/retrieval/prompt/generation steps.")
-                    trace_placeholders["rag"] = st.empty()
-                    generation_placeholders["rag"] = st.empty()
-                with generation_views[2]:
                     st.caption("Pipeline trace shows JEPA prediction/retrieval/prompt/generation steps.")
                     trace_placeholders["jepa"] = st.empty()
                     generation_placeholders["jepa"] = st.empty()
-                with generation_views[3]:
+                with generation_views[1]:
                     st.caption("Pipeline trace shows JEPA planning plus the controlled hallucination contract.")
                     trace_placeholders["creative_jepa"] = st.empty()
                     generation_placeholders["creative_jepa"] = st.empty()
@@ -1694,13 +1669,11 @@ def main() -> None:
         )
         eval_world = st.text_area("World setting for consistency check", height=80, key="eval_world")
         eval_characters = st.text_area("Known characters for consistency check", height=80, key="eval_characters")
-        llm_only = st.text_area("LLM-only output", height=120)
-        rag = st.text_area("RAG output", height=120)
         jepa = st.text_area("JEPA output", height=120)
         creative_jepa = st.text_area("Controlled hallucination output", height=120)
         if st.button("Write evaluation report"):
             try:
-                outputs = {"llm_only": llm_only, "rag": rag, "jepa": jepa, "creative_jepa": creative_jepa}
+                outputs = {"jepa": jepa, "creative_jepa": creative_jepa}
                 report_path = evaluate_and_write_report(
                     config,
                     client,

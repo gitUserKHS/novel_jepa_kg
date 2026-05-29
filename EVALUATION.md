@@ -1,15 +1,14 @@
 # Evaluation Plan
 
-Compare four generation modes:
+The automatic pipeline now compares two planner-backed generation modes:
 
-1. LLM-only
-2. RAG + LLM
-3. JEPA Planner + RAG + LLM
-4. Controlled Hallucination + JEPA
+1. JEPA Planner + RAG + LLM
+2. Controlled Hallucination + JEPA
 
-The fourth mode treats hallucination as controlled creative expansion: the model
-is asked to add plausible new details, clues, symbols, or emotional inferences
-while preserving world rules, known character names, and JEPA/RAG direction.
+The controlled hallucination mode treats hallucination as creative expansion:
+the model is asked to add plausible new details, clues, symbols, or emotional
+inferences while preserving world rules, known character names, and JEPA/RAG
+direction.
 
 ## Automatic Metrics
 
@@ -61,7 +60,7 @@ Save a Markdown report containing:
 - config snapshot
 - dataset size
 - training curve
-- generation outputs from four modes
+- generation outputs from the two pipeline modes
 - controlled hallucination output and metrics
 - section structure metrics
 - metric table

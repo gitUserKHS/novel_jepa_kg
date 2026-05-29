@@ -12,9 +12,9 @@ class OllamaConfig(BaseModel):
     chat_model: str = "gemma4:e4b"
     embed_model: str = "embeddinggemma:latest"
     timeout_sec: int = 120
-    num_ctx: int = 4096
-    num_gpu: int = 40
-    num_batch: int = 128
+    num_ctx: int = 3072
+    num_gpu: int = 35
+    num_batch: int = 64
     keep_alive: str = "30s"
     manage_vram: bool = True
     retry_attempts: int = 1
@@ -71,11 +71,11 @@ class TrainingConfig(BaseModel):
 class GenerationConfig(BaseModel):
     top_k: int = 5
     rag_context_limit: int = 3
-    max_tokens: int = 2600
+    max_tokens: int = 2200
     temperature: float = 0.8
     sectioned_output: bool = True
     section_count: int = 4
-    section_min_chars: int = 450
+    section_min_chars: int = 400
     hallucination_target: float = 0.35
     hallucination_temperature_delta: float = 0.15
     enable_consistency_repair: bool = True
@@ -87,8 +87,8 @@ class EvaluationConfig(BaseModel):
     use_llm_judge: bool = False
     repetition_ngram: int = 4
     report_dir: str = "reports/runs"
-    target_min_chars: int = 1600
-    target_max_chars: int = 4200
+    target_min_chars: int = 1400
+    target_max_chars: int = 3600
     planner_ablation_modes: list[str] = Field(
         default_factory=lambda: [
             "rag_current_index",

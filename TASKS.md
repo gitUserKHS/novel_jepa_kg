@@ -60,6 +60,7 @@
 - [x] Split RAG baselines into current-context index and next-scene index retrieval.
 - [x] Add synthetic sample diversity axes for JEPA planner training.
 - [x] Add controlled hallucination generation mode for creative but planner-grounded expansion.
+- [x] Limit the full pipeline comparison to JEPA and controlled hallucination outputs for lower VRAM pressure.
 
 ## Phase 4.5 - Chat Memory
 
