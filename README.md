@@ -153,6 +153,12 @@ The continuation survives an app restart because prose, section memories,
 compressed timeline, state ledger, knowledge graph, and run state are saved
 after every section.
 
+Each section is also replanned with one primary narrative function. A consumed
+beat ledger records completed reveals, alliance shifts, warnings, movements,
+clue resolutions, threats, and emotional turns. If a new section appears to
+announce one of those events again, the generator lowers the temperature and
+rewrites that section once before saving it.
+
 - A `.zip` continuation bundle restores prose, memory, KG/state, turn progress,
   world setting, characters, and the original previous-scene seed.
 - A plain `.md` or `.txt` draft is also accepted. Its compact memories, state
@@ -263,6 +269,9 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - `reports/runs/creative_longform_latest.md` is updated after every completed section, so a partial draft survives an Ollama failure.
 - Each section also produces a compact private continuity record in the same Ollama response. This avoids an extra summarization call.
 - Story-memory RAG combines relevant section memories with a latest-state ledger, unresolved clue ledger, query-relevant KG triples, and four-section compressed timeline.
+- Per-section direction updates choose exactly one primary narrative function and include a bounded consumed-beat summary.
+- The repetition guard checks completed sections against consumed reveals, alliance shifts, system warnings, movements, clue resolutions, threats, and emotional turns, then retries a repeated section once at a lower temperature.
+- Run state and evaluation reports track repeated subtitles, repeated narrative beats, adjacent-section similarity, repetition retry count, and retry success rate.
 - The 8K context budget carries only the recent prose excerpt and the most relevant compressed memory/KG slice instead of the full draft.
 - `reports/runs/creative_longform_memory.jsonl` is updated after every section and can be inspected separately from the prose checkpoint.
 - `reports/runs/creative_longform_ledger.json` stores current states, KG relations, clue status, and hierarchical summaries.
@@ -282,7 +291,7 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - The FAISS index is reused when it is newer than the embedding file.
 - The predictor defaults to a practical residual MLP: hidden dim 1024, 4 layers, dropout, weight decay, early stopping, gradient clipping, and CUDA FP32 when available.
 - AMP is optional and disabled by default because the small predictor usually does not benefit enough to justify CUDA compatibility risk.
-- Evaluation reports include mode ranking, embedding continuity, repetition profile, keyword consistency, novelty from previous scene, lexical diversity, length fit, progression score, dialogue ratio, sentence stats, section structure metrics, contradiction checks, controlled hallucination metrics, and pairwise output diversity.
+- Evaluation reports include mode ranking, embedding continuity, repetition profile, narrative-beat repetition, adjacent-section similarity, retry statistics, keyword consistency, novelty from previous scene, lexical diversity, length fit, progression score, dialogue ratio, sentence stats, section structure metrics, contradiction checks, controlled hallucination metrics, and pairwise output diversity.
 - The full pipeline view shows a live stage table, current step message, artifact snapshot, cache reuse counts, and live training loss/cosine charts while training runs.
 - The full pipeline streams only the Creative Hallucination + JEPA novel to reduce local Ollama VRAM pressure.
 - Streaming UI updates are throttled, avoiding a full Streamlit rerender for every generated character.

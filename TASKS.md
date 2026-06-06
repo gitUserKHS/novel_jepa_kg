@@ -74,6 +74,10 @@
 - [x] Add latest entity-state tracking and knowledge-graph triples to section memory.
 - [x] Add hierarchical multi-section compression without extra LLM calls.
 - [x] Fit recent prose, compressed memory, and KG retrieval into an 8K context budget.
+- [x] Track consumed narrative beats and include them in every following section prompt.
+- [x] Assign exactly one primary narrative function through a per-section direction update.
+- [x] Detect repeated plot beats after generation and retry the section once at a lower temperature.
+- [x] Report repeated subtitles, repeated beats, adjacent-section similarity, and retry success statistics.
 
 ## Phase 4.5 - Chat Memory
 

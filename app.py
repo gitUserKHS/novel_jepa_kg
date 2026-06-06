@@ -83,6 +83,10 @@ DEFAULT_LONGFORM_SETTINGS = {
     "story_memory_path": "reports/runs/creative_longform_memory.jsonl",
     "story_ledger_path": "reports/runs/creative_longform_ledger.json",
     "story_summary_group_size": 4,
+    "enable_consumed_beat_ledger": True,
+    "enable_repetition_retry": True,
+    "repetition_retry_temperature_delta": -0.25,
+    "consumed_beat_context_chars": 1200,
 }
 
 GENRE_PRESETS = [
@@ -877,6 +881,41 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
                 value=int(config.generation.story_summary_group_size),
                 step=1,
                 disabled=not config.generation.enable_story_memory_rag,
+            )
+        )
+        config.generation.enable_consumed_beat_ledger = st.checkbox(
+            "Use consumed narrative beat ledger",
+            value=config.generation.enable_consumed_beat_ledger,
+            help="Tracks completed reveals, relationship shifts, warnings, movements, and clue resolutions so later sections treat them as canon instead of announcing them again.",
+        )
+        config.generation.enable_repetition_retry = st.checkbox(
+            "Retry a repeated section once",
+            value=config.generation.enable_repetition_retry,
+            help="Checks each completed section against consumed beats and rewrites it once at a lower temperature when repetition is detected.",
+            disabled=not config.generation.enable_consumed_beat_ledger,
+        )
+        config.generation.repetition_retry_temperature_delta = float(
+            st.number_input(
+                "Repetition retry temperature delta",
+                min_value=-0.6,
+                max_value=0.0,
+                value=float(config.generation.repetition_retry_temperature_delta),
+                step=0.05,
+                disabled=not (
+                    config.generation.enable_consumed_beat_ledger
+                    and config.generation.enable_repetition_retry
+                ),
+            )
+        )
+        config.generation.consumed_beat_context_chars = int(
+            st.number_input(
+                "Consumed beat context chars",
+                min_value=300,
+                max_value=2400,
+                value=int(config.generation.consumed_beat_context_chars),
+                step=100,
+                help="Bounds the compact list of already-used narrative events added to each section prompt.",
+                disabled=not config.generation.enable_consumed_beat_ledger,
             )
         )
         config.generation.hallucination_target = float(
@@ -1830,6 +1869,25 @@ def main() -> None:
                             st.success(f"Story-memory ledger: {generation_details['story_memory_path']}")
                         if generation_details.get("story_ledger_path"):
                             st.success(f"State / KG ledger: {generation_details['story_ledger_path']}")
+                    if generation_details.get("consumed_beat_ledger_enabled"):
+                        guard_cols = st.columns(3)
+                        guard_cols[0].metric(
+                            "consumed beats",
+                            generation_details.get("consumed_beat_count", 0),
+                        )
+                        guard_cols[1].metric(
+                            "repeat retries",
+                            generation_details.get("turn_repetition_retries", 0),
+                        )
+                        guard_cols[2].metric(
+                            "retry successes",
+                            generation_details.get("turn_retry_successes", 0),
+                        )
+                        retry_reasons = generation_details.get("retry_reasons", [])
+                        if retry_reasons:
+                            with st.expander("Recent repetition guard reasons"):
+                                for reason in retry_reasons:
+                                    st.write(f"- {reason}")
                     retrieved = generation_details.get("retrieved", [])
                     if retrieved:
                         st.markdown("##### JEPA retrieved examples")

@@ -24,6 +24,7 @@ from src.evaluation.metrics import (
 )
 from src.generation.consistency import check_name_consistency
 from src.llm.ollama_client import OllamaClient
+from src.memory.beat_ledger import narrative_beat_metrics
 from src.planner.predict import evaluate_planner_diagnostics
 from src.utils.config import AppConfig
 from src.utils.paths import resolve_path
@@ -78,6 +79,7 @@ def evaluate_outputs(
                 expected_sections=config.generation.section_count,
                 min_chars_per_section=config.generation.section_min_chars,
             ),
+            **narrative_beat_metrics(text),
             **sentence_stats(text),
         }
         row.update(
@@ -110,6 +112,26 @@ def evaluate_and_write_report(
     report_dir = resolve_path(config, config.evaluation.report_dir)
     report_dir.mkdir(parents=True, exist_ok=True)
     metrics = evaluate_outputs(config, client, previous_scene, outputs, characters=characters)
+    run_state_path = resolve_path(config, config.generation.longform_state_path)
+    generation_guard = {
+        "repetition_retry_count": 0,
+        "retry_success_count": 0,
+        "retry_success_rate": 0.0,
+    }
+    if run_state_path.exists():
+        try:
+            run_state = json.loads(run_state_path.read_text(encoding="utf-8"))
+            retry_count = int(run_state.get("repetition_retry_count", 0) or 0)
+            success_count = int(run_state.get("retry_success_count", 0) or 0)
+            generation_guard = {
+                "repetition_retry_count": retry_count,
+                "retry_success_count": success_count,
+                "retry_success_rate": round(success_count / max(1, retry_count), 4),
+                "recent_retry_reasons": run_state.get("retry_reasons", []),
+            }
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            pass
+    metrics["generation_guard"] = generation_guard
     planner_diagnostics = evaluate_planner_diagnostics(config, top_k=config.generation.top_k)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = report_dir / f"comparison_{timestamp}.md"
@@ -156,6 +178,30 @@ def evaluate_and_write_report(
                 f"- hallucination_target_alignment: {row.get('hallucination_target_alignment', 0.0):.4f}",
                 f"- useful_hallucination_score: {row.get('useful_hallucination_score', 0.0):.4f}",
                 f"- hallucination_risk: {row.get('hallucination_risk', 0.0):.4f}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Narrative Repetition Guard",
+            "",
+            "Consumed-beat metrics distinguish repeated plot events from ordinary word-level repetition.",
+            "",
+            f"- repetition_retry_count: {generation_guard['repetition_retry_count']}",
+            f"- retry_success_count: {generation_guard['retry_success_count']}",
+            f"- retry_success_rate: {generation_guard['retry_success_rate']:.4f}",
+            "",
+        ]
+    )
+    for name, row in metrics["modes"].items():
+        lines.extend(
+            [
+                f"### {name}",
+                "",
+                f"- repeated_subtitle_count: {row.get('repeated_subtitle_count', 0)}",
+                f"- repeated_narrative_beat_count: {row.get('repeated_narrative_beat_count', 0)}",
+                f"- adjacent_section_similarity: {row.get('adjacent_section_similarity', 0.0):.4f}",
+                f"- max_adjacent_section_similarity: {row.get('max_adjacent_section_similarity', 0.0):.4f}",
                 "",
             ]
         )

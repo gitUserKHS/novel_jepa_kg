@@ -82,6 +82,10 @@ generation:
   story_memory_path: "reports/runs/creative_longform_memory.jsonl"
   story_ledger_path: "reports/runs/creative_longform_ledger.json"
   story_summary_group_size: 4
+  enable_consumed_beat_ledger: true
+  enable_repetition_retry: true
+  repetition_retry_temperature_delta: -0.25
+  consumed_beat_context_chars: 1200
   hallucination_target: 0.35
   hallucination_temperature_delta: 0.15
   enable_consistency_repair: false

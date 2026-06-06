@@ -89,6 +89,10 @@ class GenerationConfig(BaseModel):
     story_memory_path: str = "reports/runs/creative_longform_memory.jsonl"
     story_ledger_path: str = "reports/runs/creative_longform_ledger.json"
     story_summary_group_size: int = 4
+    enable_consumed_beat_ledger: bool = True
+    enable_repetition_retry: bool = True
+    repetition_retry_temperature_delta: float = -0.25
+    consumed_beat_context_chars: int = 1200
     hallucination_target: float = 0.35
     hallucination_temperature_delta: float = 0.15
     enable_consistency_repair: bool = False

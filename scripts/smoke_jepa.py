@@ -27,6 +27,12 @@ from src.generation.hallucination import (
     longform_artifact_status,
 )
 from src.llm.ollama_client import OllamaClient
+from src.memory.beat_ledger import (
+    build_consumed_beat_context,
+    extract_consumed_beats,
+    likely_repeats_consumed_beat,
+    narrative_beat_metrics,
+)
 from src.memory.story_rag import (
     MEMORY_END,
     MEMORY_START,
@@ -189,6 +195,43 @@ def test_builders_and_loss() -> None:
     assert MEMORY_START not in "".join(visible_chunks)
     assert "서윤은 붉은 열쇠" in "".join(visible_chunks)
 
+    first_section = (
+        "### 봉인된 기록\n\n"
+        "서윤은 복원된 로그에서 민재가 실험의 설계자였다는 진실을 확인했다. "
+        "곧 시스템 경고가 울리며 심층 구역이 봉쇄되었다."
+    )
+    consumed_beats = extract_consumed_beats(first_section, section_index=1)
+    assert consumed_beats
+    assert "Section 1" in build_consumed_beat_context(consumed_beats)
+    repeated_section = (
+        "### 다시 열린 기록\n\n"
+        "서윤은 같은 로그를 다시 읽고 민재가 실험의 설계자였다는 진실을 새롭게 깨달았다. "
+        "시스템 경고가 울리며 심층 구역이 봉쇄되었다."
+    )
+    repeats, repeat_reasons = likely_repeats_consumed_beat(
+        repeated_section,
+        consumed_beats,
+        previous_section=first_section,
+    )
+    assert repeats
+    assert repeat_reasons
+    advancing_section = (
+        "### 지하 통로\n\n"
+        "서윤은 민재의 출입증을 빼앗아 지하 통로로 달렸다. "
+        "방화문이 닫히기 전에 부상당한 연구원을 끌어내며 추적 경로를 바꾸었다."
+    )
+    advancing_repeats, _ = likely_repeats_consumed_beat(
+        advancing_section,
+        consumed_beats,
+        previous_section=first_section,
+    )
+    assert not advancing_repeats
+    beat_metrics = narrative_beat_metrics(
+        "\n\n".join([first_section, repeated_section])
+    )
+    assert beat_metrics["repeated_narrative_beat_count"] >= 1
+    assert beat_metrics["max_adjacent_section_similarity"] > 0
+
 
 def test_dry_run_pipeline() -> None:
     with tempfile.TemporaryDirectory(prefix="novel_jepa_smoke_") as tmp:
@@ -274,6 +317,9 @@ def test_dry_run_pipeline() -> None:
         creative_details = creative_result["planner"]
         assert creative_details["story_memory_count"] >= 2
         assert creative_details["story_memory_retrievals"] >= 1
+        assert creative_details["consumed_beat_ledger_enabled"]
+        assert creative_details["consumed_beat_count"] >= 1
+        assert creative_details["repetition_retry_count"] >= 1
         assert resolve_path(config, config.generation.story_memory_path).exists()
         assert resolve_path(config, config.generation.story_ledger_path).exists()
         continued_result = generate_with_controlled_hallucination(

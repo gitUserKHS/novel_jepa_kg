@@ -222,8 +222,17 @@ def overall_score(metrics: dict[str, float | int | list | dict]) -> float:
     useful_hallucination = float(metrics.get("useful_hallucination_score", 0.0))
     hallucination_risk = float(metrics.get("hallucination_risk", 0.0))
     repetition = float(metrics.get("repetition_rate", 0.0))
+    repeated_beats = int(metrics.get("repeated_narrative_beat_count", 0))
+    repeated_subtitles = int(metrics.get("repeated_subtitle_count", 0))
+    max_adjacent_similarity = float(metrics.get("max_adjacent_section_similarity", 0.0))
     contradictions = metrics.get("contradictions", [])
     contradiction_penalty = min(0.25, 0.08 * len(contradictions)) if isinstance(contradictions, list) else 0.0
+    narrative_repetition_penalty = min(
+        0.20,
+        0.035 * repeated_beats
+        + 0.025 * repeated_subtitles
+        + max(0.0, max_adjacent_similarity - 0.4) * 0.2,
+    )
     score = (
         0.20 * continuity
         + 0.14 * keyword
@@ -238,5 +247,6 @@ def overall_score(metrics: dict[str, float | int | list | dict]) -> float:
         - 0.25 * repetition
         - 0.08 * hallucination_risk
         - contradiction_penalty
+        - narrative_repetition_penalty
     )
     return round(max(0.0, min(1.0, score)), 4)
