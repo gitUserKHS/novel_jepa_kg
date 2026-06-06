@@ -18,6 +18,18 @@ TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[가-힣]{2,}")
 SENTENCE_RE = re.compile(r"(?<=[.!?。！？])\s+|\n+")
 
 
+class StateUpdate(BaseModel):
+    entity: str
+    attribute: str
+    value: str
+
+
+class KnowledgeTriple(BaseModel):
+    source: str
+    relation: str
+    target: str
+
+
 class StoryMemory(BaseModel):
     section_index: int
     title: str = ""
@@ -28,6 +40,8 @@ class StoryMemory(BaseModel):
     resolved_clues: list[str] = Field(default_factory=list)
     locations: list[str] = Field(default_factory=list)
     state_changes: list[str] = Field(default_factory=list)
+    state_updates: list[StateUpdate] = Field(default_factory=list)
+    relations: list[KnowledgeTriple] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
 
 
@@ -50,6 +64,12 @@ Do not use markdown fences. Keep each list short and only record facts establish
   "resolved_clues": ["clue resolved here"],
   "locations": ["important location"],
   "state_changes": ["character, relationship, object, or goal state change"],
+  "state_updates": [
+    {{"entity": "character or object", "attribute": "location|emotion|goal|status|owner", "value": "latest value"}}
+  ],
+  "relations": [
+    {{"source": "entity", "relation": "possesses|trusts|hides|seeks|located_at|causes", "target": "entity or fact"}}
+  ],
   "keywords": ["3 to 8 retrieval keywords"]
 }}
 {MEMORY_END}
@@ -121,6 +141,8 @@ def split_story_memory(
         memory.resolved_clues = _unique(memory.resolved_clues)
         memory.locations = _unique(memory.locations)
         memory.state_changes = _unique(memory.state_changes)
+        memory.state_updates = _unique_models(memory.state_updates)
+        memory.relations = _unique_models(memory.relations)
         memory.keywords = _unique(memory.keywords)
     return prose.strip(), memory
 
@@ -181,6 +203,81 @@ def format_story_memory_context(
     return "\n\n".join(blocks)[:max_chars]
 
 
+def format_hierarchical_story_context(
+    memories: list[StoryMemory],
+    retrieved: list[tuple[StoryMemory, float]],
+    query: str,
+    max_chars: int,
+    group_size: int = 4,
+) -> tuple[str, dict]:
+    ledger = build_story_ledger(memories, group_size=group_size)
+    if not memories:
+        return "(no prior story memories yet)", ledger
+
+    query_tokens = set(_tokens(query))
+    blocks: list[str] = []
+
+    states = sorted(
+        ledger["current_states"],
+        key=lambda item: (
+            _token_overlap(query_tokens, _tokens(f"{item['entity']} {item['attribute']} {item['value']}")),
+            item["section_index"],
+        ),
+        reverse=True,
+    )
+    if states:
+        state_lines = [
+            f"- {item['entity']} / {item['attribute']} = {item['value']} (section {item['section_index']})"
+            for item in states[:14]
+        ]
+        blocks.append("[Current state ledger]\n" + "\n".join(state_lines))
+
+    if ledger["open_clues"]:
+        clue_lines = [
+            f"- {item['text']} (opened in section {item['section_index']})"
+            for item in ledger["open_clues"][:10]
+        ]
+        blocks.append("[Open clues and promises]\n" + "\n".join(clue_lines))
+
+    relations = sorted(
+        ledger["relations"],
+        key=lambda item: (
+            _token_overlap(query_tokens, _tokens(f"{item['source']} {item['relation']} {item['target']}")),
+            item["section_index"],
+        ),
+        reverse=True,
+    )
+    if relations:
+        relation_lines = [
+            f"- {item['source']} --{item['relation']}--> {item['target']} (section {item['section_index']})"
+            for item in relations[:14]
+        ]
+        blocks.append("[Relevant knowledge graph]\n" + "\n".join(relation_lines))
+
+    summaries = ledger["hierarchical_summaries"]
+    if summaries:
+        summary_lines = [
+            f"- Sections {item['start_section']}-{item['end_section']}: {item['summary']}"
+            for item in summaries[-4:]
+        ]
+        blocks.append("[Compressed story timeline]\n" + "\n".join(summary_lines))
+
+    memory_context = format_story_memory_context(retrieved, max(600, max_chars // 2))
+    if retrieved:
+        blocks.append("[Retrieved section memories]\n" + memory_context)
+
+    selected: list[str] = []
+    for block in blocks:
+        candidate = "\n\n".join([*selected, block])
+        if selected and len(candidate) > max_chars:
+            remaining = max_chars - len("\n\n".join(selected)) - 2
+            if remaining >= 200:
+                selected.append(block[:remaining])
+            break
+        selected.append(block)
+    return "\n\n".join(selected)[:max_chars], ledger
+
+
 def write_story_memories(path: Path, memories: list[StoryMemory]) -> str:
     ensure_parent(path)
     content = "".join(
@@ -188,6 +285,93 @@ def write_story_memories(path: Path, memories: list[StoryMemory]) -> str:
         for memory in memories
     )
     path.write_text(content, encoding="utf-8")
+    return str(path)
+
+
+def load_story_memories(path: Path) -> list[StoryMemory]:
+    if not path.exists():
+        return []
+    memories: list[StoryMemory] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            memories.append(StoryMemory.model_validate(json.loads(line)))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return memories
+
+
+def build_story_ledger(memories: list[StoryMemory], group_size: int = 4) -> dict:
+    state_map: dict[tuple[str, str], dict] = {}
+    relation_map: dict[tuple[str, str, str], dict] = {}
+    open_clues: list[dict] = []
+    resolved_clues: list[dict] = []
+
+    for memory in sorted(memories, key=lambda item: item.section_index):
+        for update in memory.state_updates:
+            key = (_normalize_key(update.entity), _normalize_key(update.attribute))
+            if all(key):
+                state_map[key] = {
+                    **update.model_dump(),
+                    "section_index": memory.section_index,
+                }
+        for change in memory.state_changes:
+            state_map[(_normalize_key(change), "narrative_state")] = {
+                "entity": change,
+                "attribute": "narrative_state",
+                "value": change,
+                "section_index": memory.section_index,
+            }
+        for relation in memory.relations:
+            key = (
+                _normalize_key(relation.source),
+                _normalize_key(relation.relation),
+                _normalize_key(relation.target),
+            )
+            if all(key):
+                relation_map[key] = {
+                    **relation.model_dump(),
+                    "section_index": memory.section_index,
+                }
+        for clue in memory.open_clues:
+            if not any(_clue_matches(clue, item["text"]) for item in resolved_clues):
+                open_clues.append({"text": clue, "section_index": memory.section_index})
+        for clue in memory.resolved_clues:
+            resolved = {"text": clue, "section_index": memory.section_index}
+            resolved_clues.append(resolved)
+            open_clues = [item for item in open_clues if not _clue_matches(item["text"], clue)]
+
+    chunk_size = max(2, int(group_size))
+    hierarchical_summaries: list[dict] = []
+    for start in range(0, len(memories), chunk_size):
+        group = memories[start : start + chunk_size]
+        summaries = [memory.summary.strip() for memory in group if memory.summary.strip()]
+        if not group or not summaries:
+            continue
+        hierarchical_summaries.append(
+            {
+                "start_section": group[0].section_index,
+                "end_section": group[-1].section_index,
+                "summary": " ".join(summaries)[:1200],
+            }
+        )
+
+    return {
+        "version": 1,
+        "section_count": len(memories),
+        "current_states": sorted(state_map.values(), key=lambda item: item["section_index"], reverse=True),
+        "relations": sorted(relation_map.values(), key=lambda item: item["section_index"], reverse=True),
+        "open_clues": sorted(open_clues, key=lambda item: item["section_index"], reverse=True),
+        "resolved_clues": sorted(resolved_clues, key=lambda item: item["section_index"], reverse=True),
+        "hierarchical_summaries": hierarchical_summaries,
+    }
+
+
+def write_story_ledger(path: Path, memories: list[StoryMemory], group_size: int = 4) -> str:
+    ensure_parent(path)
+    ledger = build_story_ledger(memories, group_size=group_size)
+    path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(path)
 
 
@@ -256,6 +440,8 @@ def _memory_text(memory: StoryMemory) -> str:
         *memory.resolved_clues,
         *memory.locations,
         *memory.state_changes,
+        *(f"{item.entity} {item.attribute} {item.value}" for item in memory.state_updates),
+        *(f"{item.source} {item.relation} {item.target}" for item in memory.relations),
         *memory.keywords,
     ]
     return " ".join(value for value in values if value)
@@ -301,3 +487,34 @@ def _unique(values: list[str]) -> list[str]:
         if cleaned and cleaned not in result:
             result.append(cleaned)
     return result
+
+
+def _unique_models(values: list[BaseModel]) -> list:
+    result: list[BaseModel] = []
+    seen: set[str] = set()
+    for value in values:
+        key = json.dumps(value.model_dump(), ensure_ascii=False, sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            result.append(value)
+    return result
+
+
+def _normalize_key(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().lower())
+
+
+def _token_overlap(left: set[str], right: list[str]) -> float:
+    right_set = set(right)
+    if not left or not right_set:
+        return 0.0
+    return len(left & right_set) / max(1, len(right_set))
+
+
+def _clue_matches(left: str, right: str) -> bool:
+    left_tokens = set(_tokens(left))
+    right_tokens = set(_tokens(right))
+    if not left_tokens or not right_tokens:
+        return _normalize_key(left) == _normalize_key(right)
+    overlap = len(left_tokens & right_tokens) / max(1, min(len(left_tokens), len(right_tokens)))
+    return overlap >= 0.5

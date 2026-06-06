@@ -35,9 +35,9 @@ class OllamaClient:
         dry_run: bool = False,
         retry_attempts: int = 1,
         retry_backoff_sec: float = 2.0,
-        fallback_num_ctx: int | None = 3072,
-        fallback_num_gpu: int | None = 35,
-        fallback_num_batch: int | None = 64,
+        fallback_num_ctx: int | None = 4096,
+        fallback_num_gpu: int | None = 16,
+        fallback_num_batch: int | None = 16,
         fallback_max_tokens: int | None = 1200,
         fallback_keep_alive: str | None = "10s",
     ) -> None:

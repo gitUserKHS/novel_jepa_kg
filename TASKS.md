@@ -67,6 +67,13 @@
 - [x] Extract a compact continuity record from every generated section without an extra LLM call.
 - [x] Add lightweight story-memory RAG for characters, facts, clues, locations, and state changes.
 - [x] Save the story-memory ledger after every completed section.
+- [x] Add 5,000/10,000/custom-character generation turns.
+- [x] Resume the next turn from persistent prose, memory, ledger, and run-state checkpoints.
+- [x] Import UTF-8 Markdown/text drafts and rebuild continuity memory for continuation.
+- [x] Export and restore portable ZIP bundles containing prose, memory, KG/state, turn progress, and story settings.
+- [x] Add latest entity-state tracking and knowledge-graph triples to section memory.
+- [x] Add hierarchical multi-section compression without extra LLM calls.
+- [x] Fit recent prose, compressed memory, and KG retrieval into an 8K context budget.
 
 ## Phase 4.5 - Chat Memory
 

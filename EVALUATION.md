@@ -15,6 +15,11 @@ locations, unresolved or resolved clues, and important state changes. Before the
 next section is generated, only the most relevant records are retrieved within a
 bounded context budget.
 
+Generation can be evaluated turn by turn. The UI supports 5,000, 10,000, or
+custom-character turns, and each following turn resumes from the persisted
+draft, current-state ledger, unresolved clues, KG relations, and hierarchical
+timeline summaries.
+
 ## Automatic Metrics
 
 ### Repetition Rate
@@ -69,6 +74,7 @@ Save a Markdown report containing:
 - controlled hallucination output and metrics
 - section structure metrics
 - story-memory ledger path and retrieval diagnostics
+- turn number, turn character count, and cumulative draft length
 - metric table
 - qualitative observations
 - limitations

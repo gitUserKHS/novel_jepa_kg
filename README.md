@@ -64,7 +64,7 @@ run_server.bat
 Make sure Ollama is running. Install the default chat and embedding models:
 
 ```powershell
-ollama pull gemma4:e4b
+ollama pull gemma4:12b-it-q4_K_M
 ollama pull embeddinggemma
 ```
 
@@ -107,14 +107,14 @@ When dry-run works, turn it off:
 ```text
 Dry-run mode: off
 Ollama base URL: http://localhost:11434
-Chat model: gemma4:e4b
+Chat model: gemma4:12b-it-q4_K_M
 Embedding model: embeddinggemma:latest
 ```
 
 If Ollama is reachable, the sidebar shows installed models as dropdowns. You can still choose `직접 입력` when you want to type a model name manually.
-The default chat model is `gemma4:e4b`. On the target RTX 4060 8GB setup this model should be treated as a partial-offload model, not a full-VRAM model. The app sends controlled Ollama options by default: `num_gpu=35`, `num_ctx=3072`, `num_batch=64`, and `keep_alive=30s`.
+The default chat model is `gemma4:12b-it-q4_K_M`. On the target RTX 4060 8GB setup it is a CPU/GPU partial-offload model. The app starts with `num_gpu=24`, `num_ctx=8192`, `num_batch=32`, and `keep_alive=60s`.
 Use the sidebar `Ollama runtime` expander to check loaded models, approximate GPU residency, VRAM size, and context length. If `model runner has unexpectedly stopped` appears, lower `Ollama GPU layers`, `Ollama context length`, or `Ollama batch size`.
-The `Ollama 500 recovery` expander controls the automatic recovery path for intermittent runner crashes. When `/api/chat` returns a recoverable 500-class error before any streamed text is shown, the app unloads the chat and embedding models, waits briefly, then retries once with conservative fallback options: `num_gpu=35`, `num_ctx=3072`, `num_batch=64`, `num_predict=1200`, and `keep_alive=10s`.
+The `Ollama 500 recovery` expander controls the automatic recovery path for intermittent runner crashes. The conservative fallback uses `num_gpu=16`, `num_ctx=4096`, `num_batch=16`, `num_predict=1200`, and `keep_alive=10s`.
 
 ### 5. Run the full experiment
 
@@ -138,7 +138,27 @@ generate synthetic data
 -> write evaluation report
 ```
 
-### 6. Write a long-form story
+### 6. Generate and continue a long-form story
+
+Open the `Generate` tab.
+
+1. Choose `5,000`, `10,000`, or a custom character target for one turn.
+2. Click `Start new novel` for the first turn.
+3. Add an optional next-turn direction.
+4. Click `Continue next turn` to append to the saved draft.
+5. Use `Download continuation bundle` when moving the project to another PC.
+6. Use `Load a saved novel for continuation` to restore a `.zip`, `.md`, or `.txt` file.
+
+The continuation survives an app restart because prose, section memories,
+compressed timeline, state ledger, knowledge graph, and run state are saved
+after every section.
+
+- A `.zip` continuation bundle restores prose, memory, KG/state, turn progress,
+  world setting, characters, and the original previous-scene seed.
+- A plain `.md` or `.txt` draft is also accepted. Its compact memories, state
+  ledger, KG, and hierarchical summaries are rebuilt locally from section prose.
+
+### 7. Write through a chat session
 
 Open the `Chat` tab.
 
@@ -171,7 +191,7 @@ Useful buttons:
 - `Export MD`: export the session to Markdown.
 - `Delete`: delete the current session.
 
-### 7. Recommended first workflow
+### 8. Recommended first workflow
 
 ```text
 1. Start with Dry-run mode on.
@@ -192,7 +212,7 @@ Keep `Reuse cached data` on. The first run is slower; later runs reuse samples a
 - Dataset: generate and filter JSONL transition samples
 - Embedding: embed summaries and build the FAISS index
 - Train: train the JEPA-inspired MLP predictor
-- Generate: create an approximately 30,000-character Creative Hallucination + JEPA novel
+- Generate: create 5,000/10,000/custom-character turns and continue the saved novel
 - Evaluate: write a Markdown comparison report
 - Reports: view saved reports
 
@@ -237,13 +257,17 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - Dataset generation uses a candidate multiplier. If some samples fail JSON/schema validation, the generator can try extra candidate ids without requiring a manual rerun.
 - Synthetic JSON generation defaults to a lower max token budget than prose generation to speed up sample creation while keeping the schema compact.
 - RAG/JEPA generation now feeds the LLM a compact beat card instead of dumping all retrieved context into prose.
-- Prose generation targets about 30,000 Korean characters split across roughly 15 titled sections.
+- The overall narrative guide defaults to about 30,000 Korean characters, while each click generates a user-selected 5,000/10,000/custom-character turn.
 - Creative Hallucination + JEPA is the only active prose mode. JEPA keeps the direction grounded while the LLM adds plausible clues, symbols, sensory details, and emotional inferences.
 - Long-form prose is generated one section per Ollama call with a bounded recent-context excerpt, avoiding a single oversized 30,000-character request.
 - `reports/runs/creative_longform_latest.md` is updated after every completed section, so a partial draft survives an Ollama failure.
 - Each section also produces a compact private continuity record in the same Ollama response. This avoids an extra summarization call.
-- Story-memory RAG retrieves up to four relevant section memories with bounded context, preserving character states, facts, locations, promises, and unresolved clues without loading the full novel.
+- Story-memory RAG combines relevant section memories with a latest-state ledger, unresolved clue ledger, query-relevant KG triples, and four-section compressed timeline.
+- The 8K context budget carries only the recent prose excerpt and the most relevant compressed memory/KG slice instead of the full draft.
 - `reports/runs/creative_longform_memory.jsonl` is updated after every section and can be inspected separately from the prose checkpoint.
+- `reports/runs/creative_longform_ledger.json` stores current states, KG relations, clue status, and hierarchical summaries.
+- `reports/runs/creative_longform_state.json` tracks turn and checkpoint progress so continuation works after restarting Streamlit.
+- The Generate tab can export a portable ZIP continuation bundle and import either that bundle or a UTF-8 Markdown/text draft.
 - `Prompt examples` limits how many retrieved examples enter the prompt, while `Retrieval top K` still controls the search pool.
 - Name consistency checks compare generated outputs against the character list and report unknown or likely misspelled names.
 - Optional auto-repair rewrites only detected name inconsistencies before the output is saved.
@@ -279,6 +303,8 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - `data/indexes/next_scene.faiss`
 - `reports/runs/creative_longform_latest.md`
 - `reports/runs/creative_longform_memory.jsonl`
+- `reports/runs/creative_longform_ledger.json`
+- `reports/runs/creative_longform_state.json`
 - `data/sessions/*.json`
 - `checkpoints/predictor/best.pt`
 - `checkpoints/predictor/model_card.json`

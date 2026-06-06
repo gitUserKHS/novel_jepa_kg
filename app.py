@@ -18,7 +18,13 @@ from src.embedding.embed_scenes import embed_dataset
 from src.embedding.vector_store import build_current_context_index, build_next_scene_index
 from src.evaluation.report import evaluate_and_write_report
 from src.generation.chat import CHAT_MODES, generate_chat_turn
-from src.generation.hallucination import CREATIVE_HALLUCINATION_MODE, generate_with_controlled_hallucination
+from src.generation.hallucination import (
+    CREATIVE_HALLUCINATION_MODE,
+    export_longform_bundle,
+    generate_with_controlled_hallucination,
+    import_longform_file,
+    longform_artifact_status,
+)
 from src.llm.scene_presets import (
     AUTO_SCENE_PRESET,
     demo_defaults_for_genre,
@@ -65,13 +71,18 @@ DEFAULT_CHAT_SETTINGS = {
 
 DEFAULT_LONGFORM_SETTINGS = {
     "target_novel_chars": 30000,
-    "longform_max_sections": 24,
-    "longform_recent_context_chars": 1800,
+    "turn_target_chars": 5000,
+    "turn_max_sections": 8,
+    "longform_max_sections": 60,
+    "longform_recent_context_chars": 2200,
     "longform_checkpoint_path": "reports/runs/creative_longform_latest.md",
+    "longform_state_path": "reports/runs/creative_longform_state.json",
     "enable_story_memory_rag": True,
     "story_memory_top_k": 4,
-    "story_memory_context_chars": 1800,
+    "story_memory_context_chars": 2600,
     "story_memory_path": "reports/runs/creative_longform_memory.jsonl",
+    "story_ledger_path": "reports/runs/creative_longform_ledger.json",
+    "story_summary_group_size": 4,
 }
 
 GENRE_PRESETS = [
@@ -603,7 +614,7 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
             max_value=99,
             value=config.ollama.num_gpu,
             step=1,
-            help="Lower this if gemma4:e4b runner stops. 40 was stable on the target RTX 4060 8GB with ctx 4096 and batch 128.",
+            help="For Gemma 4 12B Q4_K_M on an RTX 4060 8GB, start near 24 layers and lower it if the runner stops.",
         )
     )
     config.ollama.num_batch = int(
@@ -694,7 +705,10 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
                         }
                     )
                 st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
-                st.caption("For gemma4:e4b on 8GB VRAM, partial CPU/GPU offload is expected. If runner 500 errors return, lower GPU layers or context length.")
+                st.caption(
+                    "For Gemma 4 12B Q4_K_M on 8GB VRAM, CPU/GPU offload is expected. "
+                    "If runner 500 errors return, lower GPU layers, batch size, or fallback to 4K context."
+                )
             else:
                 st.caption("No Ollama model is currently loaded.")
         except Exception as exc:  # noqa: BLE001
@@ -803,17 +817,27 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
             st.number_input(
                 "Maximum generated sections",
                 min_value=config.generation.section_count,
-                max_value=30,
+                max_value=100,
                 value=max(config.generation.section_count, int(config.generation.longform_max_sections)),
                 step=1,
-                help="Extra sections are generated only when the draft is still below 90% of the target length.",
+                help="This is the safety ceiling across all continuation turns.",
+            )
+        )
+        config.generation.turn_max_sections = int(
+            st.number_input(
+                "Maximum sections per turn",
+                min_value=1,
+                max_value=12,
+                value=int(config.generation.turn_max_sections),
+                step=1,
+                help="Limits the number of Ollama calls made by one Generate/Continue click.",
             )
         )
         config.generation.longform_recent_context_chars = int(
             st.number_input(
                 "Recent context chars per call",
                 min_value=500,
-                max_value=4000,
+                max_value=6000,
                 value=int(config.generation.longform_recent_context_chars),
                 step=100,
                 help="Only this recent excerpt is carried forward, keeping context and VRAM usage bounded.",
@@ -838,10 +862,20 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
             st.number_input(
                 "Story-memory context chars",
                 min_value=400,
-                max_value=3000,
+                max_value=6000,
                 value=int(config.generation.story_memory_context_chars),
                 step=100,
                 help="Bounds the retrieved continuity ledger added to each section prompt.",
+                disabled=not config.generation.enable_story_memory_rag,
+            )
+        )
+        config.generation.story_summary_group_size = int(
+            st.number_input(
+                "Sections per compressed summary",
+                min_value=2,
+                max_value=8,
+                value=int(config.generation.story_summary_group_size),
+                step=1,
                 disabled=not config.generation.enable_story_memory_rag,
             )
         )
@@ -1592,6 +1626,17 @@ def main() -> None:
                     "previous_scene": "gen_prev",
                 },
             )
+        imported_context = st.session_state.pop("gen_imported_context_pending", None)
+        import_notice = st.session_state.pop("gen_import_notice", "")
+        if imported_context:
+            for field, state_key in {
+                "world": "gen_world",
+                "characters": "gen_chars",
+                "previous_scene": "gen_prev",
+            }.items():
+                value = str(imported_context.get(field, "")).strip()
+                if value:
+                    st.session_state[state_key] = value
         world = st.text_area("World", height=80, key="gen_world")
         characters = st.text_area("Characters", height=80, key="gen_chars")
         previous_scene = st.text_area(
@@ -1599,17 +1644,122 @@ def main() -> None:
             height=100,
             key="gen_prev",
         )
+        continuation_instruction = st.text_area(
+            "Next-turn direction (optional)",
+            height=80,
+            key="gen_continue_instruction",
+            placeholder="예: 이번 턴에서는 붉은 열쇠의 정체를 밝히되 배신자의 정체는 숨겨줘.",
+        )
+        if import_notice:
+            st.success(import_notice)
+        turn_choice = st.selectbox(
+            "Characters to generate this turn",
+            ["5,000", "10,000", "Custom"],
+            index=(
+                0
+                if config.generation.turn_target_chars == 5000
+                else 1
+                if config.generation.turn_target_chars == 10000
+                else 2
+            ),
+        )
+        if turn_choice == "Custom":
+            config.generation.turn_target_chars = int(
+                st.number_input(
+                    "Custom characters per turn",
+                    min_value=2000,
+                    max_value=20000,
+                    value=int(config.generation.turn_target_chars),
+                    step=1000,
+                )
+            )
+        else:
+            config.generation.turn_target_chars = int(turn_choice.replace(",", ""))
+        uploaded_longform = st.file_uploader(
+            "Load a saved novel for continuation",
+            type=["md", "txt", "zip"],
+            help=(
+                "MD/TXT restores the prose and rebuilds compact memory. "
+                "A ZIP bundle also restores saved memory, turn progress, KG/state, and story settings."
+            ),
+            key="gen_longform_upload",
+        )
+        load_uploaded_clicked = st.button(
+            "Load selected file",
+            disabled=uploaded_longform is None,
+            width="stretch",
+        )
+        if uploaded_longform is not None and load_uploaded_clicked:
+            try:
+                imported = import_longform_file(
+                    config,
+                    uploaded_longform.name,
+                    uploaded_longform.getvalue(),
+                    characters=characters,
+                )
+                st.session_state["gen_imported_context_pending"] = imported.get("context", {})
+                rebuilt_note = " Memory/KG was rebuilt from prose." if imported.get("memory_rebuilt") else ""
+                st.session_state["gen_import_notice"] = (
+                    f"Loaded {imported['file_name']}: {imported['total_chars']:,} chars, "
+                    f"{imported['section_count']} sections.{rebuilt_note}"
+                )
+                st.rerun()
+            except Exception as exc:  # noqa: BLE001
+                show_error("Could not load saved novel", exc)
+        draft_status = longform_artifact_status(config)
         st.info(
             f"Mode: {CREATIVE_HALLUCINATION_MODE} | "
-            f"target={config.generation.target_novel_chars:,} chars | "
-            f"planned sections={config.generation.section_count} | "
-            f"story-memory RAG={'on' if config.generation.enable_story_memory_rag else 'off'}"
+            f"this turn={config.generation.turn_target_chars:,} chars | "
+            f"overall guide={config.generation.target_novel_chars:,} chars | "
+            f"context={config.ollama.num_ctx:,} tokens | "
+            f"memory/KG RAG={'on' if config.generation.enable_story_memory_rag else 'off'}"
         )
-        if st.button("Generate long-form novel"):
+        if draft_status["exists"]:
+            status_cols = st.columns(4)
+            status_cols[0].metric("saved turns", draft_status["turns_completed"])
+            status_cols[1].metric("draft chars", f"{draft_status['total_chars']:,}")
+            status_cols[2].metric("sections", draft_status["section_count"])
+            status_cols[3].metric("memories", draft_status["memory_count"])
+            checkpoint_file = resolve_path(config, config.generation.longform_checkpoint_path)
+            export_cols = st.columns(2)
+            export_cols[0].download_button(
+                "Download draft only",
+                checkpoint_file.read_text(encoding="utf-8"),
+                file_name="creative_longform_latest.md",
+                mime="text/markdown",
+                width="stretch",
+            )
+            export_cols[1].download_button(
+                "Download continuation bundle",
+                export_longform_bundle(
+                    config,
+                    world=world,
+                    characters=characters,
+                    previous_scene=previous_scene,
+                ),
+                file_name="creative_longform_bundle.zip",
+                mime="application/zip",
+                width="stretch",
+            )
+        action_cols = st.columns(2)
+        start_clicked = action_cols[0].button(
+            "Start new novel",
+            help="Overwrites the current long-form checkpoint and memory ledger.",
+            width="stretch",
+        )
+        continue_clicked = action_cols[1].button(
+            "Continue next turn",
+            disabled=not draft_status["exists"],
+            width="stretch",
+        )
+        if start_clicked or continue_clicked:
             try:
                 trace_box = st.empty()
                 trace_callback = make_generation_trace_callback(trace_box)
-                st.caption("The model is called once per section so local VRAM and context usage stay bounded.")
+                st.caption(
+                    "Each section is a separate bounded Ollama call. "
+                    "The next turn resumes from the saved draft, compressed timeline, state ledger, and KG."
+                )
                 live_output = st.empty()
                 stream_callback = make_stream_callback(live_output)
                 result = generate_with_controlled_hallucination(
@@ -1622,10 +1772,21 @@ def main() -> None:
                     scene_preset=scene_preset,
                     return_details=True,
                     trace_callback=trace_callback,
+                    continue_existing=continue_clicked,
+                    turn_target_chars=config.generation.turn_target_chars,
+                    continuation_instruction=continuation_instruction,
                 )
                 output = str(result["text"])
+                turn_output = str(result.get("turn_text", output))
                 generation_details: dict[str, Any] = result.get("planner", {})
-                live_output.markdown(output)
+                live_output.markdown(turn_output)
+                st.download_button(
+                    "Download full continued draft",
+                    output,
+                    file_name="creative_longform_latest.md",
+                    mime="text/markdown",
+                    key="download_generated_longform",
+                )
                 if generation_details:
                     st.markdown("#### Retrieval / Planner diagnostics")
                     analyzed_scene = generation_details.get("analyzed_scene")
@@ -1639,10 +1800,20 @@ def main() -> None:
                         st.code(generation_details["hallucination_contract"])
                     if "predicted_vector_norm" in generation_details:
                         st.metric("predicted vector norm", f"{generation_details['predicted_vector_norm']:.4f}")
-                    length_cols = st.columns(3)
-                    length_cols[0].metric("actual chars", f"{generation_details.get('actual_novel_chars', len(output)):,}")
-                    length_cols[1].metric("target chars", f"{generation_details.get('target_novel_chars', 0):,}")
-                    length_cols[2].metric("sections", generation_details.get("completed_sections", 0))
+                    length_cols = st.columns(4)
+                    length_cols[0].metric("turn", generation_details.get("turn_number", 1))
+                    length_cols[1].metric(
+                        "turn chars",
+                        f"{generation_details.get('turn_actual_chars', len(turn_output)):,}",
+                    )
+                    length_cols[2].metric(
+                        "turn target",
+                        f"{generation_details.get('turn_target_chars', 0):,}",
+                    )
+                    length_cols[3].metric(
+                        "total chars",
+                        f"{generation_details.get('actual_novel_chars', len(output)):,}",
+                    )
                     if generation_details.get("checkpoint_path"):
                         st.success(f"Latest draft checkpoint: {generation_details['checkpoint_path']}")
                     if generation_details.get("story_memory_rag_enabled"):
@@ -1657,6 +1828,8 @@ def main() -> None:
                         )
                         if generation_details.get("story_memory_path"):
                             st.success(f"Story-memory ledger: {generation_details['story_memory_path']}")
+                        if generation_details.get("story_ledger_path"):
+                            st.success(f"State / KG ledger: {generation_details['story_ledger_path']}")
                     retrieved = generation_details.get("retrieved", [])
                     if retrieved:
                         st.markdown("##### JEPA retrieved examples")

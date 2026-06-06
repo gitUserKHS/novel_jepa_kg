@@ -5,19 +5,19 @@ project:
 
 ollama:
   base_url: "http://localhost:11434"
-  chat_model: "gemma4:e4b"
+  chat_model: "gemma4:12b-it-q4_K_M"
   embed_model: "embeddinggemma:latest"
-  timeout_sec: 120
-  num_ctx: 3072
-  num_gpu: 35
-  num_batch: 64
-  keep_alive: "30s"
+  timeout_sec: 300
+  num_ctx: 8192
+  num_gpu: 24
+  num_batch: 32
+  keep_alive: "60s"
   manage_vram: true
   retry_attempts: 1
   retry_backoff_sec: 2.0
-  fallback_num_ctx: 3072
-  fallback_num_gpu: 35
-  fallback_num_batch: 64
+  fallback_num_ctx: 4096
+  fallback_num_gpu: 16
+  fallback_num_batch: 16
   fallback_max_tokens: 1200
   fallback_keep_alive: "10s"
 
@@ -64,19 +64,24 @@ training:
 generation:
   top_k: 5
   rag_context_limit: 3
-  max_tokens: 1600
+  max_tokens: 1800
   temperature: 0.8
   sectioned_output: true
   section_count: 15
   section_min_chars: 1800
   target_novel_chars: 30000
-  longform_max_sections: 24
-  longform_recent_context_chars: 1800
+  turn_target_chars: 5000
+  turn_max_sections: 8
+  longform_max_sections: 60
+  longform_recent_context_chars: 2200
   longform_checkpoint_path: "reports/runs/creative_longform_latest.md"
+  longform_state_path: "reports/runs/creative_longform_state.json"
   enable_story_memory_rag: true
   story_memory_top_k: 4
-  story_memory_context_chars: 1800
+  story_memory_context_chars: 2600
   story_memory_path: "reports/runs/creative_longform_memory.jsonl"
+  story_ledger_path: "reports/runs/creative_longform_ledger.json"
+  story_summary_group_size: 4
   hallucination_target: 0.35
   hallucination_temperature_delta: 0.15
   enable_consistency_repair: false

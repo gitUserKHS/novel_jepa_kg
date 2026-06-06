@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -19,13 +20,20 @@ from src.embedding.embed_scenes import embed_dataset
 from src.embedding.vector_store import build_current_context_index, build_next_scene_index, retrieve_by_vector
 from src.generation.generate_with_jepa import generate_with_jepa
 from src.generation.generate_with_rag import generate_with_rag
-from src.generation.hallucination import generate_with_controlled_hallucination
+from src.generation.hallucination import (
+    export_longform_bundle,
+    generate_with_controlled_hallucination,
+    import_longform_file,
+    longform_artifact_status,
+)
 from src.llm.ollama_client import OllamaClient
 from src.memory.story_rag import (
     MEMORY_END,
     MEMORY_START,
     StoryMemory,
     StoryMemoryStreamFilter,
+    build_story_ledger,
+    format_hierarchical_story_context,
     retrieve_story_memories,
     split_story_memory,
 )
@@ -137,7 +145,10 @@ def test_builders_and_loss() -> None:
         '{"section_index":1,"title":"닫힌 문","summary":"서윤이 붉은 열쇠를 숨겼다.",'
         '"characters":["서윤"],"facts":["붉은 열쇠는 서윤이 갖고 있다."],'
         '"open_clues":["열쇠가 여는 문은 아직 모른다."],"resolved_clues":[],"locations":[],'
-        '"state_changes":["열쇠 소유자가 서윤으로 바뀌었다."],"keywords":["서윤","붉은 열쇠"]}'
+        '"state_changes":["열쇠 소유자가 서윤으로 바뀌었다."],'
+        '"state_updates":[{"entity":"붉은 열쇠","attribute":"owner","value":"서윤"}],'
+        '"relations":[{"source":"서윤","relation":"possesses","target":"붉은 열쇠"}],'
+        '"keywords":["서윤","붉은 열쇠"]}'
         f"\n{MEMORY_END}"
     )
     prose, memory = split_story_memory(response, 1, ["서윤"])
@@ -158,6 +169,18 @@ def test_builders_and_loss() -> None:
         current_section=3,
     )
     assert retrieved_memories[0][0].section_index == 1
+    ledger = build_story_ledger([memory], group_size=2)
+    assert ledger["current_states"][0]["value"] == "서윤"
+    assert ledger["relations"][0]["target"] == "붉은 열쇠"
+    hierarchical_context, _ = format_hierarchical_story_context(
+        [memory],
+        retrieved_memories,
+        "서윤이 붉은 열쇠를 사용한다.",
+        max_chars=2000,
+        group_size=2,
+    )
+    assert "Current state ledger" in hierarchical_context
+    assert "Relevant knowledge graph" in hierarchical_context
     visible_chunks: list[str] = []
     stream_filter = StoryMemoryStreamFilter(visible_chunks.append)
     for chunk in [response[:17], response[17:53], response[53:]]:
@@ -252,6 +275,57 @@ def test_dry_run_pipeline() -> None:
         assert creative_details["story_memory_count"] >= 2
         assert creative_details["story_memory_retrievals"] >= 1
         assert resolve_path(config, config.generation.story_memory_path).exists()
+        assert resolve_path(config, config.generation.story_ledger_path).exists()
+        continued_result = generate_with_controlled_hallucination(
+            config,
+            client,
+            "기억 잔향이 물리적 흔적으로 남는 근미래 서울.",
+            "서윤: 동생을 찾는 기록 복원가. 민재: 진실을 숨긴 연구원.",
+            "서윤은 폐쇄 연구동에서 손상된 로그와 동생의 이름을 발견한다.",
+            continue_existing=True,
+            turn_target_chars=5000,
+            continuation_instruction="붉은 열쇠의 단서를 따라가되 배신자의 정체는 숨긴다.",
+            return_details=True,
+        )
+        assert len(str(continued_result["text"])) > len(creative_output)
+        assert continued_result["planner"]["turn_number"] == 2
+        assert continued_result["planner"]["continued_existing"]
+        bundle = export_longform_bundle(
+            config,
+            world="기억 잔향이 물리적 흔적으로 남는 근미래 서울.",
+            characters="서윤: 동생을 찾는 기록 복원가. 민재: 진실을 숨긴 연구원.",
+            previous_scene="서윤은 폐쇄 연구동에서 손상된 로그를 발견한다.",
+        )
+        imported_config = AppConfig(output_root=str(Path(tmp) / "imported_bundle"))
+        ensure_project_dirs(imported_config)
+        imported = import_longform_file(
+            imported_config,
+            "saved_story.zip",
+            bundle,
+        )
+        imported_status = longform_artifact_status(imported_config)
+        imported_text = resolve_path(
+            imported_config,
+            imported_config.generation.longform_checkpoint_path,
+        ).read_text(encoding="utf-8")
+        original_body = re.sub(r"(?m)^###.*$", "", str(continued_result["text"]))
+        imported_body = re.sub(r"(?m)^###.*$", "", imported_text)
+        assert re.sub(r"\s+", "", imported_body) == re.sub(r"\s+", "", original_body)
+        assert imported_status["section_count"] == continued_result["planner"]["completed_sections"]
+        assert imported_status["memory_count"] == continued_result["planner"]["story_memory_count"]
+        assert imported["context"]["characters"].startswith("서윤:")
+        assert not imported["memory_rebuilt"]
+
+        raw_config = AppConfig(output_root=str(Path(tmp) / "imported_markdown"))
+        ensure_project_dirs(raw_config)
+        raw_import = import_longform_file(
+            raw_config,
+            "draft.md",
+            str(continued_result["text"]).encode("utf-8"),
+            characters="서윤: 동생을 찾는 기록 복원가. 민재: 진실을 숨긴 연구원.",
+        )
+        assert raw_import["memory_rebuilt"]
+        assert raw_import["section_count"] == imported_status["section_count"]
         rag_output = generate_with_rag(
             config,
             client,

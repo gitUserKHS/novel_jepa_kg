@@ -9,19 +9,19 @@ from pydantic import BaseModel, Field
 
 class OllamaConfig(BaseModel):
     base_url: str = "http://localhost:11434"
-    chat_model: str = "gemma4:e4b"
+    chat_model: str = "gemma4:12b-it-q4_K_M"
     embed_model: str = "embeddinggemma:latest"
-    timeout_sec: int = 120
-    num_ctx: int = 3072
-    num_gpu: int = 35
-    num_batch: int = 64
-    keep_alive: str = "30s"
+    timeout_sec: int = 300
+    num_ctx: int = 8192
+    num_gpu: int = 24
+    num_batch: int = 32
+    keep_alive: str = "60s"
     manage_vram: bool = True
     retry_attempts: int = 1
     retry_backoff_sec: float = 2.0
-    fallback_num_ctx: int = 3072
-    fallback_num_gpu: int = 35
-    fallback_num_batch: int = 64
+    fallback_num_ctx: int = 4096
+    fallback_num_gpu: int = 16
+    fallback_num_batch: int = 16
     fallback_max_tokens: int = 1200
     fallback_keep_alive: str = "10s"
 
@@ -71,19 +71,24 @@ class TrainingConfig(BaseModel):
 class GenerationConfig(BaseModel):
     top_k: int = 5
     rag_context_limit: int = 3
-    max_tokens: int = 1600
+    max_tokens: int = 1800
     temperature: float = 0.8
     sectioned_output: bool = True
     section_count: int = 15
     section_min_chars: int = 1800
     target_novel_chars: int = 30000
-    longform_max_sections: int = 24
-    longform_recent_context_chars: int = 1800
+    turn_target_chars: int = 5000
+    turn_max_sections: int = 8
+    longform_max_sections: int = 60
+    longform_recent_context_chars: int = 2200
     longform_checkpoint_path: str = "reports/runs/creative_longform_latest.md"
+    longform_state_path: str = "reports/runs/creative_longform_state.json"
     enable_story_memory_rag: bool = True
     story_memory_top_k: int = 4
-    story_memory_context_chars: int = 1800
+    story_memory_context_chars: int = 2600
     story_memory_path: str = "reports/runs/creative_longform_memory.jsonl"
+    story_ledger_path: str = "reports/runs/creative_longform_ledger.json"
+    story_summary_group_size: int = 4
     hallucination_target: float = 0.35
     hallucination_temperature_delta: float = 0.15
     enable_consistency_repair: bool = False
