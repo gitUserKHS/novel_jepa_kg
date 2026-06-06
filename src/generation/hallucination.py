@@ -4,6 +4,7 @@ import io
 import json
 import math
 import re
+import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -66,6 +67,46 @@ BUNDLE_MEMORY = "creative_longform_memory.jsonl"
 BUNDLE_STATE = "creative_longform_state.json"
 BUNDLE_CONTEXT = "creative_longform_context.json"
 MAX_IMPORT_BYTES = 50 * 1024 * 1024
+
+
+def _has_section_stream_control(callback: Callable[[str], None] | None) -> bool:
+    return bool(
+        callback is not None
+        and callable(getattr(callback, "begin_section", None))
+        and callable(getattr(callback, "restart_section", None))
+        and callable(getattr(callback, "commit_section", None))
+        and callable(getattr(callback, "abort_section", None))
+    )
+
+
+def _begin_section_stream(
+    callback: Callable[[str], None] | None,
+    separator: str,
+) -> None:
+    if callback is None:
+        return
+    if _has_section_stream_control(callback):
+        callback.begin_section(separator)  # type: ignore[attr-defined]
+    elif separator:
+        callback(separator)
+
+
+def _restart_section_stream(
+    callback: Callable[[str], None] | None,
+    reason: str,
+) -> None:
+    if callback is not None and _has_section_stream_control(callback):
+        callback.restart_section(reason)  # type: ignore[attr-defined]
+
+
+def _commit_section_stream(callback: Callable[[str], None] | None) -> None:
+    if callback is not None and _has_section_stream_control(callback):
+        callback.commit_section()  # type: ignore[attr-defined]
+
+
+def _abort_section_stream(callback: Callable[[str], None] | None) -> None:
+    if callback is not None and _has_section_stream_control(callback):
+        callback.abort_section()  # type: ignore[attr-defined]
 
 
 def build_hallucination_contract(target_ratio: float) -> str:
@@ -669,20 +710,28 @@ def generate_with_controlled_hallucination(
                 "primary_function": primary_function_name,
             },
         )
-        if stream_callback is not None and turn_sections:
-            stream_callback("\n\n")
+        _begin_section_stream(
+            stream_callback,
+            "\n\n" if turn_sections else "",
+        )
+        section_started_at = time.monotonic()
         try:
             repetition_guard_active = bool(
                 config.generation.enable_consumed_beat_ledger
                 and config.generation.enable_repetition_retry
                 and consumed_beats
             )
-            defer_stream = stream_callback is not None and repetition_guard_active
+            controlled_stream = _has_section_stream_control(stream_callback)
+            defer_stream = bool(
+                stream_callback is not None
+                and repetition_guard_active
+                and not controlled_stream
+            )
+            visible_stream_callback = None if defer_stream else stream_callback
             memory_stream_filter = (
-                StoryMemoryStreamFilter(stream_callback)
+                StoryMemoryStreamFilter(visible_stream_callback)
                 if (
-                    stream_callback is not None
-                    and not defer_stream
+                    visible_stream_callback is not None
                     and config.generation.enable_story_memory_rag
                 )
                 else None
@@ -698,7 +747,7 @@ def generate_with_controlled_hallucination(
                 stream_callback=(
                     memory_stream_filter.feed
                     if memory_stream_filter
-                    else (None if defer_stream else stream_callback)
+                    else visible_stream_callback
                 ),
             )
             if memory_stream_filter is not None:
@@ -713,7 +762,6 @@ def generate_with_controlled_hallucination(
                 section,
                 consumed_beats,
                 memory=story_memory,
-                previous_section=sections[-1] if sections else "",
             )
             if repeated and config.generation.enable_repetition_retry:
                 repetition_retry_count += 1
@@ -739,6 +787,10 @@ def generate_with_controlled_hallucination(
                         ),
                     },
                 )
+                _restart_section_stream(
+                    stream_callback,
+                    "반복된 사건을 줄이기 위해 이 섹션을 한 번 다시 쓰고 있어...",
+                )
                 retry_prompt = "\n\n".join(
                     [
                         prompt,
@@ -750,6 +802,19 @@ def generate_with_controlled_hallucination(
                         "Replace repeated explanation with a concrete action, consequence, movement, or newly specific clue.",
                         "Keep exactly one `###` Korean subtitle and include the private story-memory block.",
                     ]
+                )
+                retry_visible_callback = (
+                    stream_callback
+                    if controlled_stream
+                    else None
+                )
+                retry_memory_stream_filter = (
+                    StoryMemoryStreamFilter(retry_visible_callback)
+                    if (
+                        retry_visible_callback is not None
+                        and config.generation.enable_story_memory_rag
+                    )
+                    else None
                 )
                 retry_raw = client.chat(
                     retry_prompt,
@@ -766,7 +831,14 @@ def generate_with_controlled_hallucination(
                         ),
                     ),
                     max_tokens=config.generation.max_tokens,
+                    stream_callback=(
+                        retry_memory_stream_filter.feed
+                        if retry_memory_stream_filter
+                        else retry_visible_callback
+                    ),
                 )
+                if retry_memory_stream_filter is not None:
+                    retry_memory_stream_filter.finish()
                 retry_text, retry_memory = split_story_memory(
                     retry_raw,
                     section_index,
@@ -777,7 +849,6 @@ def generate_with_controlled_hallucination(
                     retry_section,
                     consumed_beats,
                     memory=retry_memory,
-                    previous_section=sections[-1] if sections else "",
                 )
                 retry_resolved = bool(retry_section and not retry_repeated)
                 if retry_section:
@@ -811,6 +882,7 @@ def generate_with_controlled_hallucination(
             if defer_stream and stream_callback is not None:
                 stream_callback(section)
         except Exception as exc:
+            _abort_section_stream(stream_callback)
             checkpoint_path = _write_longform_checkpoint(config, sections)
             memory_path = write_story_memories(
                 resolve_path(config, config.generation.story_memory_path),
@@ -838,7 +910,9 @@ def generate_with_controlled_hallucination(
                 f"ledger saved to {ledger_path}; state saved to {state_path}. {exc}"
             ) from exc
         if not section:
+            _abort_section_stream(stream_callback)
             break
+        _commit_section_stream(stream_callback)
         sections.append(section)
         turn_sections.append(section)
         section_titles.append(_section_title(section, section_index))
@@ -894,6 +968,7 @@ def generate_with_controlled_hallucination(
                 "consumed_beats": len(consumed_beats),
                 "repetition_retries": repetition_retry_count - turn_retry_start,
                 "retry_successes": retry_success_count - turn_retry_success_start,
+                "section_seconds": round(time.monotonic() - section_started_at, 1),
             },
         )
         section_index += 1

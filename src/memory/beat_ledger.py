@@ -135,12 +135,13 @@ def likely_repeats_consumed_beat(
             overlap = _keyword_overlap(candidate.keywords, consumed.keywords)
             summary_overlap = _token_jaccard(candidate.summary, consumed.summary)
             shared_keywords = set(candidate.keywords) & set(consumed.keywords)
-            shared_triggers = shared_keywords & _distinctive_tokens(candidate.beat_type)
-            shared_content = shared_keywords - _distinctive_tokens(candidate.beat_type)
+            trigger_tokens = _distinctive_tokens(candidate.beat_type)
+            shared_triggers = shared_keywords & trigger_tokens
+            shared_content = shared_keywords - trigger_tokens
             if (
-                overlap >= 0.5
-                or summary_overlap >= 0.42
-                or (shared_triggers and shared_content)
+                (overlap >= 0.65 and len(shared_content) >= 2)
+                or summary_overlap >= 0.55
+                or (shared_triggers and len(shared_content) >= 2)
             ):
                 reasons.append(
                     f"{candidate.beat_type} repeats section {consumed.section_index}: {consumed.summary}"
@@ -149,7 +150,7 @@ def likely_repeats_consumed_beat(
 
     if previous_section:
         similarity = section_similarity(previous_section, section)
-        if similarity >= 0.48:
+        if similarity >= 0.65:
             reasons.append(f"adjacent section token similarity is too high ({similarity:.2f})")
     return bool(reasons), reasons
 

@@ -271,6 +271,8 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - Story-memory RAG combines relevant section memories with a latest-state ledger, unresolved clue ledger, query-relevant KG triples, and four-section compressed timeline.
 - Per-section direction updates choose exactly one primary narrative function and include a bounded consumed-beat summary.
 - The repetition guard checks completed sections against consumed reveals, alliance shifts, system warnings, movements, clue resolutions, threats, and emotional turns, then retries a repeated section once at a lower temperature.
+- Guarded sections still stream immediately in the Generate tab. If a retry is needed, the temporary draft is replaced in place instead of leaving the UI apparently idle or appending duplicate prose.
+- Repetition retries require a high-confidence plot-beat match; adjacent-section vocabulary similarity remains an evaluation metric but does not trigger an expensive rewrite by itself.
 - Run state and evaluation reports track repeated subtitles, repeated narrative beats, adjacent-section similarity, repetition retry count, and retry success rate.
 - The 8K context budget carries only the recent prose excerpt and the most relevant compressed memory/KG slice instead of the full draft.
 - `reports/runs/creative_longform_memory.jsonl` is updated after every section and can be inspected separately from the prose checkpoint.

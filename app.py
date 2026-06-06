@@ -559,20 +559,77 @@ def retrieval_preview_rows(retrieved: list[dict[str, Any]]) -> list[dict[str, An
     return rows
 
 
-def make_stream_callback(placeholder: Any) -> Callable[[str], None]:
-    buffer: list[str] = []
-    state = {"last_render": 0.0, "chars_since_render": 0}
+class SectionStreamRenderer:
+    def __init__(self, placeholder: Any) -> None:
+        self.placeholder = placeholder
+        self.committed: list[str] = []
+        self.pending: list[str] = []
+        self.separator = ""
+        self.status = ""
+        self.last_render = 0.0
+        self.chars_since_render = 0
+        self.section_active = False
 
-    def on_chunk(chunk: str) -> None:
-        buffer.append(chunk)
-        state["chars_since_render"] += len(chunk)
+    def __call__(self, chunk: str) -> None:
+        target = self.pending if self.section_active else self.committed
+        target.append(chunk)
+        self.status = ""
+        self.chars_since_render += len(chunk)
         now = time.monotonic()
-        if state["chars_since_render"] >= 160 or now - state["last_render"] >= 0.15:
-            placeholder.markdown("".join(buffer) + "▌")
-            state["last_render"] = now
-            state["chars_since_render"] = 0
+        if self.chars_since_render >= 160 or now - self.last_render >= 0.15:
+            self._render(cursor=True)
 
-    return on_chunk
+    def begin_section(self, separator: str = "") -> None:
+        self.pending = []
+        self.separator = separator
+        self.status = "다음 섹션을 생성하고 있어..."
+        self.section_active = True
+        self._render(cursor=True, force=True)
+
+    def restart_section(self, reason: str = "") -> None:
+        self.pending = []
+        self.status = reason or "반복을 줄이기 위해 이 섹션을 한 번 다시 쓰고 있어..."
+        self._render(cursor=True, force=True)
+
+    def commit_section(self) -> None:
+        if not self.section_active:
+            return
+        self.committed.extend([self.separator, *self.pending])
+        self.pending = []
+        self.separator = ""
+        self.status = ""
+        self.section_active = False
+        self._render(cursor=False, force=True)
+
+    def abort_section(self) -> None:
+        self.pending = []
+        self.separator = ""
+        self.status = ""
+        self.section_active = False
+        self._render(cursor=False, force=True)
+
+    def _render(self, *, cursor: bool, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and self.chars_since_render < 160 and now - self.last_render < 0.15:
+            return
+        visible = "".join(
+            [
+                *self.committed,
+                self.separator if self.section_active else "",
+                *self.pending,
+            ]
+        )
+        if self.status:
+            visible += f"\n\n_{self.status}_"
+        if cursor:
+            visible += "▌"
+        self.placeholder.markdown(visible)
+        self.last_render = now
+        self.chars_since_render = 0
+
+
+def make_stream_callback(placeholder: Any) -> Callable[[str], None]:
+    return SectionStreamRenderer(placeholder)
 
 
 def make_client(config: AppConfig, dry_run: bool) -> OllamaClient:

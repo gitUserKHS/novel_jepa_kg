@@ -226,6 +226,15 @@ def test_builders_and_loss() -> None:
         previous_section=first_section,
     )
     assert not advancing_repeats
+    different_reveal = (
+        "### 도시의 지도\n\n"
+        "서윤은 낡은 지도에서 도시 전체가 거대한 기억 실험장이었다는 새로운 진실을 발견했다."
+    )
+    different_reveal_repeats, _ = likely_repeats_consumed_beat(
+        different_reveal,
+        consumed_beats,
+    )
+    assert not different_reveal_repeats
     beat_metrics = narrative_beat_metrics(
         "\n\n".join([first_section, repeated_section])
     )
@@ -300,12 +309,47 @@ def test_dry_run_pipeline() -> None:
         )
         assert isinstance(output, str)
         assert output.strip()
+        class SectionStreamProbe:
+            def __init__(self) -> None:
+                self.committed = ""
+                self.pending = ""
+                self.separator = ""
+                self.begin_count = 0
+                self.restart_count = 0
+                self.commit_count = 0
+                self.abort_count = 0
+
+            def __call__(self, chunk: str) -> None:
+                self.pending += chunk
+
+            def begin_section(self, separator: str = "") -> None:
+                self.separator = separator
+                self.pending = ""
+                self.begin_count += 1
+
+            def restart_section(self, _reason: str = "") -> None:
+                self.pending = ""
+                self.restart_count += 1
+
+            def commit_section(self) -> None:
+                self.committed += self.separator + self.pending
+                self.separator = ""
+                self.pending = ""
+                self.commit_count += 1
+
+            def abort_section(self) -> None:
+                self.separator = ""
+                self.pending = ""
+                self.abort_count += 1
+
+        stream_probe = SectionStreamProbe()
         creative_result = generate_with_controlled_hallucination(
             config,
             client,
             "湲곗뼲 ?뷀뼢??臾쇰━???붿쟻?쇰줈 ?⑤뒗 洹쇰????쒖슱.",
             "?쒖쑄: ?숈깮??李얜뒗 湲곕줉 蹂듭썝媛. 誘쇱옱: 吏꾩떎???④릿 ?곌뎄??",
             "?쒖쑄? ?먯뇙 ?곌뎄?숈뿉???먯긽??濡쒓렇瑜?諛쒓껄?쒕떎.",
+            stream_callback=stream_probe,
             return_details=True,
         )
         creative_output = str(creative_result["text"])
@@ -320,6 +364,10 @@ def test_dry_run_pipeline() -> None:
         assert creative_details["consumed_beat_ledger_enabled"]
         assert creative_details["consumed_beat_count"] >= 1
         assert creative_details["repetition_retry_count"] >= 1
+        assert stream_probe.begin_count >= 2
+        assert stream_probe.restart_count >= 1
+        assert stream_probe.commit_count >= 2
+        assert stream_probe.abort_count == 0
         assert resolve_path(config, config.generation.story_memory_path).exists()
         assert resolve_path(config, config.generation.story_ledger_path).exists()
         continued_result = generate_with_controlled_hallucination(

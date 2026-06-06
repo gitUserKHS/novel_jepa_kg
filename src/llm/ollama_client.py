@@ -58,6 +58,7 @@ class OllamaClient:
         self.fallback_num_batch = fallback_num_batch
         self.fallback_max_tokens = fallback_max_tokens
         self.fallback_keep_alive = fallback_keep_alive
+        self._known_unloaded_models: set[str] = set()
 
     def list_models(self) -> list[str]:
         try:
@@ -85,6 +86,8 @@ class OllamaClient:
     def unload_model(self, model: str) -> bool:
         if self.dry_run or not model:
             return False
+        if model in self._known_unloaded_models:
+            return False
         try:
             response = requests.post(
                 f"{self.base_url}/api/generate",
@@ -92,6 +95,7 @@ class OllamaClient:
                 timeout=min(self.timeout_sec, 30),
             )
             self._raise_for_status(response, "/api/generate", model)
+            self._known_unloaded_models.add(model)
             return True
         except Exception:
             return False
@@ -145,6 +149,7 @@ class OllamaClient:
                 callback = tracking_callback
 
             try:
+                self._known_unloaded_models.discard(self.chat_model)
                 response = requests.post(
                     f"{self.base_url}/api/chat",
                     json=body,
@@ -186,6 +191,7 @@ class OllamaClient:
                 f"Ollama /api/chat returned empty content for model '{self.chat_model}'.{detail} "
                 "Try a larger max token value or a non-thinking chat model."
             )
+        self._known_unloaded_models.discard(self.chat_model)
         return content
 
     def _read_streaming_chat(
@@ -217,6 +223,7 @@ class OllamaClient:
         if self.keep_alive:
             body["keep_alive"] = self.keep_alive
         try:
+            self._known_unloaded_models.discard(self.embed_model)
             response = requests.post(
                 f"{self.base_url}/api/embed",
                 json=body,
@@ -231,6 +238,7 @@ class OllamaClient:
         vectors = payload.get("embeddings")
         if not vectors:
             raise RuntimeError("Ollama /api/embed returned no embeddings.")
+        self._known_unloaded_models.discard(self.embed_model)
         return np.asarray(vectors, dtype="float32")
 
     def _chat_options(self, temperature: float, max_tokens: int, recovery_mode: bool = False) -> dict[str, Any]:
