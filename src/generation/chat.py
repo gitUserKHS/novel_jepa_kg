@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from src.embedding.vector_store import retrieve_by_text, retrieve_by_vector
+from src.embedding.vector_store import retrieve_by_vector
 from src.generation.consistency import allowed_name_instruction, build_beat_card, repair_name_consistency
 from src.generation.hallucination import (
     CREATIVE_HALLUCINATION_MODE,
@@ -23,7 +23,7 @@ from src.session.store import append_message, append_scene_summary, save_session
 from src.utils.config import AppConfig
 
 
-CHAT_MODES = ["LLM only", "RAG + LLM", "JEPA Planner + RAG + LLM", CREATIVE_HALLUCINATION_MODE]
+CHAT_MODES = [CREATIVE_HALLUCINATION_MODE]
 
 
 def _previous_scene_for_retrieval(session: dict[str, Any], user_instruction: str) -> str:
@@ -43,16 +43,8 @@ def _retrieve_examples(
     user_instruction: str,
     mode: str,
 ) -> tuple[str, list[str], list[dict[str, Any]]]:
-    if mode == "LLM only":
-        return "세션 메모리를 바탕으로 다음 장면을 자연스럽게 전개한다.", [], []
-
     previous_scene = _previous_scene_for_retrieval(session, user_instruction)
     try:
-        if mode == "RAG + LLM":
-            retrieved = retrieve_by_text(config, client, previous_scene, config.generation.top_k)
-            examples = [item["sample"]["scene_t_plus_1"]["summary"] for item in retrieved[: config.generation.rag_context_limit]]
-            return "검색된 유사 장면의 전환 논리를 참고해 다음 갈등을 확장한다.", examples, retrieved
-
         predicted = predict_next_embedding(
             config,
             client,
@@ -105,9 +97,9 @@ def generate_chat_turn(
         examples=examples,
         beat_card=beat_card,
         consistency_rules=allowed_name_instruction(session.get("characters", "")),
-        sectioned_output=config.generation.sectioned_output,
-        section_count=config.generation.section_count,
-        section_min_chars=config.generation.section_min_chars,
+        sectioned_output=True,
+        section_count=1,
+        section_min_chars=min(1200, config.generation.section_min_chars),
     )
     temperature = hallucination_temperature(config) if mode == CREATIVE_HALLUCINATION_MODE else config.generation.temperature
     assistant_text = client.chat(

@@ -1,14 +1,19 @@
 # Evaluation Plan
 
-The automatic pipeline now compares two planner-backed generation modes:
+The automatic pipeline evaluates one planner-backed generation mode:
 
-1. JEPA Planner + RAG + LLM
-2. Controlled Hallucination + JEPA
+1. Creative Hallucination + JEPA
 
 The controlled hallucination mode treats hallucination as creative expansion:
 the model is asked to add plausible new details, clues, symbols, or emotional
 inferences while preserving world rules, known character names, and JEPA/RAG
 direction.
+
+Long-form continuity is supported by story-memory RAG. Every completed section
+stores a compact record of established facts, character and relationship state,
+locations, unresolved or resolved clues, and important state changes. Before the
+next section is generated, only the most relevant records are retrieved within a
+bounded context budget.
 
 ## Automatic Metrics
 
@@ -60,9 +65,10 @@ Save a Markdown report containing:
 - config snapshot
 - dataset size
 - training curve
-- generation outputs from the two pipeline modes
+- the approximately 30,000-character controlled hallucination novel
 - controlled hallucination output and metrics
 - section structure metrics
+- story-memory ledger path and retrieval diagnostics
 - metric table
 - qualitative observations
 - limitations

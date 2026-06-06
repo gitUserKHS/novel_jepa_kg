@@ -29,11 +29,19 @@ from src.utils.config import AppConfig
 from src.utils.paths import resolve_path
 
 
+def _embedding_excerpt(text: str, max_chars: int = 6000) -> str:
+    cleaned = text.strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    half = max_chars // 2
+    return "\n\n[...middle omitted for embedding...]\n\n".join([cleaned[:half], cleaned[-half:]])
+
+
 def _embedding_map(client: OllamaClient, previous_scene: str, outputs: dict[str, str]) -> tuple[np.ndarray | None, dict[str, np.ndarray]]:
     nonempty = [(name, text) for name, text in outputs.items() if text.strip()]
     if not previous_scene.strip() or not nonempty:
         return None, {}
-    vectors = client.embed([previous_scene] + [text for _name, text in nonempty])
+    vectors = client.embed([_embedding_excerpt(previous_scene)] + [_embedding_excerpt(text) for _name, text in nonempty])
     return vectors[0], {name: vector for (name, _text), vector in zip(nonempty, vectors[1:])}
 
 

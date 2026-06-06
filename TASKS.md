@@ -61,6 +61,12 @@
 - [x] Add synthetic sample diversity axes for JEPA planner training.
 - [x] Add controlled hallucination generation mode for creative but planner-grounded expansion.
 - [x] Limit the full pipeline comparison to JEPA and controlled hallucination outputs for lower VRAM pressure.
+- [x] Make Creative Hallucination + JEPA the only active prose generation mode.
+- [x] Generate approximately 30,000 characters through sequential resource-bounded sections.
+- [x] Save the long-form draft checkpoint after every completed section.
+- [x] Extract a compact continuity record from every generated section without an extra LLM call.
+- [x] Add lightweight story-memory RAG for characters, facts, clues, locations, and state changes.
+- [x] Save the story-memory ledger after every completed section.
 
 ## Phase 4.5 - Chat Memory
 

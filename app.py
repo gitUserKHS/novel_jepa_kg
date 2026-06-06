@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from types import SimpleNamespace
 from pathlib import Path
@@ -17,9 +18,6 @@ from src.embedding.embed_scenes import embed_dataset
 from src.embedding.vector_store import build_current_context_index, build_next_scene_index
 from src.evaluation.report import evaluate_and_write_report
 from src.generation.chat import CHAT_MODES, generate_chat_turn
-from src.generation.generate_baseline import generate_llm_only
-from src.generation.generate_with_jepa import generate_with_jepa
-from src.generation.generate_with_rag import generate_with_rag, plan_rag_generation
 from src.generation.hallucination import CREATIVE_HALLUCINATION_MODE, generate_with_controlled_hallucination
 from src.llm.scene_presets import (
     AUTO_SCENE_PRESET,
@@ -51,7 +49,7 @@ PIPELINE_STAGES = [
     {"stage": "Embedding", "work": "Reuse or create scene embeddings, then prepare vectors"},
     {"stage": "Index", "work": "Reuse or build FAISS current-context and next-scene indexes"},
     {"stage": "Train", "work": "Train residual predictor and save best checkpoint"},
-    {"stage": "Generate", "work": "Create JEPA and controlled hallucination outputs"},
+    {"stage": "Generate", "work": "Create one long-form controlled hallucination novel"},
     {"stage": "Evaluate", "work": "Score outputs and write Markdown report"},
 ]
 
@@ -63,6 +61,17 @@ DEFAULT_CHAT_SETTINGS = {
     "max_memory_chars": 5000,
     "auto_update_graph": True,
     "scene_summary_chars": 700,
+}
+
+DEFAULT_LONGFORM_SETTINGS = {
+    "target_novel_chars": 30000,
+    "longform_max_sections": 24,
+    "longform_recent_context_chars": 1800,
+    "longform_checkpoint_path": "reports/runs/creative_longform_latest.md",
+    "enable_story_memory_rag": True,
+    "story_memory_top_k": 4,
+    "story_memory_context_chars": 1800,
+    "story_memory_path": "reports/runs/creative_longform_memory.jsonl",
 }
 
 GENRE_PRESETS = [
@@ -95,6 +104,14 @@ def ensure_chat_config(config: AppConfig) -> AppConfig:
     if hasattr(config, "chat"):
         return config
     object.__setattr__(config, "chat", SimpleNamespace(**DEFAULT_CHAT_SETTINGS))
+    return config
+
+
+def ensure_generation_config(config: AppConfig) -> AppConfig:
+    generation = config.generation
+    for name, value in DEFAULT_LONGFORM_SETTINGS.items():
+        if not hasattr(generation, name):
+            object.__setattr__(generation, name, value)
     return config
 
 
@@ -529,11 +546,16 @@ def retrieval_preview_rows(retrieved: list[dict[str, Any]]) -> list[dict[str, An
 
 def make_stream_callback(placeholder: Any) -> Callable[[str], None]:
     buffer: list[str] = []
+    state = {"last_render": 0.0, "chars_since_render": 0}
 
     def on_chunk(chunk: str) -> None:
-        for char in chunk:
-            buffer.append(char)
+        buffer.append(chunk)
+        state["chars_since_render"] += len(chunk)
+        now = time.monotonic()
+        if state["chars_since_render"] >= 160 or now - state["last_render"] >= 0.15:
             placeholder.markdown("".join(buffer) + "▌")
+            state["last_render"] = now
+            state["chars_since_render"] = 0
 
     return on_chunk
 
@@ -740,29 +762,87 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
             )
         )
         config.generation.max_tokens = int(
-            st.number_input("Max output tokens", min_value=256, max_value=8192, value=config.generation.max_tokens, step=128)
+            st.number_input(
+                "Max tokens per section",
+                min_value=512,
+                max_value=4096,
+                value=config.generation.max_tokens,
+                step=128,
+                help="Lower this first if Ollama runs out of VRAM. The novel is generated section by section.",
+            )
         )
-        config.generation.sectioned_output = st.checkbox(
-            "Write as titled sections",
-            value=config.generation.sectioned_output,
-            help="Generate novel prose as section subtitles followed by substantial body text.",
+        config.generation.sectioned_output = True
+        config.generation.target_novel_chars = int(
+            st.number_input(
+                "Target novel characters",
+                min_value=10000,
+                max_value=50000,
+                value=int(config.generation.target_novel_chars),
+                step=1000,
+            )
         )
         config.generation.section_count = int(
             st.number_input(
-                "Section count",
-                min_value=1,
-                max_value=8,
+                "Planned section count",
+                min_value=5,
+                max_value=24,
                 value=int(config.generation.section_count),
                 step=1,
             )
         )
         config.generation.section_min_chars = int(
             st.number_input(
-                "Min chars per section",
-                min_value=100,
-                max_value=1500,
+                "Target chars per section",
+                min_value=500,
+                max_value=3000,
                 value=int(config.generation.section_min_chars),
-                step=50,
+                step=100,
+            )
+        )
+        config.generation.longform_max_sections = int(
+            st.number_input(
+                "Maximum generated sections",
+                min_value=config.generation.section_count,
+                max_value=30,
+                value=max(config.generation.section_count, int(config.generation.longform_max_sections)),
+                step=1,
+                help="Extra sections are generated only when the draft is still below 90% of the target length.",
+            )
+        )
+        config.generation.longform_recent_context_chars = int(
+            st.number_input(
+                "Recent context chars per call",
+                min_value=500,
+                max_value=4000,
+                value=int(config.generation.longform_recent_context_chars),
+                step=100,
+                help="Only this recent excerpt is carried forward, keeping context and VRAM usage bounded.",
+            )
+        )
+        config.generation.enable_story_memory_rag = st.checkbox(
+            "Use story-memory RAG",
+            value=config.generation.enable_story_memory_rag,
+            help="Stores compact section facts and retrieves only relevant past memories for continuity.",
+        )
+        config.generation.story_memory_top_k = int(
+            st.number_input(
+                "Story-memory RAG top K",
+                min_value=1,
+                max_value=8,
+                value=int(config.generation.story_memory_top_k),
+                step=1,
+                disabled=not config.generation.enable_story_memory_rag,
+            )
+        )
+        config.generation.story_memory_context_chars = int(
+            st.number_input(
+                "Story-memory context chars",
+                min_value=400,
+                max_value=3000,
+                value=int(config.generation.story_memory_context_chars),
+                step=100,
+                help="Bounds the retrieved continuity ledger added to each section prompt.",
+                disabled=not config.generation.enable_story_memory_rag,
             )
         )
         config.generation.hallucination_target = float(
@@ -787,6 +867,7 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
         config.generation.enable_consistency_repair = st.checkbox(
             "Auto-repair name consistency",
             value=config.generation.enable_consistency_repair,
+            help="Disabled by default for long-form generation because repairs require extra LLM calls.",
         )
         config.generation.use_scene_analyzer = st.checkbox(
             "Use current scene analyzer",
@@ -824,16 +905,6 @@ def run_generation_bundle(
     stream_callbacks = stream_callbacks or {}
     trace_callbacks = trace_callbacks or {}
     return {
-        "jepa": generate_with_jepa(
-            config,
-            client,
-            world,
-            characters,
-            previous_scene,
-            stream_callback=stream_callbacks.get("jepa"),
-            trace_callback=trace_callbacks.get("jepa"),
-            scene_preset=scene_preset,
-        ),
         "creative_jepa": generate_with_controlled_hallucination(
             config,
             client,
@@ -937,7 +1008,7 @@ def render_chat_session(config: AppConfig, client: OllamaClient) -> None:
                     st.caption(mode)
                 st.markdown(message.get("content", ""))
 
-        mode = st.radio("Generation mode", CHAT_MODES, index=2, horizontal=True, key=f"mode_{session_id}")
+        mode = st.radio("Generation mode", CHAT_MODES, index=0, horizontal=True, key=f"mode_{session_id}")
         scene_preset_label = scene_preset_selector("Scene preset", session.get("genre", ""), f"chat_{session_id}")
         scene_preset = resolve_scene_preset(session.get("genre", ""), scene_preset_label)
         user_instruction = st.text_area(
@@ -1023,6 +1094,7 @@ def render_chat_session(config: AppConfig, client: OllamaClient) -> None:
 def main() -> None:
     config = load_config("configs/default.yaml")
     config = ensure_chat_config(config)
+    config = ensure_generation_config(config)
     config, dry_run = sidebar_config(config)
     ensure_project_dirs(config)
     client = make_client(config, dry_run)
@@ -1208,17 +1280,13 @@ def main() -> None:
                 artifact_table.dataframe(artifact_status(config), hide_index=True, width="stretch")
                 progress.progress(70)
 
-                update_stage(stage_rows, stage_table, 4, "running", "Generating comparison outputs")
-                current_step.info("Step 5/6: JEPA and controlled hallucination generation")
-                generation_views = st.tabs(["JEPA live", "Creative hallucination live"])
+                update_stage(stage_rows, stage_table, 4, "running", "Generating long-form creative hallucination novel")
+                current_step.info("Step 5/6: Creative Hallucination long-form generation")
+                generation_views = st.tabs(["Creative hallucination novel"])
                 generation_placeholders = {}
                 trace_placeholders = {}
                 with generation_views[0]:
-                    st.caption("Pipeline trace shows JEPA prediction/retrieval/prompt/generation steps.")
-                    trace_placeholders["jepa"] = st.empty()
-                    generation_placeholders["jepa"] = st.empty()
-                with generation_views[1]:
-                    st.caption("Pipeline trace shows JEPA planning plus the controlled hallucination contract.")
+                    st.caption("The novel is generated sequentially in resource-bounded sections.")
                     trace_placeholders["creative_jepa"] = st.empty()
                     generation_placeholders["creative_jepa"] = st.empty()
                 outputs = run_generation_bundle(
@@ -1531,84 +1599,32 @@ def main() -> None:
             height=100,
             key="gen_prev",
         )
-        mode = st.radio("Mode", ["LLM only", "RAG + LLM", "JEPA Planner + RAG + LLM", CREATIVE_HALLUCINATION_MODE], horizontal=True)
-        if st.button("Generate prose"):
+        st.info(
+            f"Mode: {CREATIVE_HALLUCINATION_MODE} | "
+            f"target={config.generation.target_novel_chars:,} chars | "
+            f"planned sections={config.generation.section_count} | "
+            f"story-memory RAG={'on' if config.generation.enable_story_memory_rag else 'off'}"
+        )
+        if st.button("Generate long-form novel"):
             try:
                 trace_box = st.empty()
                 trace_callback = make_generation_trace_callback(trace_box)
-                if mode != "LLM only":
-                    st.caption("Pipeline trace shows system retrieval/planning steps, not hidden model chain-of-thought.")
+                st.caption("The model is called once per section so local VRAM and context usage stay bounded.")
                 live_output = st.empty()
                 stream_callback = make_stream_callback(live_output)
-                generation_details: dict[str, Any] = {}
-                if mode == "LLM only":
-                    output = generate_llm_only(
-                        config,
-                        client,
-                        world,
-                        characters,
-                        previous_scene,
-                        stream_callback=stream_callback,
-                        scene_preset=scene_preset,
-                    )
-                elif mode == "RAG + LLM":
-                    result = generate_with_rag(
-                        config,
-                        client,
-                        world,
-                        characters,
-                        previous_scene,
-                        stream_callback=stream_callback,
-                        scene_preset=scene_preset,
-                        return_details=True,
-                        trace_callback=trace_callback,
-                    )
-                    output = str(result["text"])
-                    generation_details = result.get("rag", {})
-                elif mode == "JEPA Planner + RAG + LLM":
-                    result = generate_with_jepa(
-                        config,
-                        client,
-                        world,
-                        characters,
-                        previous_scene,
-                        stream_callback=stream_callback,
-                        scene_preset=scene_preset,
-                        return_details=True,
-                        trace_callback=trace_callback,
-                    )
-                    output = str(result["text"])
-                    generation_details = result.get("planner", {})
-                    generation_details["rag_baselines"] = plan_rag_generation(
-                        config,
-                        client,
-                        world,
-                        characters,
-                        previous_scene,
-                        scene_preset=scene_preset,
-                    )
-                else:
-                    result = generate_with_controlled_hallucination(
-                        config,
-                        client,
-                        world,
-                        characters,
-                        previous_scene,
-                        stream_callback=stream_callback,
-                        scene_preset=scene_preset,
-                        return_details=True,
-                        trace_callback=trace_callback,
-                    )
-                    output = str(result["text"])
-                    generation_details = result.get("planner", {})
-                    generation_details["rag_baselines"] = plan_rag_generation(
-                        config,
-                        client,
-                        world,
-                        characters,
-                        previous_scene,
-                        scene_preset=scene_preset,
-                    )
+                result = generate_with_controlled_hallucination(
+                    config,
+                    client,
+                    world,
+                    characters,
+                    previous_scene,
+                    stream_callback=stream_callback,
+                    scene_preset=scene_preset,
+                    return_details=True,
+                    trace_callback=trace_callback,
+                )
+                output = str(result["text"])
+                generation_details: dict[str, Any] = result.get("planner", {})
                 live_output.markdown(output)
                 if generation_details:
                     st.markdown("#### Retrieval / Planner diagnostics")
@@ -1623,39 +1639,28 @@ def main() -> None:
                         st.code(generation_details["hallucination_contract"])
                     if "predicted_vector_norm" in generation_details:
                         st.metric("predicted vector norm", f"{generation_details['predicted_vector_norm']:.4f}")
+                    length_cols = st.columns(3)
+                    length_cols[0].metric("actual chars", f"{generation_details.get('actual_novel_chars', len(output)):,}")
+                    length_cols[1].metric("target chars", f"{generation_details.get('target_novel_chars', 0):,}")
+                    length_cols[2].metric("sections", generation_details.get("completed_sections", 0))
+                    if generation_details.get("checkpoint_path"):
+                        st.success(f"Latest draft checkpoint: {generation_details['checkpoint_path']}")
+                    if generation_details.get("story_memory_rag_enabled"):
+                        memory_cols = st.columns(2)
+                        memory_cols[0].metric(
+                            "story memories",
+                            generation_details.get("story_memory_count", 0),
+                        )
+                        memory_cols[1].metric(
+                            "memory retrieval hits",
+                            generation_details.get("story_memory_retrievals", 0),
+                        )
+                        if generation_details.get("story_memory_path"):
+                            st.success(f"Story-memory ledger: {generation_details['story_memory_path']}")
                     retrieved = generation_details.get("retrieved", [])
-                    if retrieved and mode in {"JEPA Planner + RAG + LLM", CREATIVE_HALLUCINATION_MODE}:
+                    if retrieved:
                         st.markdown("##### JEPA retrieved examples")
                         st.dataframe(pd.DataFrame(retrieval_preview_rows(retrieved)), hide_index=True, width="stretch")
-                    if generation_details.get("current_retrieved"):
-                        st.markdown("##### RAG current-index retrieved examples")
-                        st.dataframe(
-                            pd.DataFrame(retrieval_preview_rows(generation_details["current_retrieved"])),
-                            hide_index=True,
-                            width="stretch",
-                        )
-                    if generation_details.get("next_retrieved"):
-                        st.markdown("##### RAG next-index retrieved examples")
-                        st.dataframe(
-                            pd.DataFrame(retrieval_preview_rows(generation_details["next_retrieved"])),
-                            hide_index=True,
-                            width="stretch",
-                        )
-                    rag_baselines = generation_details.get("rag_baselines", {})
-                    if rag_baselines.get("current_retrieved"):
-                        st.markdown("##### RAG current-index retrieved examples")
-                        st.dataframe(
-                            pd.DataFrame(retrieval_preview_rows(rag_baselines["current_retrieved"])),
-                            hide_index=True,
-                            width="stretch",
-                        )
-                    if rag_baselines.get("next_retrieved"):
-                        st.markdown("##### RAG next-index retrieved examples")
-                        st.dataframe(
-                            pd.DataFrame(retrieval_preview_rows(rag_baselines["next_retrieved"])),
-                            hide_index=True,
-                            width="stretch",
-                        )
             except Exception as exc:  # noqa: BLE001
                 show_error("Generation failed", exc)
 
@@ -1669,11 +1674,10 @@ def main() -> None:
         )
         eval_world = st.text_area("World setting for consistency check", height=80, key="eval_world")
         eval_characters = st.text_area("Known characters for consistency check", height=80, key="eval_characters")
-        jepa = st.text_area("JEPA output", height=120)
-        creative_jepa = st.text_area("Controlled hallucination output", height=120)
+        creative_jepa = st.text_area("Creative Hallucination novel", height=220)
         if st.button("Write evaluation report"):
             try:
-                outputs = {"jepa": jepa, "creative_jepa": creative_jepa}
+                outputs = {"creative_jepa": creative_jepa}
                 report_path = evaluate_and_write_report(
                     config,
                     client,

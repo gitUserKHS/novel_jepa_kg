@@ -2,10 +2,9 @@
 
 JEPA-inspired latent planner + local LLM Korean novel generation lab.
 
-This project provides a Streamlit GUI where a user can generate synthetic Korean narrative transition data, validate/filter it, embed scene summaries, train a small embedding-space predictor, and compare the two main planner-backed generation modes:
+This project provides a Streamlit GUI where a user can generate synthetic Korean narrative transition data, validate/filter it, embed scene summaries, train a small embedding-space predictor, and generate one long-form planner-backed creative mode:
 
-1. JEPA-inspired Planner + RAG + LLM
-2. Controlled Hallucination + JEPA
+1. Creative Hallucination + JEPA
 
 The local LLM is not fine-tuned. Only a small PyTorch MLP learns to predict the next narrative-state representation from a structured current narrative context.
 
@@ -19,8 +18,9 @@ Streamlit GUI button
 -> FAISS indexes next-scene embeddings
 -> PyTorch predictor trains to predict target representations in latent space
 -> predictor retrieves likely next-scene directions
--> local LLM writes Korean prose
--> metrics compare JEPA and controlled hallucination modes
+-> local LLM writes one Korean novel section and a compact continuity record
+-> story-memory RAG retrieves relevant past facts, clues, locations, and state changes
+-> metrics evaluate the controlled hallucination novel
 ```
 
 ## Installation
@@ -134,7 +134,7 @@ generate synthetic data
 -> embed summaries
 -> build FAISS index
 -> train JEPA-inspired predictor
--> generate LLM/RAG/JEPA outputs
+-> generate a sectioned Creative Hallucination + JEPA novel
 -> write evaluation report
 ```
 
@@ -144,7 +144,7 @@ Open the `Chat` tab.
 
 1. Create a new session.
 2. Pick the session genre. World setting and characters are filled with genre-matched defaults.
-3. Choose `JEPA Planner + RAG + LLM` for the default long-form mode.
+3. Use the fixed `Creative Hallucination + JEPA` mode.
 4. Pick a scene preset when you want the next scene to follow a specific situation.
 5. Write a next-scene instruction.
 6. Click `Generate next scene`.
@@ -180,7 +180,7 @@ Useful buttons:
 4. Generate 20 samples in Dataset or Project.
 5. Run Embedding.
 6. Train the predictor.
-7. Use Chat with JEPA Planner + RAG + LLM.
+7. Generate with Creative Hallucination + JEPA.
 ```
 
 Keep `Reuse cached data` on. The first run is slower; later runs reuse samples and embeddings.
@@ -192,7 +192,7 @@ Keep `Reuse cached data` on. The first run is slower; later runs reuse samples a
 - Dataset: generate and filter JSONL transition samples
 - Embedding: embed summaries and build the FAISS index
 - Train: train the JEPA-inspired MLP predictor
-- Generate: run LLM-only, RAG, JEPA planner, or controlled hallucination generation
+- Generate: create an approximately 30,000-character Creative Hallucination + JEPA novel
 - Evaluate: write a Markdown comparison report
 - Reports: view saved reports
 
@@ -206,7 +206,7 @@ This project is not a faithful reproduction of Meta JEPA. It is a JEPA-inspired 
 - Local LLM: writes the final Korean prose from the beat card and retrieved direction.
 - Inference scene analyzer: structures the raw current scene into summary, emotion, conflict, state, plot function, active characters, unresolved clues, and next pressure before embedding.
 
-The comparison modes mean:
+The codebase retains earlier baseline implementations for research reference, but the active GUI generation mode is Creative Hallucination + JEPA:
 
 - LLM-only: tests pure local LLM generation.
 - RAG + LLM: retrieves examples from the current-context index and uses the matched samples' next scenes.
@@ -237,8 +237,13 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - Dataset generation uses a candidate multiplier. If some samples fail JSON/schema validation, the generator can try extra candidate ids without requiring a manual rerun.
 - Synthetic JSON generation defaults to a lower max token budget than prose generation to speed up sample creation while keeping the schema compact.
 - RAG/JEPA generation now feeds the LLM a compact beat card instead of dumping all retrieved context into prose.
-- Prose generation defaults to longer sectioned output: each scene can be written as titled sections with substantial body text under every subtitle.
-- Controlled Hallucination + JEPA adds a fourth creative generation mode: JEPA keeps the next-scene direction grounded, while the prompt asks the LLM to add plausible new clues, symbols, sensory details, or emotional inferences.
+- Prose generation targets about 30,000 Korean characters split across roughly 15 titled sections.
+- Creative Hallucination + JEPA is the only active prose mode. JEPA keeps the direction grounded while the LLM adds plausible clues, symbols, sensory details, and emotional inferences.
+- Long-form prose is generated one section per Ollama call with a bounded recent-context excerpt, avoiding a single oversized 30,000-character request.
+- `reports/runs/creative_longform_latest.md` is updated after every completed section, so a partial draft survives an Ollama failure.
+- Each section also produces a compact private continuity record in the same Ollama response. This avoids an extra summarization call.
+- Story-memory RAG retrieves up to four relevant section memories with bounded context, preserving character states, facts, locations, promises, and unresolved clues without loading the full novel.
+- `reports/runs/creative_longform_memory.jsonl` is updated after every section and can be inspected separately from the prose checkpoint.
 - `Prompt examples` limits how many retrieved examples enter the prompt, while `Retrieval top K` still controls the search pool.
 - Name consistency checks compare generated outputs against the character list and report unknown or likely misspelled names.
 - Optional auto-repair rewrites only detected name inconsistencies before the output is saved.
@@ -255,9 +260,9 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - AMP is optional and disabled by default because the small predictor usually does not benefit enough to justify CUDA compatibility risk.
 - Evaluation reports include mode ranking, embedding continuity, repetition profile, keyword consistency, novelty from previous scene, lexical diversity, length fit, progression score, dialogue ratio, sentence stats, section structure metrics, contradiction checks, controlled hallucination metrics, and pairwise output diversity.
 - The full pipeline view shows a live stage table, current step message, artifact snapshot, cache reuse counts, and live training loss/cosine charts while training runs.
-- The full pipeline streams only the JEPA and Controlled Hallucination + JEPA outputs to reduce local Ollama VRAM pressure.
-- The full pipeline and Generate tab stream prose output while Ollama is generating, then replace the live text with the final consistency-checked text.
-- In the Generate tab and the full-pipeline `JEPA live` / `Creative hallucination live` tabs, planner-backed modes show a live pipeline trace before and during the answer: scene analysis, retrieval, JEPA target prediction, prompt assembly, generation, and consistency repair. This is a system trace, not hidden model chain-of-thought.
+- The full pipeline streams only the Creative Hallucination + JEPA novel to reduce local Ollama VRAM pressure.
+- Streaming UI updates are throttled, avoiding a full Streamlit rerender for every generated character.
+- The Generate tab and full pipeline show a live trace for JEPA planning and sequential section generation. This is a system trace, not hidden model chain-of-thought.
 - The full pipeline has its own training controls in the Project tab. The default predictor training budget is 80 epochs with early stopping patience 12, so the small JEPA-inspired MLP can train longer without always running every epoch.
 - If the training graph ends before the requested epoch count, early stopping fired because validation cosine did not improve for the patience window. Set patience to `0` or enable `Run all requested epochs` to force the full epoch count.
 - Chat sessions are stored as JSON files under `data/sessions/` and keep messages, scene summaries, a long-term memory summary, story state, and a knowledge graph.
@@ -272,6 +277,8 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - `data/embeddings/scenes.npz`
 - `data/embeddings/embedding_cache.jsonl`
 - `data/indexes/next_scene.faiss`
+- `reports/runs/creative_longform_latest.md`
+- `reports/runs/creative_longform_memory.jsonl`
 - `data/sessions/*.json`
 - `checkpoints/predictor/best.pt`
 - `checkpoints/predictor/model_card.json`

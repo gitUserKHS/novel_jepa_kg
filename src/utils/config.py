@@ -71,14 +71,22 @@ class TrainingConfig(BaseModel):
 class GenerationConfig(BaseModel):
     top_k: int = 5
     rag_context_limit: int = 3
-    max_tokens: int = 2200
+    max_tokens: int = 1600
     temperature: float = 0.8
     sectioned_output: bool = True
-    section_count: int = 4
-    section_min_chars: int = 400
+    section_count: int = 15
+    section_min_chars: int = 1800
+    target_novel_chars: int = 30000
+    longform_max_sections: int = 24
+    longform_recent_context_chars: int = 1800
+    longform_checkpoint_path: str = "reports/runs/creative_longform_latest.md"
+    enable_story_memory_rag: bool = True
+    story_memory_top_k: int = 4
+    story_memory_context_chars: int = 1800
+    story_memory_path: str = "reports/runs/creative_longform_memory.jsonl"
     hallucination_target: float = 0.35
     hallucination_temperature_delta: float = 0.15
-    enable_consistency_repair: bool = True
+    enable_consistency_repair: bool = False
     use_scene_analyzer: bool = True
     style: str = "한국어 웹소설 문체. 감정선은 선명하게, 장면 전환은 자연스럽게."
 
@@ -87,8 +95,8 @@ class EvaluationConfig(BaseModel):
     use_llm_judge: bool = False
     repetition_ngram: int = 4
     report_dir: str = "reports/runs"
-    target_min_chars: int = 1400
-    target_max_chars: int = 3600
+    target_min_chars: int = 27000
+    target_max_chars: int = 36000
     planner_ablation_modes: list[str] = Field(
         default_factory=lambda: [
             "rag_current_index",

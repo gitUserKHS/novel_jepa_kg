@@ -64,14 +64,22 @@ training:
 generation:
   top_k: 5
   rag_context_limit: 3
-  max_tokens: 2200
+  max_tokens: 1600
   temperature: 0.8
   sectioned_output: true
-  section_count: 4
-  section_min_chars: 400
+  section_count: 15
+  section_min_chars: 1800
+  target_novel_chars: 30000
+  longform_max_sections: 24
+  longform_recent_context_chars: 1800
+  longform_checkpoint_path: "reports/runs/creative_longform_latest.md"
+  enable_story_memory_rag: true
+  story_memory_top_k: 4
+  story_memory_context_chars: 1800
+  story_memory_path: "reports/runs/creative_longform_memory.jsonl"
   hallucination_target: 0.35
   hallucination_temperature_delta: 0.15
-  enable_consistency_repair: true
+  enable_consistency_repair: false
   use_scene_analyzer: true
   style: "한국어 웹소설 문체. 감정선은 선명하게, 장면 전환은 자연스럽게."
 
@@ -79,8 +87,8 @@ evaluation:
   use_llm_judge: false
   repetition_ngram: 4
   report_dir: "reports/runs"
-  target_min_chars: 1400
-  target_max_chars: 3600
+  target_min_chars: 27000
+  target_max_chars: 36000
   planner_ablation_modes:
     - "rag_current_index"
     - "rag_next_index"

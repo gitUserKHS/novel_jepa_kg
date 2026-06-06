@@ -21,6 +21,14 @@ from src.generation.generate_with_jepa import generate_with_jepa
 from src.generation.generate_with_rag import generate_with_rag
 from src.generation.hallucination import generate_with_controlled_hallucination
 from src.llm.ollama_client import OllamaClient
+from src.memory.story_rag import (
+    MEMORY_END,
+    MEMORY_START,
+    StoryMemory,
+    StoryMemoryStreamFilter,
+    retrieve_story_memories,
+    split_story_memory,
+)
 from src.planner.jepa_dataset import MASK_TOKEN, build_context_text, build_target_text
 from src.planner.jepa_model import JEPAPredictor
 from src.planner.jepa_train import representation_prediction_loss, train_predictor
@@ -123,6 +131,41 @@ def test_builders_and_loss() -> None:
     for label in ["요약", "감정", "갈등", "상태", "장면 기능"]:
         assert label in analyzed_context
 
+    response = (
+        "### 닫힌 문\n\n서윤은 붉은 열쇠를 주머니에 감추었다.\n"
+        f"{MEMORY_START}\n"
+        '{"section_index":1,"title":"닫힌 문","summary":"서윤이 붉은 열쇠를 숨겼다.",'
+        '"characters":["서윤"],"facts":["붉은 열쇠는 서윤이 갖고 있다."],'
+        '"open_clues":["열쇠가 여는 문은 아직 모른다."],"resolved_clues":[],"locations":[],'
+        '"state_changes":["열쇠 소유자가 서윤으로 바뀌었다."],"keywords":["서윤","붉은 열쇠"]}'
+        f"\n{MEMORY_END}"
+    )
+    prose, memory = split_story_memory(response, 1, ["서윤"])
+    assert MEMORY_START not in prose
+    assert memory.open_clues
+    retrieved_memories = retrieve_story_memories(
+        [
+            memory,
+            StoryMemory(
+                section_index=2,
+                title="비 내리는 역",
+                summary="민재가 열차를 놓쳤다.",
+                keywords=["민재", "열차"],
+            ),
+        ],
+        "서윤이 붉은 열쇠로 잠긴 문을 연다.",
+        top_k=1,
+        current_section=3,
+    )
+    assert retrieved_memories[0][0].section_index == 1
+    visible_chunks: list[str] = []
+    stream_filter = StoryMemoryStreamFilter(visible_chunks.append)
+    for chunk in [response[:17], response[17:53], response[53:]]:
+        stream_filter.feed(chunk)
+    stream_filter.finish()
+    assert MEMORY_START not in "".join(visible_chunks)
+    assert "서윤은 붉은 열쇠" in "".join(visible_chunks)
+
 
 def test_dry_run_pipeline() -> None:
     with tempfile.TemporaryDirectory(prefix="novel_jepa_smoke_") as tmp:
@@ -191,15 +234,24 @@ def test_dry_run_pipeline() -> None:
         )
         assert isinstance(output, str)
         assert output.strip()
-        creative_output = generate_with_controlled_hallucination(
+        creative_result = generate_with_controlled_hallucination(
             config,
             client,
             "湲곗뼲 ?뷀뼢??臾쇰━???붿쟻?쇰줈 ?⑤뒗 洹쇰????쒖슱.",
             "?쒖쑄: ?숈깮??李얜뒗 湲곕줉 蹂듭썝媛. 誘쇱옱: 吏꾩떎???④릿 ?곌뎄??",
             "?쒖쑄? ?먯뇙 ?곌뎄?숈뿉???먯긽??濡쒓렇瑜?諛쒓껄?쒕떎.",
+            return_details=True,
         )
+        creative_output = str(creative_result["text"])
         assert isinstance(creative_output, str)
         assert creative_output.strip()
+        assert MEMORY_START not in creative_output
+        assert creative_output.count("### ") >= 2
+        assert resolve_path(config, config.generation.longform_checkpoint_path).exists()
+        creative_details = creative_result["planner"]
+        assert creative_details["story_memory_count"] >= 2
+        assert creative_details["story_memory_retrievals"] >= 1
+        assert resolve_path(config, config.generation.story_memory_path).exists()
         rag_output = generate_with_rag(
             config,
             client,
