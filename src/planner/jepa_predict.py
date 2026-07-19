@@ -115,10 +115,13 @@ def _retrieval_metrics(
     expected = true_indices if true_indices is not None else np.arange(indices.shape[0])
     hits = [int(int(expected[row_idx]) in set(row.tolist())) for row_idx, row in enumerate(indices)]
     unique_targets = len({int(idx) for row in indices for idx in row.tolist()})
+    unique_top1 = len({int(idx) for idx in indices[:, 0].tolist()}) if len(indices) else 0
+    top1_capacity = min(indices.shape[0], target.shape[0])
     return {
         "retrieval_hit_at_k": float(np.mean(hits)) if hits else 0.0,
         "retrieval_mean_score": float(np.mean(scores)) if scores.size else 0.0,
         "transition_direction_diversity": float(unique_targets / max(1, indices.size)),
+        "normalized_top1_diversity": float(unique_top1 / max(1, top1_capacity)),
         "top_indices": indices,
         "top_scores": scores,
     }
@@ -164,6 +167,7 @@ def _diagnostics_for_indices(
         "retrieval_hit_at_k": jepa_next["retrieval_hit_at_k"],
         "retrieval_mean_score": jepa_next["retrieval_mean_score"],
         "transition_direction_diversity": jepa_next["transition_direction_diversity"],
+        "normalized_top1_diversity": jepa_next["normalized_top1_diversity"],
         "predicted_vector_norm": float(np.mean(pred_norm)),
         "predicted_vector_norm_min": float(np.min(pred_norm)),
         "predicted_vector_norm_max": float(np.max(pred_norm)),
@@ -230,15 +234,18 @@ def evaluate_planner_diagnostics(config: AppConfig, top_k: int | None = None) ->
         "retrieval_hit_at_k": primary.get("retrieval_hit_at_k", 0.0),
         "retrieval_mean_score": primary.get("retrieval_mean_score", 0.0),
         "transition_direction_diversity": primary.get("transition_direction_diversity", 0.0),
+        "normalized_top1_diversity": primary.get("normalized_top1_diversity", 0.0),
         "predicted_vector_norm": primary.get("predicted_vector_norm", 0.0),
         "validation_pred_target_cosine": validation_metrics.get("pred_target_cosine", 0.0),
         "validation_retrieval_hit_at_k": validation_metrics.get("retrieval_hit_at_k", 0.0),
         "validation_retrieval_mean_score": validation_metrics.get("retrieval_mean_score", 0.0),
         "validation_transition_direction_diversity": validation_metrics.get("transition_direction_diversity", 0.0),
+        "validation_normalized_top1_diversity": validation_metrics.get("normalized_top1_diversity", 0.0),
         "all_pred_target_cosine": all_metrics.get("pred_target_cosine", 0.0),
         "all_retrieval_hit_at_k": all_metrics.get("retrieval_hit_at_k", 0.0),
         "all_retrieval_mean_score": all_metrics.get("retrieval_mean_score", 0.0),
         "all_transition_direction_diversity": all_metrics.get("transition_direction_diversity", 0.0),
+        "all_normalized_top1_diversity": all_metrics.get("normalized_top1_diversity", 0.0),
         "all_predicted_vector_norm": all_metrics.get("predicted_vector_norm", 0.0),
         "validation": validation_metrics,
         "all": all_metrics,

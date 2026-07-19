@@ -39,6 +39,8 @@
 - [x] Add context/field dropout, delta prediction, output normalization, and configurable representation loss.
 - [x] Add inference current-scene analyzer to reduce train/inference context mismatch.
 - [x] Save train/validation indices for validation-first planner diagnostics.
+- [x] Add target-relative VISReg-inspired anti-collapse regularization with automatic small-data disable.
+- [x] Record normalized effective rank and require it in consumer model promotion.
 
 ## Phase 4 - Generation
 
@@ -78,6 +80,9 @@
 - [x] Assign exactly one primary narrative function through a per-section direction update.
 - [x] Detect repeated plot beats after generation and retry the section once at a lower temperature.
 - [x] Report repeated subtitles, repeated beats, adjacent-section similarity, and retry success statistics.
+- [x] Persist a hierarchical global story outline with per-beat state-change and setup/payoff constraints.
+- [x] Add a resource-bounded stability gate for truncation, names, state transitions, and resolved clues.
+- [x] Combine repetition and stability findings into at most one section revision before commit.
 
 ## Phase 4.5 - Chat Memory
 
@@ -118,3 +123,20 @@
 - [x] Add JEPA-inspired smoke checks for builders, loss, retrieval, and dry-run pipeline.
 - [x] Add final demo report.
 - [x] Commit stable version.
+
+## Phase 7 - Consumer Long-form Service
+
+- [x] Separate localhost admin UI (`8502`) from LAN/VPN consumer UI (`8501`).
+- [x] Add consumer registration/login, scrypt password hashes, server-side sessions, and account-owned stories.
+- [x] Isolate every consumer story under `data/consumer_stories/<story_id>/`.
+- [x] Add SQLite WAL metadata, FIFO queue, single-job constraints, and worker heartbeat.
+- [x] Continue generation after browser disconnect and preserve partial sections after worker failure.
+- [x] Add maintenance draining and block candidate training outside active maintenance.
+- [x] Add immutable candidate versions, quality gates, SHA-256 verification, and atomic promotion.
+- [x] Record per-section creativity, consistency, progression, repetition, memory, and JEPA metrics.
+- [x] Restrict admin draft access to research-consented stories while retaining anonymous metrics.
+- [x] Add consumer draft/bundle downloads, immediate deletion, and 30-day retention cleanup.
+- [x] Add separate Windows web/worker tasks and CI-gated self-hosted deployment.
+- [x] Add consumer store, worker recovery, quality-gate, 30K fake generation, and AppTest coverage.
+- [x] Redesign the consumer login/library/chat surface around ordinary account-based use.
+- [x] Store per-section generation stability and revision metrics.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from datetime import datetime
@@ -9,6 +10,9 @@ from typing import Any
 
 from src.utils.config import AppConfig
 from src.utils.paths import resolve_path
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def now_iso() -> str:
@@ -70,10 +74,23 @@ def _session_summary(session: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def write_index(config: AppConfig, sessions: list[dict[str, Any]]) -> None:
     summaries = [_session_summary(session) for session in sessions]
     summaries.sort(key=lambda row: row.get("updated_at", ""), reverse=True)
-    index_path(config).write_text(json.dumps(summaries, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        _write_json_atomic(index_path(config), summaries)
+    except OSError as exc:
+        # The index is derived data. Session files remain authoritative and listable.
+        LOGGER.warning("Could not refresh session index: %s", exc)
 
 
 def list_sessions(config: AppConfig) -> list[dict[str, Any]]:
@@ -86,7 +103,16 @@ def list_sessions(config: AppConfig) -> list[dict[str, Any]]:
         except (json.JSONDecodeError, OSError, KeyError):
             continue
     sessions.sort(key=lambda row: row.get("updated_at", ""), reverse=True)
-    index_path(config).write_text(json.dumps(sessions, ensure_ascii=False, indent=2), encoding="utf-8")
+    return sessions
+
+
+def _load_all_sessions(config: AppConfig) -> list[dict[str, Any]]:
+    sessions = []
+    for summary in list_sessions(config):
+        try:
+            sessions.append(load_session(config, summary["session_id"]))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            continue
     return sessions
 
 
@@ -100,13 +126,8 @@ def load_session(config: AppConfig, session_id: str) -> dict[str, Any]:
 def save_session(config: AppConfig, session: dict[str, Any]) -> dict[str, Any]:
     session["updated_at"] = now_iso()
     path = session_path(config, session["session_id"])
-    path.write_text(json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8")
-    all_sessions = []
-    for summary in list_sessions(config):
-        try:
-            all_sessions.append(load_session(config, summary["session_id"]))
-        except FileNotFoundError:
-            continue
+    _write_json_atomic(path, session)
+    all_sessions = _load_all_sessions(config)
     if session["session_id"] not in {item["session_id"] for item in all_sessions}:
         all_sessions.append(session)
     write_index(config, all_sessions)
@@ -128,7 +149,7 @@ def delete_session(config: AppConfig, session_id: str) -> None:
     path = session_path(config, session_id)
     if path.exists():
         path.unlink()
-    list_sessions(config)
+    write_index(config, _load_all_sessions(config))
 
 
 def append_message(

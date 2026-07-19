@@ -1,8 +1,13 @@
 # Novel JEPA Lab
 
-JEPA-inspired latent planner + local LLM Korean novel generation lab.
+JEPA-inspired latent planner + local LLM Korean long-form novel service and research lab.
 
-This project provides a Streamlit GUI where a user can generate synthetic Korean narrative transition data, validate/filter it, embed scene summaries, train a small embedding-space predictor, and generate one long-form planner-backed creative mode:
+The project has two separate Streamlit surfaces:
+
+1. `consumer_app.py`: account-based story library and chat-style long-form generation.
+2. `app.py`: localhost-only dataset, embedding, training, evaluation, and service administration.
+
+The research UI can generate synthetic Korean narrative transition data, validate/filter it, embed scene summaries, train a small embedding-space predictor, and generate one long-form planner-backed creative mode:
 
 1. Creative Hallucination + JEPA
 
@@ -18,8 +23,10 @@ Streamlit GUI button
 -> FAISS indexes next-scene embeddings
 -> PyTorch predictor trains to predict target representations in latent space
 -> predictor retrieves likely next-scene directions
+-> a persistent hierarchical outline assigns the active global story beat
 -> local LLM writes one Korean novel section and a compact continuity record
 -> story-memory RAG retrieves relevant past facts, clues, locations, and state changes
+-> a local stability gate revises truncation, state drift, resolved-clue reopening, or repetition once
 -> metrics evaluate the controlled hallucination novel
 ```
 
@@ -41,21 +48,43 @@ pip install -r requirements-gpu.txt
 
 ## Run
 
-```bash
-streamlit run app.py
+Start the consumer app and its persistent queue worker:
+
+```powershell
+.\run_service.bat
 ```
 
-Then open:
+Start the private admin and training UI separately:
 
-```text
-http://localhost:8501
+```powershell
+.\run_admin.bat
 ```
 
-On Windows, you can also double-click:
+- Consumer: `http://<host-PC-IP>:8501`, bound to `0.0.0.0` for trusted LAN/VPN users.
+- Admin: `http://127.0.0.1:8502`, unavailable from other PCs.
 
-```text
-run_server.bat
-```
+Consumers create an account or sign in at the service URL. Passwords are stored
+as per-user scrypt hashes, login sessions use hashed server-side tokens, and
+every story is bound to its owner account in SQLite. Returning users continue
+their work from `내 작품`; there is no shared invite code or per-story key.
+
+The compatibility wrapper `run_server.bat` now opens the same private admin UI
+as `run_admin.bat`. See [DEPLOYMENT.md](DEPLOYMENT.md) for model promotion,
+Windows auto-start, health checks, and CI/CD.
+
+### Consumer readiness
+
+Consumer generation is enabled only when an immutable JEPA artifact version has
+passed the service quality gate and is recorded in `artifacts/active.json`.
+The existing 10-sample/1-validation research checkpoint is preserved, but it is
+not service-ready. In the admin `Service` tab:
+
+1. Build at least 40 filtered samples; 96 is recommended.
+2. Enter maintenance and wait for the queue to become idle.
+3. Train and inspect a service candidate.
+4. Promote it only when every gate check passes.
+
+There is no silent RAG-only fallback when the active JEPA model is missing or invalid.
 
 ## Beginner Quickstart
 
@@ -64,29 +93,29 @@ run_server.bat
 Make sure Ollama is running. Install the default chat and embedding models:
 
 ```powershell
-ollama pull gemma4:12b-it-q4_K_M
+ollama pull gemma4:e4b
 ollama pull embeddinggemma
 ```
 
 ### 2. Launch the app
 
-Double-click:
+Double-click the admin launcher:
 
 ```text
-run_server.bat
+run_admin.bat
 ```
 
 Or run from PowerShell:
 
 ```powershell
 cd C:\프로그래밍_프로젝트\novel_jepa_lab
-.\run_server.bat
+.\run_admin.bat
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:8501
+http://127.0.0.1:8502
 ```
 
 ### 3. Test with dry-run mode first
@@ -107,12 +136,12 @@ When dry-run works, turn it off:
 ```text
 Dry-run mode: off
 Ollama base URL: http://localhost:11434
-Chat model: gemma4:12b-it-q4_K_M
+Chat model: gemma4:e4b
 Embedding model: embeddinggemma:latest
 ```
 
 If Ollama is reachable, the sidebar shows installed models as dropdowns. You can still choose `직접 입력` when you want to type a model name manually.
-The default chat model is `gemma4:12b-it-q4_K_M`. On the target RTX 4060 8GB setup it is a CPU/GPU partial-offload model. The app starts with `num_gpu=24`, `num_ctx=8192`, `num_batch=32`, and `keep_alive=60s`.
+The default chat model is `gemma4:e4b`. On the target RTX 4060 8GB setup the app starts with `num_gpu=24`, `num_ctx=8192`, `num_batch=32`, and `keep_alive=60s`.
 Use the sidebar `Ollama runtime` expander to check loaded models, approximate GPU residency, VRAM size, and context length. If `model runner has unexpectedly stopped` appears, lower `Ollama GPU layers`, `Ollama context length`, or `Ollama batch size`.
 The `Ollama 500 recovery` expander controls the automatic recovery path for intermittent runner crashes. The conservative fallback uses `num_gpu=16`, `num_ctx=4096`, `num_batch=16`, `num_predict=1200`, and `keep_alive=10s`.
 
@@ -158,6 +187,13 @@ beat ledger records completed reveals, alliance shifts, warnings, movements,
 clue resolutions, threats, and emotional turns. If a new section appears to
 announce one of those events again, the generator lowers the temperature and
 rewrites that section once before saving it.
+
+A persistent 6-20 beat story outline now supplies the active act, required state
+change, setup/payoff, and forbidden repeat to every section. The same bounded
+revision pass also checks body completion, duplicate subtitles, character names,
+state transitions, and resolved clues. See
+[`docs/research/jepa_regularization_longform_stability.md`](docs/research/jepa_regularization_longform_stability.md)
+for the research rationale and evaluation protocol.
 
 - A `.zip` continuation bundle restores prose, memory, KG/state, turn progress,
   world setting, characters, and the original previous-scene seed.
@@ -221,6 +257,7 @@ Keep `Reuse cached data` on. The first run is slower; later runs reuse samples a
 - Generate: create 5,000/10,000/custom-character turns and continue the saved novel
 - Evaluate: write a Markdown comparison report
 - Reports: view saved reports
+- Service: consumer queue, maintenance, worker heartbeat, model gate/promotion, anonymous metrics, and consented drafts
 
 ## JEPA-Inspired Planner
 
@@ -248,6 +285,7 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - Synthetic samples are diversified with genre-specific scene presets. Each built-in genre has multiple preset situations with plot function, emotion arc, conflict, motif, relationship tension, scene goal, and next hook.
 - The embedding stage builds structured context encoder input from world, character, current scene, and preset metadata, and target encoder input from the next narrative state.
 - Training supports context/field dropout, delta prediction, output normalization, and a JEPA-style representation prediction loss.
+- Predictor training optionally adds a target-relative VISReg-inspired scale/shape/center loss. It is disabled below 40 samples and records normalized effective-rank diagnostics; the consumer quality gate requires an effective-rank ratio of at least 0.50.
 - Training checkpoints store the base-sample train/validation indices used by planner diagnostics.
 - Evaluation reports include a `Planner Diagnostics` section with validation predicted-target cosine, retrieval hit@k, RAG-current/RAG-next/JEPA-next baselines, retrieval overlap, diversity, and predicted vector norm.
 - The project builds both `current_context.faiss` and `next_scene.faiss` indexes.
@@ -317,6 +355,12 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - `reports/runs/creative_longform_ledger.json`
 - `reports/runs/creative_longform_state.json`
 - `data/sessions/*.json`
+- `data/consumer_stories/<story_id>/draft.md`
+- `data/consumer_stories/<story_id>/memory.jsonl`
+- `.runtime/consumer.sqlite3`
+- `artifacts/candidates/<version>/`
+- `artifacts/versions/<version>/`
+- `artifacts/active.json`
 - `checkpoints/predictor/best.pt`
 - `checkpoints/predictor/model_card.json`
 - `reports/runs/latest_train_history.json`

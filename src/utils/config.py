@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+
+
+DEFAULT_CHAT_MODEL = "gemma4:e4b"
 
 
 class OllamaConfig(BaseModel):
     base_url: str = "http://localhost:11434"
-    chat_model: str = "gemma4:12b-it-q4_K_M"
+    chat_model: str = DEFAULT_CHAT_MODEL
     embed_model: str = "embeddinggemma:latest"
     timeout_sec: int = 300
     num_ctx: int = 8192
@@ -52,6 +57,8 @@ class TrainingConfig(BaseModel):
     learning_rate: float = 1e-4
     val_ratio: float = 0.15
     checkpoint_path: str = "checkpoints/predictor/best.pt"
+    history_path: str = "reports/runs/latest_train_history.json"
+    model_card_path: str = "checkpoints/predictor/model_card.json"
     hidden_dim: int = 1024
     num_layers: int = 4
     dropout: float = 0.1
@@ -66,6 +73,13 @@ class TrainingConfig(BaseModel):
     predict_delta: bool = True
     loss_mse_weight: float = 0.05
     loss_norm_weight: float = 0.001
+    representation_regularizer: str = "target_visreg"
+    regularization_weight: float = 0.03
+    regularization_min_samples: int = 40
+    regularization_min_batch_size: int = 8
+    regularization_num_slices: int = 64
+    regularization_variance_floor_ratio: float = 0.75
+    regularization_center_weight: float = 0.1
 
 
 class GenerationConfig(BaseModel):
@@ -88,6 +102,7 @@ class GenerationConfig(BaseModel):
     story_memory_context_chars: int = 2600
     story_memory_path: str = "reports/runs/creative_longform_memory.jsonl"
     story_ledger_path: str = "reports/runs/creative_longform_ledger.json"
+    story_outline_path: str = "reports/runs/creative_longform_outline.json"
     story_summary_group_size: int = 4
     enable_consumed_beat_ledger: bool = True
     enable_repetition_retry: bool = True
@@ -96,6 +111,10 @@ class GenerationConfig(BaseModel):
     hallucination_target: float = 0.35
     hallucination_temperature_delta: float = 0.15
     enable_consistency_repair: bool = False
+    enable_story_outline: bool = True
+    outline_beat_count: int = 12
+    enable_stability_retry: bool = True
+    stability_min_section_ratio: float = 0.55
     use_scene_analyzer: bool = True
     style: str = "한국어 웹소설 문체. 감정선은 선명하게, 장면 전환은 자연스럽게."
 
@@ -133,6 +152,45 @@ class ProjectConfig(BaseModel):
     seed: int = 42
 
 
+class ServiceConfig(BaseModel):
+    name: str = "Novel JEPA Lab Admin"
+    bind_host: str = "127.0.0.1"
+    port: int = 8502
+    require_access_token: bool = False
+    access_token_env: str = "NOVEL_JEPA_ACCESS_TOKEN"
+    job_lock_path: str = ".runtime/service.job.lock"
+
+
+class ConsumerConfig(BaseModel):
+    name: str = "이야기 공방"
+    bind_host: str = "0.0.0.0"
+    port: int = 8501
+    auth_session_days: int = 7
+    database_path: str = ".runtime/consumer.sqlite3"
+    story_root: str = "data/consumer_stories"
+    retention_days: int = 30
+    worker_poll_sec: float = 2.0
+    worker_heartbeat_sec: float = 5.0
+    stale_job_sec: int = 90
+    allowed_turn_chars: list[int] = Field(default_factory=lambda: [2000, 3000, 5000])
+    default_turn_chars: int = 3000
+    default_target_chars: int = 30000
+    max_target_chars: int = 50000
+    chat_model: str = DEFAULT_CHAT_MODEL
+    embed_model: str = "embeddinggemma:latest"
+    active_manifest_path: str = "artifacts/active.json"
+    candidates_dir: str = "artifacts/candidates"
+    versions_dir: str = "artifacts/versions"
+    min_samples: int = 40
+    recommended_samples: int = 96
+    min_validation_samples: int = 6
+    min_validation_cosine: float = 0.60
+    min_hit_at_5: float = 0.50
+    min_top1_diversity: float = 0.40
+    min_effective_rank_ratio: float = 0.50
+    min_jepa_gain_over_rag_next: float = 0.03
+
+
 class AppConfig(BaseModel):
     project: ProjectConfig = Field(default_factory=ProjectConfig)
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
@@ -141,15 +199,66 @@ class AppConfig(BaseModel):
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     chat: ChatConfig = Field(default_factory=ChatConfig)
+    service: ServiceConfig = Field(default_factory=ServiceConfig)
+    consumer: ConsumerConfig = Field(default_factory=ConsumerConfig)
     output_root: str = "."
 
 
+def _first_env(*names: str) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None and value.strip():
+            return value.strip()
+    return None
+
+
+def _env_bool(value: str | None, default: bool) -> bool:
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean environment value: {value!r}")
+
+
+def apply_environment_overrides(config: AppConfig) -> AppConfig:
+    config.ollama.base_url = _first_env("NOVEL_JEPA_OLLAMA_BASE_URL", "OLLAMA_BASE_URL") or config.ollama.base_url
+    config.ollama.chat_model = _first_env("NOVEL_JEPA_CHAT_MODEL", "OLLAMA_CHAT_MODEL") or config.ollama.chat_model
+    config.ollama.embed_model = _first_env("NOVEL_JEPA_EMBED_MODEL", "OLLAMA_EMBED_MODEL") or config.ollama.embed_model
+    config.output_root = _first_env("NOVEL_JEPA_OUTPUT_ROOT") or config.output_root
+    config.service.name = _first_env("NOVEL_JEPA_SERVICE_NAME") or config.service.name
+    config.service.bind_host = _first_env("NOVEL_JEPA_BIND_HOST") or config.service.bind_host
+    port = _first_env("NOVEL_JEPA_PORT")
+    if port is not None:
+        config.service.port = int(port)
+    config.service.require_access_token = _env_bool(
+        _first_env("NOVEL_JEPA_REQUIRE_AUTH"),
+        config.service.require_access_token,
+    )
+    config.consumer.bind_host = (
+        _first_env("NOVEL_JEPA_CONSUMER_BIND_HOST") or config.consumer.bind_host
+    )
+    consumer_port = _first_env("NOVEL_JEPA_CONSUMER_PORT")
+    if consumer_port is not None:
+        config.consumer.port = int(consumer_port)
+    config.consumer.database_path = (
+        _first_env("NOVEL_JEPA_CONSUMER_DB") or config.consumer.database_path
+    )
+    config.consumer.story_root = (
+        _first_env("NOVEL_JEPA_CONSUMER_STORY_ROOT") or config.consumer.story_root
+    )
+    return config
+
+
 def load_config(path: str | Path) -> AppConfig:
+    load_dotenv(override=False)
     config_path = Path(path)
     if not config_path.exists():
-        return AppConfig()
+        return apply_environment_overrides(AppConfig())
     try:
         raw: dict[str, Any] = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         raise ValueError(f"Invalid YAML config at {config_path}: {exc}") from exc
-    return AppConfig(**raw)
+    return apply_environment_overrides(AppConfig(**raw))

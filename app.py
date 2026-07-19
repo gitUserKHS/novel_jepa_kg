@@ -44,6 +44,24 @@ from src.session.store import (
     load_session,
     save_session,
 )
+from src.service.health import model_is_available
+from src.service.job_lock import ServiceBusyError, acquire_project_job
+from src.service.artifacts import (
+    active_model_status,
+    build_candidate,
+    current_research_artifact_status,
+    list_candidate_manifests,
+    promote_candidate,
+)
+from src.service.consumer_store import ConsumerStore
+from src.service.runtime import make_ollama_client
+from src.service.story_workspace import StoryWorkspace, read_draft
+from src.service.security import (
+    access_policy,
+    expected_access_token,
+    token_fingerprint,
+    verify_access_token,
+)
 from src.utils.config import AppConfig, load_config
 from src.utils.paths import ensure_project_dirs, resolve_path
 
@@ -113,6 +131,73 @@ def show_error(message: str, exc: Exception | None = None) -> None:
         st.error(f"{message}: {exc}")
     else:
         st.error(message)
+
+
+def run_exclusive(
+    config: AppConfig,
+    operation: str,
+    callback: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    with acquire_project_job(config, operation):
+        return callback(*args, **kwargs)
+
+
+def require_service_access(config: AppConfig) -> None:
+    policy = access_policy(config.service.require_access_token, config.service.access_token_env)
+    if not policy.required:
+        return
+
+    expected = expected_access_token(policy.token_env)
+    if not policy.configured:
+        st.error("서비스 인증이 켜져 있지만 접근 토큰이 설정되지 않았습니다.")
+        st.code(f"{policy.token_env}=change-this-token", language="text")
+        st.stop()
+
+    fingerprint = token_fingerprint(expected)
+    if st.session_state.get("service_auth_fingerprint") == fingerprint:
+        if st.sidebar.button("로그아웃", key="service_logout", width="stretch"):
+            st.session_state.pop("service_auth_fingerprint", None)
+            st.rerun()
+        return
+
+    st.title("Novel JEPA Lab")
+    st.caption("Private local service")
+    with st.form("service_login", clear_on_submit=True):
+        provided = st.text_input("접근 토큰", type="password", autocomplete="current-password")
+        submitted = st.form_submit_button("로그인", width="stretch")
+    if submitted:
+        if verify_access_token(expected, provided):
+            st.session_state["service_auth_fingerprint"] = fingerprint
+            st.rerun()
+        st.error("접근 토큰이 올바르지 않습니다.")
+    st.stop()
+
+
+def render_service_status(config: AppConfig, dry_run: bool) -> None:
+    policy = access_policy(config.service.require_access_token, config.service.access_token_env)
+    if dry_run:
+        runtime_status = "Dry run"
+    else:
+        try:
+            models = available_ollama_models(config.ollama.base_url, config.ollama.timeout_sec)
+            runtime_status = (
+                "Ready"
+                if model_is_available(config.ollama.chat_model, models)
+                else "Model missing"
+            )
+        except Exception:  # noqa: BLE001 - the status strip must not block the UI.
+            runtime_status = "Ollama offline"
+
+    service_mode = "LAN host" if config.service.bind_host == "0.0.0.0" else "Local host"
+    columns = st.columns([1.2, 1.5, 1.1, 1.2])
+    columns[0].metric("Service", service_mode)
+    columns[1].metric("Base model", config.ollama.chat_model)
+    columns[2].metric("Runtime", runtime_status)
+    columns[3].metric("Access", "Token" if policy.required else "Local only")
+    if config.service.bind_host == "0.0.0.0":
+        st.caption(f"LAN service · port {config.service.port} · Ollama remains local at {config.ollama.base_url}")
 
 
 def ensure_chat_config(config: AppConfig) -> AppConfig:
@@ -1022,6 +1107,13 @@ def run_dataset_stage(
     return {"generated": raw, "filtered": filtered, "diversity": diversity_report_from_samples(filtered_samples)}
 
 
+def run_embedding_stage(config: AppConfig, client: OllamaClient) -> tuple[dict[str, Any], str, str]:
+    result = embed_dataset(config, client)
+    current_index_path = build_current_context_index(config)
+    next_index_path = build_next_scene_index(config)
+    return result, str(current_index_path), str(next_index_path)
+
+
 def run_generation_bundle(
     config: AppConfig,
     client: OllamaClient,
@@ -1151,7 +1243,10 @@ def render_chat_session(config: AppConfig, client: OllamaClient) -> None:
             try:
                 live_output = st.empty()
                 with st.status("Generating next scene and updating memory", expanded=True) as status:
-                    result = generate_chat_turn(
+                    result = run_exclusive(
+                        config,
+                        f"chat generation for {session_id}",
+                        generate_chat_turn,
                         config,
                         client,
                         session,
@@ -1221,18 +1316,239 @@ def render_chat_session(config: AppConfig, client: OllamaClient) -> None:
             st.code(graph_to_mermaid(session.get("knowledge_graph", {})), language="mermaid")
 
 
+def _render_quality_gate(gate: dict[str, Any]) -> None:
+    if not gate:
+        st.caption("No quality-gate result yet.")
+        return
+    if gate.get("passed"):
+        st.success("Service quality gate passed.")
+    else:
+        st.warning("Service quality gate failed. The current active model is unchanged.")
+    rows = gate.get("checks", [])
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    if not gate.get("recommended_sample_count_met", False):
+        st.caption(f"Research recommendation: {int(gate.get('recommended_sample_count', 96))} samples.")
+
+
+def render_consumer_service_admin(config: AppConfig, dry_run: bool) -> None:
+    st.subheader("Consumer Service")
+    store = ConsumerStore(config)
+    queue = store.queue_stats()
+    maintenance = store.maintenance_status()
+    active = active_model_status(config, verify_files=False)
+    worker = store.get_state("worker_heartbeat")
+    worker_label = "no heartbeat"
+    if worker:
+        try:
+            worker_label = str(json.loads(worker["value"]).get("status", "unknown"))
+        except (json.JSONDecodeError, TypeError):
+            worker_label = "unknown"
+
+    status_cols = st.columns(5)
+    status_cols[0].metric("maintenance", {"0": "off", "draining": "draining", "1": "active"}.get(maintenance, maintenance))
+    status_cols[1].metric("queue", queue["queued"])
+    status_cols[2].metric("running", queue["running"])
+    status_cols[3].metric("active JEPA", active["manifest"].get("version", "ready") if active["ready"] else "not ready")
+    status_cols[4].metric("worker", worker_label)
+    if worker:
+        st.caption(f"Worker heartbeat: {worker['updated_at']}")
+
+    maintenance_actions = st.columns(2)
+    if maintenance_actions[0].button(
+        "Enter maintenance",
+        disabled=maintenance != "0",
+        width="stretch",
+        key="service_enter_maintenance",
+    ):
+        store.set_maintenance(True)
+        st.rerun()
+    if maintenance_actions[1].button(
+        "Resume consumer service",
+        disabled=maintenance == "0",
+        width="stretch",
+        key="service_exit_maintenance",
+    ):
+        store.set_maintenance(False)
+        st.rerun()
+    if maintenance == "draining":
+        st.info("New requests are blocked. The worker is draining previously accepted jobs before maintenance becomes active.")
+    elif maintenance == "1":
+        st.warning("Consumer generation is paused for maintenance.")
+
+    model_tab, candidate_tab, metrics_tab, consent_tab = st.tabs(
+        ["Model readiness", "Candidate versions", "Anonymous metrics", "Consented drafts"]
+    )
+    with model_tab:
+        st.markdown("#### Active service model")
+        if active["ready"]:
+            manifest = active["manifest"]
+            st.json(
+                {
+                    "version": manifest.get("version"),
+                    "models": manifest.get("models"),
+                    "facts": manifest.get("facts"),
+                    "promoted_at": manifest.get("promoted_at"),
+                }
+            )
+            _render_quality_gate(manifest.get("quality_gate", {}))
+        else:
+            st.error(active["reason"])
+        verify_col, inspect_col = st.columns(2)
+        if verify_col.button("Verify active SHA-256", disabled=not active["ready"], width="stretch"):
+            verified = active_model_status(config, verify_files=True)
+            if verified["ready"]:
+                st.success("All active artifact fingerprints match.")
+            else:
+                st.error(verified["reason"])
+        if inspect_col.button("Inspect current research checkpoint", width="stretch"):
+            try:
+                st.session_state["research_artifact_status"] = run_exclusive(
+                    config,
+                    "inspect research JEPA artifacts",
+                    current_research_artifact_status,
+                    config,
+                )
+            except Exception as exc:
+                show_error("Could not inspect research artifacts", exc)
+        research_status = st.session_state.get("research_artifact_status")
+        if research_status:
+            st.markdown("#### Current research checkpoint")
+            if research_status.get("available"):
+                st.json(research_status.get("facts", {}))
+                _render_quality_gate(research_status.get("gate", {}))
+            else:
+                st.warning(research_status.get("reason", "Research artifacts are unavailable."))
+
+    with candidate_tab:
+        service_config = config.model_copy(deep=True)
+        service_config.ollama.chat_model = config.consumer.chat_model
+        service_config.ollama.embed_model = config.consumer.embed_model
+        can_train = maintenance == "1" and queue["queued"] == 0 and queue["running"] == 0 and not dry_run
+        st.caption(
+            f"Fixed models: {config.consumer.chat_model} / {config.consumer.embed_model}. "
+            f"Minimum {config.consumer.min_samples} samples; {config.consumer.recommended_samples} recommended."
+        )
+        if st.button(
+            "Train and inspect service candidate",
+            disabled=not can_train,
+            type="primary",
+            width="stretch",
+        ):
+            progress = st.empty()
+
+            def candidate_progress(row: dict[str, Any]) -> None:
+                if "epoch" in row:
+                    progress.info(
+                        f"Training epoch {row['epoch']}/{row.get('total_epochs', '?')} · "
+                        f"validation cosine {float(row.get('val_cosine', 0.0)):.4f}"
+                    )
+                else:
+                    progress.info(f"{row.get('stage', 'candidate')}: {row.get('status', 'running')}")
+
+            try:
+                candidate_client = make_ollama_client(service_config, dry_run=False)
+                manifest = run_exclusive(
+                    config,
+                    "train consumer JEPA candidate",
+                    build_candidate,
+                    service_config,
+                    candidate_client,
+                    progress_callback=candidate_progress,
+                )
+                st.session_state["latest_service_candidate"] = manifest
+                progress.success(f"Candidate {manifest['version']} finished.")
+                st.rerun()
+            except Exception as exc:
+                show_error("Candidate training failed", exc)
+
+        candidates = list_candidate_manifests(config)
+        if not candidates:
+            st.caption("No completed service candidates yet.")
+        else:
+            labels = {
+                f"{item.get('version')} · {'pass' if item.get('quality_gate', {}).get('passed') else 'fail'}": item
+                for item in candidates
+            }
+            selected_label = st.selectbox("Candidate", list(labels), key="service_candidate_select")
+            selected = labels[selected_label]
+            st.json({"version": selected.get("version"), "facts": selected.get("facts"), "models": selected.get("models")})
+            _render_quality_gate(selected.get("quality_gate", {}))
+            if st.button(
+                "Promote selected candidate",
+                disabled=not (
+                    selected.get("quality_gate", {}).get("passed")
+                    and maintenance == "1"
+                    and queue["queued"] == 0
+                    and queue["running"] == 0
+                ),
+                width="stretch",
+            ):
+                try:
+                    promoted = run_exclusive(
+                        config,
+                        "promote consumer JEPA candidate",
+                        promote_candidate,
+                        config,
+                        selected,
+                    )
+                    st.success(f"Promoted {promoted['version']}.")
+                    st.rerun()
+                except Exception as exc:
+                    show_error("Candidate promotion failed", exc)
+
+    with metrics_tab:
+        rows = store.anonymous_metric_rows()
+        if not rows:
+            st.caption("No consumer section metrics yet.")
+        else:
+            frame = pd.DataFrame(rows)
+            numeric = [
+                column
+                for column in [
+                    "creative_expansion_rate",
+                    "useful_hallucination_score",
+                    "hallucination_risk",
+                    "name_consistency_score",
+                    "state_consistency_score",
+                    "new_event_progression_score",
+                    "narrative_repetition_rate",
+                    "jepa_retrieval_score",
+                ]
+                if column in frame.columns
+            ]
+            grouped = frame.groupby(["model_version", "creativity_profile"], dropna=False)[numeric].mean().round(4)
+            grouped.insert(0, "sections", frame.groupby(["model_version", "creativity_profile"], dropna=False).size())
+            st.dataframe(grouped.reset_index(), hide_index=True, width="stretch")
+            st.caption("All rows are anonymous quality metrics; story text is not included here.")
+
+    with consent_tab:
+        stories = store.consented_stories()
+        if not stories:
+            st.caption("No research-consented drafts are available.")
+        else:
+            labels = {f"{row['title']} · {row['updated_at']}": row for row in stories}
+            selected_label = st.selectbox("Consented story", list(labels), key="consented_story_select")
+            selected = labels[selected_label]
+            workspace = StoryWorkspace.for_story(config, str(selected["id"]))
+            draft = read_draft(workspace.draft)
+            st.text_area("Consented draft body", draft, height=500, disabled=True)
+
+
 def main() -> None:
     config = load_config("configs/default.yaml")
     config = ensure_chat_config(config)
     config = ensure_generation_config(config)
+    require_service_access(config)
     config, dry_run = sidebar_config(config)
     ensure_project_dirs(config)
     client = make_client(config, dry_run)
 
     st.title("Novel JEPA Lab")
     st.caption("JEPA-inspired latent planner + local LLM Korean novel generation dashboard")
+    render_service_status(config, dry_run)
 
-    tabs = st.tabs(["Project", "Chat", "Dataset", "Embedding", "Train", "Generate", "Evaluate", "Reports"])
+    tabs = st.tabs(["Project", "Chat", "Dataset", "Embedding", "Train", "Generate", "Evaluate", "Reports", "Service"])
 
     with tabs[0]:
         st.subheader("One-click experiment")
@@ -1313,6 +1629,11 @@ def main() -> None:
         st.caption("Artifact snapshot")
         st.dataframe(artifact_status(config), hide_index=True, width="stretch")
         if st.button("Run Full Pipeline", type="primary"):
+            try:
+                job_lease = acquire_project_job(config, "full pipeline")
+            except ServiceBusyError as exc:
+                st.warning(str(exc))
+                return
             original_reuse_existing = config.data.reuse_existing
             if fresh_dataset:
                 config.data.reuse_existing = False
@@ -1463,6 +1784,7 @@ def main() -> None:
                 show_error("Pipeline failed", exc)
             finally:
                 config.data.reuse_existing = original_reuse_existing
+                job_lease.release()
 
     with tabs[1]:
         render_chat_session(config, client)
@@ -1481,7 +1803,16 @@ def main() -> None:
         count = st.number_input("Number of samples", min_value=1, max_value=1000, value=sample_plan["quick"], step=1)
         if st.button("Generate dataset"):
             try:
-                result = run_dataset_stage(config, client, genre, int(count), scene_preset_label)
+                result = run_exclusive(
+                    config,
+                    "dataset generation",
+                    run_dataset_stage,
+                    config,
+                    client,
+                    genre,
+                    int(count),
+                    scene_preset_label,
+                )
                 generated = result["generated"]
                 cols = st.columns(4)
                 cols[0].metric("written", generated["written"])
@@ -1513,9 +1844,13 @@ def main() -> None:
         st.subheader("Embedding")
         if st.button("Embed filtered dataset"):
             try:
-                result = embed_dataset(config, client)
-                current_index_path = build_current_context_index(config)
-                index_path = build_next_scene_index(config)
+                result, current_index_path, index_path = run_exclusive(
+                    config,
+                    "embedding and index build",
+                    run_embedding_stage,
+                    config,
+                    client,
+                )
                 cols = st.columns(4)
                 cols[0].metric("pairs", result["count"])
                 cols[1].metric("new vectors", result.get("new_vectors", 0))
@@ -1551,10 +1886,13 @@ def main() -> None:
         filtered_samples = read_jsonl(str(resolve_path(config, config.data.filtered_path)))
         train_cols = st.columns(3)
         train_cols[0].metric("filtered samples", len(filtered_samples))
-        train_cols[1].metric("recommended minimum", 32)
+        train_cols[1].metric("regularization minimum", config.training.regularization_min_samples)
         train_cols[2].metric("research target", 96)
-        if len(filtered_samples) < 32:
-            st.warning("For JEPA diagnostics, generate more samples first. 8-24 is fine for smoke tests, but 32+ is a better minimum.")
+        if len(filtered_samples) < config.training.regularization_min_samples:
+            st.warning(
+                "현재 데이터는 smoke test 규모야. Target-VISReg 정규화는 통계가 불안정해 자동으로 꺼지며, "
+                f"최소 {config.training.regularization_min_samples}개부터 활성화돼."
+            )
         with st.expander("Training data diversity", expanded=False):
             render_diversity_report(diversity_report_from_samples(filtered_samples))
         config.training.epochs = int(st.number_input("Epochs", min_value=1, max_value=500, value=config.training.epochs))
@@ -1622,17 +1960,47 @@ def main() -> None:
             config.training.loss_norm_weight = float(
                 st.number_input("Loss norm weight", min_value=0.0, max_value=0.1, value=config.training.loss_norm_weight, format="%0.4f")
             )
-        model_card_path = resolve_path(config, "checkpoints/predictor/model_card.json")
+            config.training.representation_regularizer = st.selectbox(
+                "Representation regularizer",
+                options=["target_visreg", "none"],
+                index=0 if config.training.representation_regularizer == "target_visreg" else 1,
+                help=(
+                    "Frozen unit-normalized target embeddings에 맞춘 VISReg-inspired scale/shape 정규화야. "
+                    "원 논문의 isotropic Gaussian 목적함수를 그대로 적용하지 않아."
+                ),
+            )
+            config.training.regularization_weight = float(
+                st.number_input(
+                    "Target-VISReg weight",
+                    min_value=0.0,
+                    max_value=0.5,
+                    value=config.training.regularization_weight,
+                    step=0.01,
+                    format="%0.3f",
+                )
+            )
+            config.training.regularization_num_slices = int(
+                st.number_input(
+                    "Sliced-Wasserstein projections",
+                    min_value=8,
+                    max_value=1024,
+                    value=config.training.regularization_num_slices,
+                    step=8,
+                )
+            )
+        model_card_path = resolve_path(config, config.training.model_card_path)
         if model_card_path.exists():
             with st.expander("Latest model card", expanded=False):
                 model_card = json.loads(model_card_path.read_text(encoding="utf-8"))
-                summary_cols = st.columns(3)
+                summary_cols = st.columns(4)
                 summary_cols[0].metric("validation pred_target_cosine", f"{model_card.get('best_pred_target_cosine', 0.0):.4f}")
                 summary_cols[1].metric(
                     "epochs",
                     f"{model_card.get('completed_epochs', model_card.get('epoch_count', 0))}/{model_card.get('requested_epochs', '-')}",
                 )
                 summary_cols[2].metric("params", f"{model_card.get('parameter_count', 0):,}")
+                rank_ratio = model_card.get("representation_regularization", {}).get("effective_rank_ratio", 0.0)
+                summary_cols[3].metric("effective-rank ratio", f"{float(rank_ratio):.3f}")
                 if model_card.get("early_stopped"):
                     st.warning(f"Last training stopped early: {model_card.get('stopped_reason')} at epoch {model_card.get('completed_epochs')}.")
                 st.json(model_card)
@@ -1672,7 +2040,13 @@ def main() -> None:
                     ]
                     live_chart.line_chart(train_df.set_index("epoch")[chart_cols])
 
-                history = train_predictor(config, progress_callback=on_train_epoch)
+                history = run_exclusive(
+                    config,
+                    "predictor training",
+                    train_predictor,
+                    config,
+                    progress_callback=on_train_epoch,
+                )
                 train_status.success("Training completed")
                 if history.get("early_stopped"):
                     st.warning(
@@ -1787,7 +2161,10 @@ def main() -> None:
         )
         if uploaded_longform is not None and load_uploaded_clicked:
             try:
-                imported = import_longform_file(
+                imported = run_exclusive(
+                    config,
+                    "long-form import",
+                    import_longform_file,
                     config,
                     uploaded_longform.name,
                     uploaded_longform.getvalue(),
@@ -1858,7 +2235,10 @@ def main() -> None:
                 )
                 live_output = st.empty()
                 stream_callback = make_stream_callback(live_output)
-                result = generate_with_controlled_hallucination(
+                result = run_exclusive(
+                    config,
+                    "long-form generation",
+                    generate_with_controlled_hallucination,
                     config,
                     client,
                     world,
@@ -1966,7 +2346,10 @@ def main() -> None:
         if st.button("Write evaluation report"):
             try:
                 outputs = {"creative_jepa": creative_jepa}
-                report_path = evaluate_and_write_report(
+                report_path = run_exclusive(
+                    config,
+                    "evaluation report",
+                    evaluate_and_write_report,
                     config,
                     client,
                     previous_scene,
@@ -2045,7 +2428,12 @@ def main() -> None:
                     st.warning("Check the confirmation box first.")
                 else:
                     selected_paths = [row["path"] for row in rows if row["label"] in delete_labels]
-                    deleted, freed = delete_known_paths(selected_paths)
+                    deleted, freed = run_exclusive(
+                        config,
+                        "artifact cleanup",
+                        delete_known_paths,
+                        selected_paths,
+                    )
                     st.success(f"Deleted {deleted} item(s), freed {format_bytes(freed)}.")
                     st.rerun()
 
@@ -2083,7 +2471,12 @@ def main() -> None:
                     st.warning("Check the confirmation box first.")
                 else:
                     selected_paths = [row["path"] for row in report_rows if row["name"] in delete_report_names]
-                    deleted, freed = delete_known_paths(selected_paths)
+                    deleted, freed = run_exclusive(
+                        config,
+                        "report cleanup",
+                        delete_known_paths,
+                        selected_paths,
+                    )
                     st.success(f"Deleted {deleted} report/log file(s), freed {format_bytes(freed)}.")
                     st.rerun()
             if report_actions[1].button("Keep latest and delete older"):
@@ -2091,7 +2484,12 @@ def main() -> None:
                     st.warning("Check the confirmation box first.")
                 else:
                     old_paths = [row["path"] for row in sorted(report_rows, key=lambda item: item["mtime"], reverse=True)[int(keep_latest) :]]
-                    deleted, freed = delete_known_paths(old_paths)
+                    deleted, freed = run_exclusive(
+                        config,
+                        "report cleanup",
+                        delete_known_paths,
+                        old_paths,
+                    )
                     st.success(f"Deleted {deleted} older report/log file(s), freed {format_bytes(freed)}.")
                     st.rerun()
 
@@ -2100,6 +2498,9 @@ def main() -> None:
             selected = st.selectbox("Report", [p.name for p in reports]) if reports else None
             if selected:
                 st.markdown((report_dir / selected).read_text(encoding="utf-8"))
+
+    with tabs[8]:
+        render_consumer_service_admin(config, dry_run)
 
 
 if __name__ == "__main__":

@@ -1,45 +1,6 @@
 @echo off
 setlocal
-
 cd /d "%~dp0"
 
-if /i "%~1"=="--help" (
-    echo Usage:
-    echo   run_server.bat
-    echo.
-    echo Stops any existing Novel JEPA Lab server on port 8501,
-    echo then starts a fresh server at http://127.0.0.1:8501
-    exit /b 0
-)
-
-if not exist ".venv\Scripts\python.exe" (
-    echo [ERROR] .venv was not found.
-    echo Run these commands first:
-    echo   python -m venv .venv
-    echo   .venv\Scripts\python.exe -m pip install -r requirements-gpu.txt
-    pause
-    exit /b 1
-)
-
-".venv\Scripts\python.exe" -c "import streamlit" >nul 2>nul
-if errorlevel 1 (
-    echo [ERROR] Streamlit is not installed in .venv.
-    echo Install dependencies first:
-    echo   .venv\Scripts\python.exe -m pip install -r requirements-gpu.txt
-    pause
-    exit /b 1
-)
-
-echo Stopping any existing server on port 8501...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$owners = Get-NetTCPConnection -LocalPort 8501 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($owner in $owners) { if ($owner -gt 0) { Stop-Process -Id $owner -Force -ErrorAction SilentlyContinue } }"
-timeout /t 1 /nobreak >nul
-
-set PYTHONUTF8=1
-
-echo Starting Novel JEPA Lab with the current project files...
-echo URL: http://127.0.0.1:8501
-start "" "http://127.0.0.1:8501"
-
-".venv\Scripts\python.exe" -m streamlit run app.py --server.headless true --server.port 8501 --server.runOnSave true
-
-pause
+call "%~dp0run_admin.bat" %*
+exit /b %errorlevel%

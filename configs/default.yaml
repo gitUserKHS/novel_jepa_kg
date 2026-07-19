@@ -5,7 +5,7 @@ project:
 
 ollama:
   base_url: "http://localhost:11434"
-  chat_model: "gemma4:12b-it-q4_K_M"
+  chat_model: "gemma4:e4b"
   embed_model: "embeddinggemma:latest"
   timeout_sec: 300
   num_ctx: 8192
@@ -46,6 +46,8 @@ training:
   learning_rate: 0.0001
   val_ratio: 0.15
   checkpoint_path: "checkpoints/predictor/best.pt"
+  history_path: "reports/runs/latest_train_history.json"
+  model_card_path: "checkpoints/predictor/model_card.json"
   hidden_dim: 1024
   num_layers: 4
   dropout: 0.1
@@ -60,6 +62,13 @@ training:
   predict_delta: true
   loss_mse_weight: 0.05
   loss_norm_weight: 0.001
+  representation_regularizer: "target_visreg"
+  regularization_weight: 0.03
+  regularization_min_samples: 40
+  regularization_min_batch_size: 8
+  regularization_num_slices: 64
+  regularization_variance_floor_ratio: 0.75
+  regularization_center_weight: 0.1
 
 generation:
   top_k: 5
@@ -81,6 +90,7 @@ generation:
   story_memory_context_chars: 2600
   story_memory_path: "reports/runs/creative_longform_memory.jsonl"
   story_ledger_path: "reports/runs/creative_longform_ledger.json"
+  story_outline_path: "reports/runs/creative_longform_outline.json"
   story_summary_group_size: 4
   enable_consumed_beat_ledger: true
   enable_repetition_retry: true
@@ -89,6 +99,10 @@ generation:
   hallucination_target: 0.35
   hallucination_temperature_delta: 0.15
   enable_consistency_repair: false
+  enable_story_outline: true
+  outline_beat_count: 12
+  enable_stability_retry: true
+  stability_min_section_ratio: 0.55
   use_scene_analyzer: true
   style: "한국어 웹소설 문체. 감정선은 선명하게, 장면 전환은 자연스럽게."
 
@@ -113,3 +127,40 @@ chat:
   max_memory_chars: 5000
   auto_update_graph: true
   scene_summary_chars: 700
+
+service:
+  name: "Novel JEPA Lab Admin"
+  bind_host: "127.0.0.1"
+  port: 8502
+  require_access_token: false
+  access_token_env: "NOVEL_JEPA_ACCESS_TOKEN"
+  job_lock_path: ".runtime/service.job.lock"
+
+consumer:
+  name: "이야기 공방"
+  bind_host: "0.0.0.0"
+  port: 8501
+  auth_session_days: 7
+  database_path: ".runtime/consumer.sqlite3"
+  story_root: "data/consumer_stories"
+  retention_days: 30
+  worker_poll_sec: 2.0
+  worker_heartbeat_sec: 5.0
+  stale_job_sec: 90
+  allowed_turn_chars: [2000, 3000, 5000]
+  default_turn_chars: 3000
+  default_target_chars: 30000
+  max_target_chars: 50000
+  chat_model: "gemma4:e4b"
+  embed_model: "embeddinggemma:latest"
+  active_manifest_path: "artifacts/active.json"
+  candidates_dir: "artifacts/candidates"
+  versions_dir: "artifacts/versions"
+  min_samples: 40
+  recommended_samples: 96
+  min_validation_samples: 6
+  min_validation_cosine: 0.60
+  min_hit_at_5: 0.50
+  min_top1_diversity: 0.40
+  min_effective_rank_ratio: 0.50
+  min_jepa_gain_over_rag_next: 0.03

@@ -1,14 +1,14 @@
 --extra-index-url https://download.pytorch.org/whl/cu126
 
-streamlit
-pydantic
-pyyaml
-requests
-numpy
-pandas
+streamlit>=1.57,<2
+pydantic>=2.8,<3
+pyyaml>=6,<7
+requests>=2.31,<3
+numpy>=1.26,<3
+pandas>=2.2,<4
 torch==2.12.0+cu126
-faiss-cpu
-scikit-learn
-tqdm
-plotly
-python-dotenv
+faiss-cpu>=1.9,<2
+scikit-learn>=1.5,<2
+tqdm>=4.66,<5
+plotly>=5.24,<7
+python-dotenv>=1,<2

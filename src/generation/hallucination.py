@@ -16,6 +16,7 @@ from src.generation.consistency import (
     repair_name_consistency,
 )
 from src.generation.generate_with_jepa import TraceCallback, _emit, plan_jepa_generation
+from src.generation.stability import assess_section_stability
 from src.llm.ollama_client import OllamaClient
 from src.llm.prompts import prose_prompt
 from src.memory.beat_ledger import (
@@ -36,6 +37,13 @@ from src.memory.story_rag import (
     story_memory_instruction,
     write_story_ledger,
     write_story_memories,
+)
+from src.memory.story_outline import (
+    StoryOutline,
+    create_story_outline,
+    load_story_outline,
+    outline_context,
+    write_story_outline,
 )
 from src.utils.config import AppConfig
 from src.utils.paths import ensure_parent, resolve_path
@@ -66,6 +74,7 @@ BUNDLE_DRAFT = "creative_longform_latest.md"
 BUNDLE_MEMORY = "creative_longform_memory.jsonl"
 BUNDLE_STATE = "creative_longform_state.json"
 BUNDLE_CONTEXT = "creative_longform_context.json"
+BUNDLE_OUTLINE = "creative_longform_outline.json"
 MAX_IMPORT_BYTES = 50 * 1024 * 1024
 
 
@@ -203,6 +212,8 @@ def _write_run_state(
     turn_in_progress: int | None = None,
     repetition_retry_count: int = 0,
     retry_success_count: int = 0,
+    stability_retry_count: int = 0,
+    stability_retry_success_count: int = 0,
     retry_reasons: list[str] | None = None,
 ) -> str:
     path = resolve_path(config, config.generation.longform_state_path)
@@ -219,6 +230,8 @@ def _write_run_state(
         "memory_count": len(memories),
         "repetition_retry_count": repetition_retry_count,
         "retry_success_count": retry_success_count,
+        "stability_retry_count": stability_retry_count,
+        "stability_retry_success_count": stability_retry_success_count,
         "retry_reasons": (retry_reasons or [])[-20:],
         "checkpoint_path": str(resolve_path(config, config.generation.longform_checkpoint_path)),
         "memory_path": str(resolve_path(config, config.generation.story_memory_path)),
@@ -241,9 +254,12 @@ def longform_artifact_status(config: AppConfig) -> dict[str, Any]:
         "turns_completed": int(state.get("turns_completed", 0) or 0),
         "repetition_retry_count": int(state.get("repetition_retry_count", 0) or 0),
         "retry_success_count": int(state.get("retry_success_count", 0) or 0),
+        "stability_retry_count": int(state.get("stability_retry_count", 0) or 0),
+        "stability_retry_success_count": int(state.get("stability_retry_success_count", 0) or 0),
         "checkpoint_path": str(resolve_path(config, config.generation.longform_checkpoint_path)),
         "memory_path": str(resolve_path(config, config.generation.story_memory_path)),
         "ledger_path": str(resolve_path(config, config.generation.story_ledger_path)),
+        "outline_path": str(resolve_path(config, config.generation.story_outline_path)),
         "state_path": str(resolve_path(config, config.generation.longform_state_path)),
     }
 
@@ -272,6 +288,7 @@ def export_longform_bundle(
         BUNDLE_DRAFT: resolve_path(config, config.generation.longform_checkpoint_path),
         BUNDLE_MEMORY: resolve_path(config, config.generation.story_memory_path),
         BUNDLE_STATE: resolve_path(config, config.generation.longform_state_path),
+        BUNDLE_OUTLINE: resolve_path(config, config.generation.story_outline_path),
     }
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -301,8 +318,9 @@ def import_longform_file(
     context: dict[str, Any] = {}
     imported_state: dict[str, Any] = {}
     memory_text = ""
+    outline_text = ""
     if suffix == ".zip":
-        draft_text, memory_text, imported_state, context = _read_longform_bundle(content)
+        draft_text, memory_text, outline_text, imported_state, context = _read_longform_bundle(content)
     elif suffix in {".md", ".txt"}:
         draft_text = _decode_utf8(content, file_name)
     else:
@@ -337,6 +355,16 @@ def import_longform_file(
         memories,
         group_size=config.generation.story_summary_group_size,
     )
+    outline_path = ""
+    if outline_text:
+        try:
+            imported_outline = StoryOutline.model_validate_json(outline_text)
+            outline_path = write_story_outline(
+                resolve_path(config, config.generation.story_outline_path),
+                imported_outline,
+            )
+        except ValueError:
+            outline_path = ""
     turns_completed = max(
         1,
         int(imported_state.get("turns_completed", 1) or 1),
@@ -360,12 +388,13 @@ def import_longform_file(
         "checkpoint_path": checkpoint_path,
         "memory_path": memory_path,
         "ledger_path": ledger_path,
+        "outline_path": outline_path,
         "state_path": state_path,
         "memory_rebuilt": memory_rebuilt,
     }
 
 
-def _read_longform_bundle(content: bytes) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+def _read_longform_bundle(content: bytes) -> tuple[str, str, str, dict[str, Any], dict[str, Any]]:
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
             members: dict[str, zipfile.ZipInfo] = {}
@@ -374,7 +403,13 @@ def _read_longform_bundle(content: bytes) -> tuple[str, str, dict[str, Any], dic
                 if info.is_dir():
                     continue
                 base_name = Path(info.filename.replace("\\", "/")).name
-                if base_name in {BUNDLE_DRAFT, BUNDLE_MEMORY, BUNDLE_STATE, BUNDLE_CONTEXT}:
+                if base_name in {
+                    BUNDLE_DRAFT,
+                    BUNDLE_MEMORY,
+                    BUNDLE_STATE,
+                    BUNDLE_CONTEXT,
+                    BUNDLE_OUTLINE,
+                }:
                     if base_name in members:
                         raise ValueError(f"Duplicate bundle member: {base_name}")
                     total_size += info.file_size
@@ -389,9 +424,14 @@ def _read_longform_bundle(content: bytes) -> tuple[str, str, dict[str, Any], dic
                 if BUNDLE_MEMORY in members
                 else ""
             )
+            outline_text = (
+                _decode_utf8(archive.read(members[BUNDLE_OUTLINE]), BUNDLE_OUTLINE)
+                if BUNDLE_OUTLINE in members
+                else ""
+            )
             state = _read_json_member(archive, members.get(BUNDLE_STATE))
             context = _read_json_member(archive, members.get(BUNDLE_CONTEXT))
-            return draft_text, memory_text, state, context
+            return draft_text, memory_text, outline_text, state, context
     except zipfile.BadZipFile as exc:
         raise ValueError("The selected ZIP is not a valid long-form bundle.") from exc
 
@@ -441,6 +481,14 @@ def generate_with_controlled_hallucination(
             "No long-form checkpoint exists yet. Start a new novel before continuing."
         )
     known_names = extract_character_names(characters)
+    estimated_planned_sections = max(
+        1,
+        int(config.generation.section_count),
+        math.ceil(
+            max(1000, int(config.generation.target_novel_chars))
+            / max(600, int(config.generation.section_min_chars))
+        ),
+    )
     if len(story_memories) < len(sections):
         story_memories = [
             split_story_memory(section, index, known_names)[1]
@@ -448,6 +496,28 @@ def generate_with_controlled_hallucination(
         ]
     elif len(story_memories) > len(sections):
         story_memories = story_memories[: len(sections)]
+
+    story_outline: StoryOutline | None = None
+    outline_path = resolve_path(config, config.generation.story_outline_path)
+    if config.generation.enable_story_outline:
+        story_outline = load_story_outline(outline_path)
+        if story_outline is None:
+            _emit(trace_callback, "Build hierarchical story outline", "running", None)
+            story_outline = create_story_outline(
+                client,
+                world=world,
+                characters=characters,
+                premise=previous_scene,
+                target_chars=max(1000, int(config.generation.target_novel_chars)),
+                beat_count=config.generation.outline_beat_count,
+            )
+            write_story_outline(outline_path, story_outline)
+            _emit(
+                trace_callback,
+                "Build hierarchical story outline",
+                "done",
+                {"beats": len(story_outline.beats), "path": str(outline_path)},
+            )
 
     existing_text = "\n\n".join(sections).strip()
     recent_context_chars = max(600, int(config.generation.longform_recent_context_chars))
@@ -463,6 +533,15 @@ def generate_with_controlled_hallucination(
         part
         for part in [
             previous_scene.strip()[-1200:],
+            (
+                outline_context(
+                    story_outline,
+                    section_index=len(sections) + 1,
+                    planned_sections=estimated_planned_sections,
+                )[0]
+                if story_outline is not None
+                else ""
+            ),
             "[Compressed prior story state]" if story_memories else "",
             planner_memory_context if story_memories else "",
             "[Recent prose]" if existing_text else "",
@@ -485,7 +564,7 @@ def generate_with_controlled_hallucination(
     creative_beat_card = "\n".join([str(plan["beat_card"]), contract])
     overall_target_chars = max(1000, int(config.generation.target_novel_chars))
     turn_target = max(1000, int(turn_target_chars or config.generation.turn_target_chars))
-    planned_sections = max(1, int(config.generation.section_count))
+    planned_sections = estimated_planned_sections
     max_total_sections = max(planned_sections, int(config.generation.longform_max_sections))
     turn_section_cap = max(1, int(config.generation.turn_max_sections))
     if client.dry_run:
@@ -508,9 +587,13 @@ def generate_with_controlled_hallucination(
     turns_completed = int(run_state.get("turns_completed", 0) or 0)
     repetition_retry_count = int(run_state.get("repetition_retry_count", 0) or 0)
     retry_success_count = int(run_state.get("retry_success_count", 0) or 0)
+    stability_retry_count = int(run_state.get("stability_retry_count", 0) or 0)
+    stability_retry_success_count = int(run_state.get("stability_retry_success_count", 0) or 0)
     retry_reasons = [str(item) for item in (run_state.get("retry_reasons", []) or [])]
     turn_retry_start = repetition_retry_count
     turn_retry_success_start = retry_success_count
+    turn_stability_retry_start = stability_retry_count
+    turn_stability_success_start = stability_retry_success_count
     current_turn = turns_completed + 1
     _emit(
         trace_callback,
@@ -542,6 +625,8 @@ def generate_with_controlled_hallucination(
                 )
             )
     memory_retrieval_count = 0
+    stability_issue_count = 0
+    stability_scores: list[float] = []
     turn_sections: list[str] = []
     turn_start_chars = len(existing_text)
     turn_added_chars = 0
@@ -565,6 +650,8 @@ def generate_with_controlled_hallucination(
         turn_in_progress=current_turn,
         repetition_retry_count=repetition_retry_count,
         retry_success_count=retry_success_count,
+        stability_retry_count=stability_retry_count,
+        stability_retry_success_count=stability_retry_success_count,
         retry_reasons=retry_reasons,
     )
     section_index = len(sections) + 1
@@ -577,6 +664,15 @@ def generate_with_controlled_hallucination(
         recent_excerpt = sections[-1][-recent_context_chars:] if sections else previous_scene[-recent_context_chars:]
         prior_titles = " / ".join(section_titles[-8:]) or "(none)"
         section_role = _section_role(section_index, planned_sections)
+        section_outline_context, outline_beat_index = (
+            outline_context(
+                story_outline,
+                section_index=section_index,
+                planned_sections=planned_sections,
+            )
+            if story_outline is not None
+            else ("(hierarchical outline disabled)", -1)
+        )
         consumed_context = (
             build_consumed_beat_context(
                 consumed_beats,
@@ -590,7 +686,7 @@ def generate_with_controlled_hallucination(
             consumed_beats,
         )
         section_direction = build_section_direction(
-            str(plan["direction"]),
+            "\n".join([str(plan["direction"]), section_outline_context]),
             section_role,
             primary_function_rule,
             consumed_context,
@@ -643,6 +739,7 @@ def generate_with_controlled_hallucination(
                 f"- target body length: about {section_target_chars} Korean characters",
                 f"- prior section titles: {prior_titles}",
                 f"- completion rule: {completion_rule}",
+                section_outline_context,
                 "[Compressed state, KG, and retrieved memory]",
                 memory_context,
                 "[Already consumed narrative beats - preserve as canon, never repeat as new]",
@@ -708,6 +805,7 @@ def generate_with_controlled_hallucination(
                 "kg_relations": len(ledger.get("relations", [])),
                 "consumed_beats": len(consumed_beats),
                 "primary_function": primary_function_name,
+                "outline_beat": outline_beat_index + 1 if outline_beat_index >= 0 else 0,
             },
         )
         _begin_section_stream(
@@ -716,15 +814,18 @@ def generate_with_controlled_hallucination(
         )
         section_started_at = time.monotonic()
         try:
-            repetition_guard_active = bool(
-                config.generation.enable_consumed_beat_ledger
-                and config.generation.enable_repetition_retry
-                and consumed_beats
+            revision_guard_active = bool(
+                (
+                    config.generation.enable_consumed_beat_ledger
+                    and config.generation.enable_repetition_retry
+                    and consumed_beats
+                )
+                or config.generation.enable_stability_retry
             )
             controlled_stream = _has_section_stream_control(stream_callback)
             defer_stream = bool(
                 stream_callback is not None
-                and repetition_guard_active
+                and revision_guard_active
                 and not controlled_stream
             )
             visible_stream_callback = None if defer_stream else stream_callback
@@ -763,20 +864,44 @@ def generate_with_controlled_hallucination(
                 consumed_beats,
                 memory=story_memory,
             )
-            if repeated and config.generation.enable_repetition_retry:
-                repetition_retry_count += 1
-                labeled_reasons = [
+            stability = assess_section_stability(
+                section,
+                story_memory,
+                ledger=ledger,
+                characters=characters,
+                prior_titles=section_titles,
+                minimum_chars=int(
+                    section_target_chars
+                    * float(config.generation.stability_min_section_ratio)
+                ),
+            )
+            retry_for_repetition = bool(
+                repeated and config.generation.enable_repetition_retry
+            )
+            retry_for_stability = bool(
+                stability.issues and config.generation.enable_stability_retry
+            )
+            if retry_for_repetition or retry_for_stability:
+                if retry_for_repetition:
+                    repetition_retry_count += 1
+                if retry_for_stability:
+                    stability_retry_count += 1
+                revision_reasons = list(repeat_reasons if retry_for_repetition else [])
+                revision_reasons.extend(stability.issues if retry_for_stability else [])
+                revision_reasons = list(dict.fromkeys(revision_reasons))
+                retry_reasons.extend(
                     f"Section {section_index}: {reason}"
-                    for reason in repeat_reasons
-                ]
-                retry_reasons.extend(labeled_reasons)
+                    for reason in revision_reasons
+                )
                 _emit(
                     trace_callback,
-                    "Retry repeated narrative beat",
+                    "Revise unstable section",
                     "running",
                     {
                         "section": section_index,
-                        "reasons": repeat_reasons,
+                        "reasons": revision_reasons,
+                        "repetition_detected": retry_for_repetition,
+                        "stability_issues": len(stability.issues),
                         "retry_temperature": max(
                             0.1,
                             min(
@@ -789,17 +914,20 @@ def generate_with_controlled_hallucination(
                 )
                 _restart_section_stream(
                     stream_callback,
-                    "반복된 사건을 줄이기 위해 이 섹션을 한 번 다시 쓰고 있어...",
+                    "기억과 사건의 인과를 맞추기 위해 이 섹션을 한 번 다듬고 있어...",
                 )
                 retry_prompt = "\n\n".join(
                     [
                         prompt,
-                        "[Revision required: repeated narrative beat detected]",
-                        "\n".join(f"- {reason}" for reason in repeat_reasons),
+                        "[Revision required: continuity or progression issue detected]",
+                        "\n".join(f"- {reason}" for reason in revision_reasons),
                         "Rewrite the entire section once.",
+                        section_outline_context,
                         "Keep established facts as background canon, but do not announce them again as a new reveal.",
                         f"Advance only this primary function: {primary_function_name} - {primary_function_rule}",
                         "Replace repeated explanation with a concrete action, consequence, movement, or newly specific clue.",
+                        "If a character, object, relationship, location, or clue changes state, show the cause before the change.",
+                        f"Write at least {max(200, int(section_target_chars * float(config.generation.stability_min_section_ratio)))} Korean body characters and finish the final sentence.",
                         "Keep exactly one `###` Korean subtitle and include the private story-memory block.",
                     ]
                 )
@@ -850,23 +978,55 @@ def generate_with_controlled_hallucination(
                     consumed_beats,
                     memory=retry_memory,
                 )
-                retry_resolved = bool(retry_section and not retry_repeated)
-                if retry_section:
+                retry_stability = assess_section_stability(
+                    retry_section,
+                    retry_memory,
+                    ledger=ledger,
+                    characters=characters,
+                    prior_titles=section_titles,
+                    minimum_chars=int(
+                        section_target_chars
+                        * float(config.generation.stability_min_section_ratio)
+                    ),
+                )
+                original_issue_count = len(revision_reasons)
+                retry_issue_count = len(
+                    list(dict.fromkeys([*retry_remaining_reasons, *retry_stability.issues]))
+                )
+                use_retry = bool(
+                    retry_section
+                    and (
+                        retry_issue_count < original_issue_count
+                        or (stability.hard_failure and not retry_stability.hard_failure)
+                    )
+                )
+                if use_retry:
                     section = retry_section
                     story_memory = retry_memory
-                if retry_resolved:
+                    repeated = retry_repeated
+                    repeat_reasons = retry_remaining_reasons
+                    stability = retry_stability
+                repetition_resolved = bool(
+                    retry_for_repetition and use_retry and not retry_repeated
+                )
+                stability_resolved = bool(
+                    retry_for_stability and use_retry and not retry_stability.issues
+                )
+                if repetition_resolved:
                     retry_success_count += 1
+                if stability_resolved:
+                    stability_retry_success_count += 1
                 _emit(
                     trace_callback,
-                    "Retry repeated narrative beat",
+                    "Revise unstable section",
                     "done",
                     {
                         "section": section_index,
-                        "resolved": retry_resolved,
-                        "remaining_reasons": (
-                            retry_remaining_reasons
-                            if retry_section
-                            else repeat_reasons
+                        "used_revision": use_retry,
+                        "repetition_resolved": repetition_resolved,
+                        "stability_resolved": stability_resolved,
+                        "remaining_reasons": list(
+                            dict.fromkeys([*repeat_reasons, *stability.issues])
                         ),
                     },
                 )
@@ -879,6 +1039,19 @@ def generate_with_controlled_hallucination(
                     characters,
                     continuity_context,
                 )
+            final_stability = assess_section_stability(
+                section,
+                story_memory,
+                ledger=ledger,
+                characters=characters,
+                prior_titles=section_titles,
+                minimum_chars=int(
+                    section_target_chars
+                    * float(config.generation.stability_min_section_ratio)
+                ),
+            )
+            stability_scores.append(final_stability.score)
+            stability_issue_count += len(final_stability.issues)
             if defer_stream and stream_callback is not None:
                 stream_callback(section)
         except Exception as exc:
@@ -902,6 +1075,8 @@ def generate_with_controlled_hallucination(
                 turn_in_progress=current_turn,
                 repetition_retry_count=repetition_retry_count,
                 retry_success_count=retry_success_count,
+                stability_retry_count=stability_retry_count,
+                stability_retry_success_count=stability_retry_success_count,
                 retry_reasons=retry_reasons,
             )
             raise RuntimeError(
@@ -948,6 +1123,8 @@ def generate_with_controlled_hallucination(
             turn_in_progress=current_turn,
             repetition_retry_count=repetition_retry_count,
             retry_success_count=retry_success_count,
+            stability_retry_count=stability_retry_count,
+            stability_retry_success_count=stability_retry_success_count,
             retry_reasons=retry_reasons,
         )
         _emit(
@@ -968,6 +1145,11 @@ def generate_with_controlled_hallucination(
                 "consumed_beats": len(consumed_beats),
                 "repetition_retries": repetition_retry_count - turn_retry_start,
                 "retry_successes": retry_success_count - turn_retry_success_start,
+                "stability_retries": stability_retry_count - turn_stability_retry_start,
+                "stability_retry_successes": (
+                    stability_retry_success_count - turn_stability_success_start
+                ),
+                "section_stability_score": stability_scores[-1] if stability_scores else 0.0,
                 "section_seconds": round(time.monotonic() - section_started_at, 1),
             },
         )
@@ -985,6 +1167,8 @@ def generate_with_controlled_hallucination(
         turn_in_progress=None,
         repetition_retry_count=repetition_retry_count,
         retry_success_count=retry_success_count,
+        stability_retry_count=stability_retry_count,
+        stability_retry_success_count=stability_retry_success_count,
         retry_reasons=retry_reasons,
     )
     final_ledger = write_story_ledger(
@@ -1012,6 +1196,15 @@ def generate_with_controlled_hallucination(
             "consumed_beats": len(consumed_beats),
             "repetition_retries": repetition_retry_count - turn_retry_start,
             "retry_successes": retry_success_count - turn_retry_success_start,
+            "stability_retries": stability_retry_count - turn_stability_retry_start,
+            "stability_retry_successes": (
+                stability_retry_success_count - turn_stability_success_start
+            ),
+            "mean_stability_score": (
+                round(sum(stability_scores) / len(stability_scores), 4)
+                if stability_scores
+                else 0.0
+            ),
         },
     )
     if return_details:
@@ -1040,6 +1233,24 @@ def generate_with_controlled_hallucination(
         details["retry_success_count"] = retry_success_count
         details["turn_repetition_retries"] = repetition_retry_count - turn_retry_start
         details["turn_retry_successes"] = retry_success_count - turn_retry_success_start
+        details["story_outline_enabled"] = story_outline is not None
+        details["story_outline_path"] = str(outline_path)
+        details["story_outline_beats"] = len(story_outline.beats) if story_outline else 0
+        details["stability_retry_enabled"] = config.generation.enable_stability_retry
+        details["stability_retry_count"] = stability_retry_count
+        details["stability_retry_success_count"] = stability_retry_success_count
+        details["turn_stability_retries"] = (
+            stability_retry_count - turn_stability_retry_start
+        )
+        details["turn_stability_retry_successes"] = (
+            stability_retry_success_count - turn_stability_success_start
+        )
+        details["stability_issue_count"] = stability_issue_count
+        details["mean_stability_score"] = (
+            round(sum(stability_scores) / len(stability_scores), 4)
+            if stability_scores
+            else 0.0
+        )
         details["retry_reasons"] = retry_reasons[-20:]
         return {"text": repaired, "turn_text": turn_text, "planner": details}
     return repaired

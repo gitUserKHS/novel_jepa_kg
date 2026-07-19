@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from src.planner.jepa_model import JEPAPredictor, count_parameters
 from src.planner.model import MLPPredictor
+from src.planner.regularization import normalized_effective_rank, target_visreg_loss
 from src.utils.config import AppConfig
 from src.utils.logging import get_logger
 from src.utils.paths import ensure_parent, resolve_path
@@ -99,8 +100,8 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
     np.random.seed(config.project.seed)
 
     checkpoint_path = resolve_path(config, config.training.checkpoint_path)
-    history_path = resolve_path(config, "reports/runs/latest_train_history.json")
-    model_card_path = resolve_path(config, "checkpoints/predictor/model_card.json")
+    history_path = resolve_path(config, config.training.history_path)
+    model_card_path = resolve_path(config, config.training.model_card_path)
     ensure_parent(checkpoint_path)
     ensure_parent(history_path)
     ensure_parent(model_card_path)
@@ -159,6 +160,32 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
     norm_weight = float(config.training.loss_norm_weight)
     normalize_prediction = bool(config.training.normalize_prediction)
     effective_norm_weight = 0.0 if normalize_prediction else norm_weight
+    regularizer = str(config.training.representation_regularizer).strip().lower()
+    if regularizer not in {"none", "target_visreg"}:
+        raise ValueError(f"Unsupported representation regularizer: {regularizer}")
+    regularization_weight = float(config.training.regularization_weight)
+    regularization_min_samples = max(2, int(config.training.regularization_min_samples))
+    regularization_enabled = bool(
+        regularizer == "target_visreg"
+        and regularization_weight > 0
+        and len(base_x) >= regularization_min_samples
+    )
+    regularization_reason = (
+        "enabled"
+        if regularization_enabled
+        else (
+            "disabled_by_config"
+            if regularizer == "none" or regularization_weight <= 0
+            else f"requires_at_least_{regularization_min_samples}_samples"
+        )
+    )
+    if not regularization_enabled and regularizer != "none":
+        logger.warning(
+            "Skipping %s regularization: %s samples available, %s required",
+            regularizer,
+            len(base_x),
+            regularization_min_samples,
+        )
     logger.info("Training JEPA-inspired predictor for %s epochs on %s with %s params", config.training.epochs, device, param_count)
 
     for epoch in range(1, config.training.epochs + 1):
@@ -167,8 +194,14 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
         cosine_losses: list[float] = []
         mse_losses: list[float] = []
         norm_losses: list[float] = []
+        regularization_losses: list[float] = []
+        regularization_center_losses: list[float] = []
+        regularization_scale_losses: list[float] = []
+        regularization_shape_losses: list[float] = []
         pred_norms: list[float] = []
         pred_cosines: list[float] = []
+        epoch_predictions: list[torch.Tensor] = []
+        epoch_targets: list[torch.Tensor] = []
         for batch_x, batch_y in train_loader:
             batch_x = batch_x.to(device, non_blocking=True)
             batch_y = batch_y.to(device, non_blocking=True)
@@ -182,6 +215,24 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
                     norm_weight=norm_weight,
                     normalize_prediction=normalize_prediction,
                 )
+                regularization = (
+                    target_visreg_loss(
+                        pred,
+                        batch_y,
+                        num_slices=config.training.regularization_num_slices,
+                        variance_floor_ratio=config.training.regularization_variance_floor_ratio,
+                        center_weight=config.training.regularization_center_weight,
+                    )
+                    if (
+                        regularization_enabled
+                        and len(batch_x) >= int(config.training.regularization_min_batch_size)
+                    )
+                    else None
+                )
+                batch_regularization_active = bool(regularization and regularization.active)
+                if batch_regularization_active:
+                    assert regularization is not None
+                    loss = loss + regularization_weight * regularization.loss
             scaler.scale(loss).backward()
             if config.training.gradient_clip_norm > 0:
                 scaler.unscale_(optimizer)
@@ -192,8 +243,30 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
             cosine_losses.append(float(cosine_component.detach().cpu()))
             mse_losses.append(float(mse_component.detach().cpu()))
             norm_losses.append(float(norm_component.detach().cpu()))
+            regularization_losses.append(
+                float(regularization.loss.detach().cpu())
+                if batch_regularization_active and regularization is not None
+                else 0.0
+            )
+            regularization_center_losses.append(
+                float(regularization.center.detach().cpu())
+                if batch_regularization_active and regularization is not None
+                else 0.0
+            )
+            regularization_scale_losses.append(
+                float(regularization.scale.detach().cpu())
+                if batch_regularization_active and regularization is not None
+                else 0.0
+            )
+            regularization_shape_losses.append(
+                float(regularization.shape.detach().cpu())
+                if batch_regularization_active and regularization is not None
+                else 0.0
+            )
             pred_norms.append(float(pred.norm(dim=1).mean().detach().cpu()))
             pred_cosines.append(float(F.cosine_similarity(pred.detach(), batch_y, dim=1).mean().cpu()))
+            epoch_predictions.append(pred.detach().cpu())
+            epoch_targets.append(batch_y.detach().cpu())
 
         model.eval()
         with torch.no_grad():
@@ -213,9 +286,30 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
             "train_cosine_loss": float(np.mean(cosine_losses)) if cosine_losses else 0.0,
             "train_norm_mse": float(np.mean(mse_losses)) if mse_losses else 0.0,
             "train_norm_regularization": float(np.mean(norm_losses)) if norm_losses else 0.0,
+            "train_distribution_regularization": (
+                float(np.mean(regularization_losses)) if regularization_losses else 0.0
+            ),
+            "train_regularization_center": (
+                float(np.mean(regularization_center_losses)) if regularization_center_losses else 0.0
+            ),
+            "train_regularization_scale": (
+                float(np.mean(regularization_scale_losses)) if regularization_scale_losses else 0.0
+            ),
+            "train_regularization_shape": (
+                float(np.mean(regularization_shape_losses)) if regularization_shape_losses else 0.0
+            ),
+            "train_normalized_effective_rank": normalized_effective_rank(
+                torch.cat(epoch_predictions, dim=0)
+            ) if epoch_predictions else 0.0,
+            "target_normalized_effective_rank": normalized_effective_rank(
+                torch.cat(epoch_targets, dim=0)
+            ) if epoch_targets else 0.0,
             "train_pred_target_cosine": float(np.mean(pred_cosines)) if pred_cosines else 0.0,
             "train_predicted_vector_norm": float(np.mean(pred_norms)) if pred_norms else 0.0,
             "effective_loss_norm_weight": effective_norm_weight,
+            "representation_regularizer": regularizer,
+            "regularization_enabled": regularization_enabled,
+            "regularization_weight": regularization_weight if regularization_enabled else 0.0,
             "val_loss": float(val_loss.detach().cpu()),
             "val_cosine_loss": float(val_cosine_loss.detach().cpu()),
             "val_norm_mse": float(val_mse.detach().cpu()),
@@ -239,6 +333,10 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
                     "dim": int(base_x.shape[1]),
                     "config": train_config,
                     "effective_loss_norm_weight": effective_norm_weight,
+                    "representation_regularizer": regularizer,
+                    "regularization_enabled": regularization_enabled,
+                    "regularization_reason": regularization_reason,
+                    "regularization_weight": regularization_weight if regularization_enabled else 0.0,
                     "parameter_count": param_count,
                     "best_val_cosine": best_val,
                     "best_epoch": best_epoch,
@@ -281,6 +379,40 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
         if should_stop:
             break
 
+    representation_diagnostics: dict[str, float | int | str | bool] = {
+        "regularizer": regularizer,
+        "regularization_enabled": regularization_enabled,
+        "regularization_reason": regularization_reason,
+        "sample_count": int(len(base_x)),
+    }
+    if checkpoint_path.exists():
+        best_payload = torch.load(checkpoint_path, map_location="cpu")
+        model.load_state_dict(best_payload["model_state"])
+        model.eval()
+        prediction_batches: list[torch.Tensor] = []
+        full_loader = DataLoader(
+            TensorDataset(torch.tensor(base_x, dtype=torch.float32)),
+            batch_size=max(1, int(config.training.batch_size)),
+            shuffle=False,
+        )
+        with torch.no_grad():
+            for (batch_x,) in full_loader:
+                prediction_batches.append(model(batch_x.to(device)).detach().cpu())
+        full_prediction = torch.cat(prediction_batches, dim=0)
+        full_target = torch.tensor(base_y, dtype=torch.float32)
+        predicted_rank = normalized_effective_rank(full_prediction)
+        target_rank = normalized_effective_rank(full_target)
+        representation_diagnostics.update(
+            {
+                "predicted_normalized_effective_rank": predicted_rank,
+                "target_normalized_effective_rank": target_rank,
+                "effective_rank_ratio": min(1.0, predicted_rank / max(target_rank, 1e-8)),
+                "prediction_target_cosine": float(
+                    F.cosine_similarity(full_prediction, full_target, dim=1).mean().item()
+                ),
+            }
+        )
+
     trained_at = datetime.now().isoformat(timespec="seconds")
     history = {
         "trained_at": trained_at,
@@ -299,6 +431,7 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
         "checkpoint_path": str(checkpoint_path),
         **data_metadata,
         "effective_loss_norm_weight": effective_norm_weight,
+        "representation_regularization": representation_diagnostics,
         "dataset_size": int(len(base_x)),
         "train_size": int(len(train_idx)),
         "val_size": int(len(val_idx)),
@@ -310,11 +443,15 @@ def train_predictor(config: AppConfig, progress_callback: ProgressCallback | Non
     if checkpoint_path.exists():
         payload = torch.load(checkpoint_path, map_location="cpu")
         payload["training_history"] = history
+        payload["representation_diagnostics"] = representation_diagnostics
         payload["trained_at"] = trained_at
         torch.save(payload, checkpoint_path)
     model_card = {key: value for key, value in history.items() if key not in {"epochs"}}
     model_card["epoch_count"] = len(epochs)
     model_card_path.write_text(json.dumps(model_card, ensure_ascii=False, indent=2), encoding="utf-8")
+    if device.type == "cuda":
+        model.cpu()
+        torch.cuda.empty_cache()
     return history
 
 

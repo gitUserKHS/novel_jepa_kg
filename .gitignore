@@ -1,4 +1,6 @@
 .venv/
+.env
+.runtime/
 __pycache__/
 *.pyc
 *.pyo
@@ -12,8 +14,12 @@ data/filtered/*
 data/embeddings/*
 data/indexes/*
 data/sessions/*
+data/consumer_stories/*
 checkpoints/predictor/*
 reports/runs/*
+artifacts/candidates/*
+artifacts/versions/*
+artifacts/active.json
 
 !data/raw/.gitkeep
 !data/synthetic/.gitkeep
@@ -21,5 +27,8 @@ reports/runs/*
 !data/embeddings/.gitkeep
 !data/indexes/.gitkeep
 !data/sessions/.gitkeep
+!data/consumer_stories/.gitkeep
 !checkpoints/predictor/.gitkeep
 !reports/runs/.gitkeep
+!artifacts/candidates/.gitkeep
+!artifacts/versions/.gitkeep

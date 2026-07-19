@@ -1,0 +1,38 @@
+name: Deploy to local Windows host
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: novel-jepa-local-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'master')
+    runs-on: [self-hosted, Windows, X64, novel-jepa]
+    timeout-minutes: 60
+    environment: local-production
+    steps:
+      - name: Check out CI-approved revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          clean: false
+
+      - name: Drain, deploy, verify, and resume consumer service
+        shell: powershell
+        run: >-
+          .\scripts\deploy_local.ps1
+          -WebTaskName "Novel JEPA Consumer Web"
+          -WorkerTaskName "Novel JEPA Consumer Worker"
+          -Port 8501
+          -RequirementsFile "requirements-gpu.txt"

@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 
 def _as_text(value: Any) -> str:
@@ -46,11 +46,13 @@ class World(BaseModel):
     premise: str
     rules: list[str] = Field(default_factory=list)
 
-    @validator("genre", "premise", pre=True)
+    @field_validator("genre", "premise", mode="before")
+    @classmethod
     def normalize_text(cls, value: Any) -> str:
         return _as_text(value)
 
-    @validator("rules", pre=True)
+    @field_validator("rules", mode="before")
+    @classmethod
     def normalize_rules(cls, value: Any) -> list[str]:
         return _as_text_list(value)
 
@@ -62,11 +64,13 @@ class Character(BaseModel):
     fear: str = ""
     relationship: str = ""
 
-    @validator("name", "role", "goal", "fear", "relationship", pre=True)
+    @field_validator("name", "role", "goal", "fear", "relationship", mode="before")
+    @classmethod
     def normalize_text(cls, value: Any) -> str:
         return _as_text(value)
 
-    @validator("goal")
+    @field_validator("goal")
+    @classmethod
     def goal_must_exist(cls, value: str) -> str:
         if not value or not value.strip():
             raise ValueError("character goal is required")
@@ -80,15 +84,18 @@ class Scene(BaseModel):
     state: list[str] = Field(default_factory=list)
     plot_function: str
 
-    @validator("summary", "emotion", "conflict", "plot_function", pre=True)
+    @field_validator("summary", "emotion", "conflict", "plot_function", mode="before")
+    @classmethod
     def normalize_text(cls, value: Any) -> str:
         return _as_text(value)
 
-    @validator("state", pre=True)
+    @field_validator("state", mode="before")
+    @classmethod
     def normalize_state(cls, value: Any) -> list[str]:
         return _as_text_list(value)
 
-    @validator("summary")
+    @field_validator("summary")
+    @classmethod
     def summary_must_exist(cls, value: str) -> str:
         if not value or not value.strip():
             raise ValueError("scene summary is required")
