@@ -140,3 +140,5 @@
 - [x] Add consumer store, worker recovery, quality-gate, 30K fake generation, and AppTest coverage.
 - [x] Redesign the consumer login/library/chat surface around ordinary account-based use.
 - [x] Store per-section generation stability and revision metrics.
+- [x] Let consumers choose the overall character target and per-turn generation length.
+- [x] Give the final target section an explicit central-conflict resolution contract.

@@ -4,11 +4,18 @@ import json
 import math
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+from zipfile import ZipFile
 
 from src.service.consumer_store import JOB_FAILED_RECOVERABLE, JOB_SUCCEEDED, ConsumerStore
-from src.service.story_workspace import StoryWorkspace, read_draft, split_sections
+from src.service.story_workspace import (
+    StoryWorkspace,
+    build_continuation_bundle,
+    read_draft,
+    split_sections,
+)
 from src.service.worker import ConsumerWorker
 from src.utils.config import AppConfig
 
@@ -65,6 +72,7 @@ class FakeGenerator:
                 "retrieval_mean_score": 0.77,
                 "story_memory_retrievals": max(0, self.calls - 1),
                 "turn_repetition_retries": 0,
+                "novel_completed": len(full) >= int(config.generation.target_novel_chars),
             },
         }
 
@@ -124,6 +132,12 @@ class ConsumerWorkerTests(unittest.TestCase):
         self.assertEqual(len(metric_rows), 6)
         self.assertIn("useful_hallucination_score", metric_rows[0])
         self.assertIn("jepa_retrieval_score", metric_rows[0])
+        final_job = self.store.get_job(job["id"])
+        self.assertTrue(json.loads(final_job["metrics_json"])["novel_completed"])
+        completed_story = self.store.get_owned_story(self.user["id"], self.story["id"])
+        with ZipFile(BytesIO(build_continuation_bundle(workspace, completed_story))) as archive:
+            bundled_draft = archive.read("draft.md").decode("utf-8").replace("\r\n", "\n")
+            self.assertEqual(bundled_draft, draft)
 
     def test_partial_section_failure_is_marked_recoverable(self) -> None:
         def partial_generator(config: AppConfig, *_args: object, **_kwargs: object) -> dict[str, Any]:

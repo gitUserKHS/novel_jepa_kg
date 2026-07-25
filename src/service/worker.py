@@ -298,6 +298,7 @@ class ConsumerWorker:
                 ),
                 "mean_stability_score": float(planner.get("mean_stability_score", 0.0)),
                 "story_outline_beats": int(planner.get("story_outline_beats", 0)),
+                "novel_completed": bool(planner.get("novel_completed", False)),
             }
             self.store.complete_job(
                 job_id,

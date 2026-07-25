@@ -67,6 +67,9 @@ Consumers create an account or sign in at the service URL. Passwords are stored
 as per-user scrypt hashes, login sessions use hashed server-side tokens, and
 every story is bound to its owner account in SQLite. Returning users continue
 their work from `내 작품`; there is no shared invite code or per-story key.
+New stories can choose an overall target from 10,000 to 50,000 Korean
+characters in 1,000-character steps. Each chat turn separately chooses a
+resource-safe 2,000, 3,000, or 5,000-character generation target.
 
 The compatibility wrapper `run_server.bat` now opens the same private admin UI
 as `run_admin.bat`. See [DEPLOYMENT.md](DEPLOYMENT.md) for model promotion,

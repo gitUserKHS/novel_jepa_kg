@@ -174,8 +174,10 @@ class ConsumerConfig(BaseModel):
     stale_job_sec: int = 90
     allowed_turn_chars: list[int] = Field(default_factory=lambda: [2000, 3000, 5000])
     default_turn_chars: int = 3000
+    min_target_chars: int = 10000
     default_target_chars: int = 30000
     max_target_chars: int = 50000
+    target_char_step: int = 1000
     chat_model: str = DEFAULT_CHAT_MODEL
     embed_model: str = "embeddinggemma:latest"
     active_manifest_path: str = "artifacts/active.json"
@@ -189,6 +191,14 @@ class ConsumerConfig(BaseModel):
     min_top1_diversity: float = 0.40
     min_effective_rank_ratio: float = 0.50
     min_jepa_gain_over_rag_next: float = 0.03
+
+    def target_char_options(self) -> list[int]:
+        minimum = max(self.default_turn_chars, self.min_target_chars)
+        maximum = max(minimum, self.max_target_chars)
+        step = max(1, self.target_char_step)
+        values = list(range(minimum, maximum + 1, step))
+        values.extend([self.default_target_chars, maximum])
+        return sorted({value for value in values if minimum <= value <= maximum})
 
 
 class AppConfig(BaseModel):

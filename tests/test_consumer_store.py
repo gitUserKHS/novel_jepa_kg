@@ -190,6 +190,31 @@ class ConsumerStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.get_owned_story(self.alice["id"], story["id"]))
         self.assertFalse(workspace.root.exists())
 
+    def test_story_target_accepts_selected_value_and_enforces_range(self) -> None:
+        selected = self.store.create_story(
+            self.alice["id"],
+            title="42K Story",
+            genre="Mystery",
+            premise="A sealed room opens",
+            world="A city under permanent rain",
+            protagonist="Jin, an investigator",
+            target_chars=42000,
+        )
+        self.assertEqual(selected["target_chars"], 42000)
+
+        common = {
+            "owner_id": self.alice["id"],
+            "title": "Invalid target",
+            "genre": "Mystery",
+            "premise": "A missing map",
+            "world": "An underground archive",
+            "protagonist": "Jin, an investigator",
+        }
+        with self.assertRaisesRegex(ValueError, "10,000자 이상"):
+            self.store.create_story(**common, target_chars=9000)
+        with self.assertRaisesRegex(ValueError, "50,000자 이하"):
+            self.store.create_story(**common, target_chars=51000)
+
 
 if __name__ == "__main__":
     unittest.main()

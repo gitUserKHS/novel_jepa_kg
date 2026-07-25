@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from src.generation.hallucination import _completion_rule
 from src.generation.stability import assess_section_stability
 from src.memory.story_outline import (
     fallback_story_outline,
@@ -45,6 +46,26 @@ class StoryOutlineTests(unittest.TestCase):
             self.assertIsNotNone(loaded)
             self.assertEqual(loaded.model_dump(), original.model_dump())
             self.assertFalse(path.with_name(".outline.json.tmp").exists())
+
+    def test_only_the_target_crossing_section_closes_the_novel(self) -> None:
+        turn_rule, turn_is_final = _completion_rule(
+            12000,
+            30000,
+            1800,
+            final_section_of_turn=True,
+        )
+        final_rule, final_is_final = _completion_rule(
+            28500,
+            30000,
+            1800,
+            final_section_of_turn=False,
+        )
+
+        self.assertFalse(turn_is_final)
+        self.assertIn("continuation hook", turn_rule)
+        self.assertTrue(final_is_final)
+        self.assertIn("final section of the novel", final_rule)
+        self.assertIn("Do not introduce a new central mystery", final_rule)
 
 
 class StabilityAssessmentTests(unittest.TestCase):

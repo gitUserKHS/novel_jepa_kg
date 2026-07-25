@@ -149,8 +149,10 @@ consumer:
   stale_job_sec: 90
   allowed_turn_chars: [2000, 3000, 5000]
   default_turn_chars: 3000
+  min_target_chars: 10000
   default_target_chars: 30000
   max_target_chars: 50000
+  target_char_step: 1000
   chat_model: "gemma4:e4b"
   embed_model: "embeddinggemma:latest"
   active_manifest_path: "artifacts/active.json"

@@ -142,11 +142,22 @@ def _scenario_consumer() -> None:
         next(item for item in app.text_area if item.label == "주인공").set_value(
             "서윤: 기록 복원가"
         )
+        target_selector = next(
+            item for item in app.selectbox if item.label == "전체 목표 글자 수"
+        )
+        assert "42,000자" in target_selector.options
+        target_selector.set_value(42000)
         next(button for button in app.button if button.label == "작품 만들기").click()
         app.run()
 
         assert len(app.exception) == 0, app.exception
         assert any(title.value == "소비자 테스트" for title in app.title)
+        metrics = {metric.label: metric.value for metric in app.metric}
+        assert metrics["분량"] == "0 / 42,000자"
+        turn_selector = next(
+            item for item in app.selectbox if item.label == "이번에 생성할 글자 수"
+        )
+        assert turn_selector.options == ["약 2,000자", "약 3,000자", "약 5,000자"]
         labels_after_create = [button.label for button in app.button]
         for forbidden in ["Dataset", "Embedding", "Train", "Evaluate"]:
             assert forbidden not in labels_after_create

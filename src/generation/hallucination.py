@@ -147,6 +147,38 @@ def _section_role(section_index: int, planned_sections: int) -> str:
     return "Advance the unresolved conflict with a new consequence and a meaningful character decision."
 
 
+def _completion_rule(
+    total_chars: int,
+    overall_target_chars: int,
+    section_target_chars: int,
+    *,
+    final_section_of_turn: bool,
+) -> tuple[str, bool]:
+    projected_total = total_chars + section_target_chars
+    final_story_section = total_chars < overall_target_chars <= projected_total
+    if final_story_section:
+        return (
+            "This is the final section of the novel. Resolve the central conflict and the "
+            "protagonist's decisive choice, pay off the most important active clue or promise, "
+            "show a brief consequence or aftermath, and end on a resonant final image. Do not "
+            "introduce a new central mystery or use a continuation cliffhanger.",
+            True,
+        )
+    if projected_total >= int(overall_target_chars * 0.9):
+        return (
+            "Drive the story through its climax and close secondary threads that are ready, "
+            "while preserving the central resolution for the final section.",
+            False,
+        )
+    if final_section_of_turn:
+        return (
+            "End this turn with a strong continuation hook, but do not abruptly cut a sentence "
+            "or action.",
+            False,
+        )
+    return "Do not resolve the central conflict yet; end with forward pressure.", False
+
+
 def _section_title(text: str, section_index: int) -> str:
     for line in text.splitlines():
         stripped = line.strip()
@@ -656,6 +688,7 @@ def generate_with_controlled_hallucination(
     )
     section_index = len(sections) + 1
     generated_this_turn = 0
+    ending_section_generated = False
     while (
         turn_added_chars < turn_floor
         and generated_this_turn < turn_section_cap
@@ -664,6 +697,18 @@ def generate_with_controlled_hallucination(
         recent_excerpt = sections[-1][-recent_context_chars:] if sections else previous_scene[-recent_context_chars:]
         prior_titles = " / ".join(section_titles[-8:]) or "(none)"
         section_role = _section_role(section_index, planned_sections)
+        final_section_of_turn = generated_this_turn + 1 >= expected_turn_sections
+        completion_rule, final_story_section = _completion_rule(
+            total_chars,
+            overall_target_chars,
+            section_target_chars,
+            final_section_of_turn=final_section_of_turn,
+        )
+        if final_story_section:
+            section_role = (
+                "Conclude the novel by resolving the central conflict, showing the decisive "
+                "consequence, and landing on a final image."
+            )
         section_outline_context, outline_beat_index = (
             outline_context(
                 story_outline,
@@ -715,18 +760,6 @@ def generate_with_controlled_hallucination(
             memory_query,
             max(400, int(config.generation.story_memory_context_chars)),
             group_size=config.generation.story_summary_group_size,
-        )
-        projected_total = total_chars + section_target_chars
-        nearing_overall_end = projected_total >= int(overall_target_chars * 0.9)
-        final_section_of_turn = generated_this_turn + 1 >= expected_turn_sections
-        completion_rule = (
-            "Move toward climax and resolve the main arc while preserving a resonant final image."
-            if nearing_overall_end
-            else (
-                "End this turn with a strong continuation hook, but do not abruptly cut a sentence or action."
-                if final_section_of_turn
-                else "Do not resolve the central conflict yet; end with forward pressure."
-            )
         )
         section_card = "\n".join(
             [
@@ -1104,6 +1137,7 @@ def generate_with_controlled_hallucination(
         total_chars = len("\n\n".join(sections))
         turn_added_chars = total_chars - turn_start_chars
         generated_this_turn += 1
+        ending_section_generated = ending_section_generated or final_story_section
         checkpoint_path = _write_longform_checkpoint(config, sections)
         memory_path = write_story_memories(
             resolve_path(config, config.generation.story_memory_path),
@@ -1153,6 +1187,8 @@ def generate_with_controlled_hallucination(
                 "section_seconds": round(time.monotonic() - section_started_at, 1),
             },
         )
+        if final_story_section:
+            break
         section_index += 1
 
     repaired = "\n\n".join(sections).strip()
@@ -1218,6 +1254,7 @@ def generate_with_controlled_hallucination(
         details["turn_target_chars"] = turn_target
         details["turn_actual_chars"] = len(turn_text)
         details["turn_sections"] = len(turn_sections)
+        details["novel_completed"] = ending_section_generated
         details["continued_existing"] = continue_existing
         details["checkpoint_path"] = checkpoint_path
         details["story_memory_rag_enabled"] = config.generation.enable_story_memory_rag

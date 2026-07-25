@@ -35,6 +35,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.consumer.port, 8501)
         self.assertEqual(config.consumer.chat_model, "gemma4:e4b")
         self.assertEqual(config.consumer.embed_model, "embeddinggemma:latest")
+        self.assertEqual(config.consumer.target_char_options()[0], 10000)
+        self.assertIn(42000, config.consumer.target_char_options())
+        self.assertEqual(config.consumer.target_char_options()[-1], 50000)
         self.assertFalse(config.service.require_access_token)
 
     def test_environment_overrides_runtime_settings(self) -> None:

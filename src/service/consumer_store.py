@@ -391,9 +391,11 @@ class ConsumerStore:
         }
         if any(not fields[name] for name in ("title", "genre", "premise", "world", "protagonist")):
             raise ValueError("제목, 장르, 소재, 세계관, 주인공을 모두 입력해줘.")
-        actual_target = target_chars or self.config.consumer.default_target_chars
-        if actual_target < self.config.consumer.default_turn_chars:
-            raise ValueError("전체 목표 분량이 한 턴 분량보다 작을 수 없어.")
+        actual_target = int(target_chars or self.config.consumer.default_target_chars)
+        if actual_target < self.config.consumer.min_target_chars:
+            raise ValueError(
+                f"전체 목표 분량은 {self.config.consumer.min_target_chars:,}자 이상이어야 해."
+            )
         if actual_target > self.config.consumer.max_target_chars:
             raise ValueError(f"전체 목표 분량은 {self.config.consumer.max_target_chars:,}자 이하여야 해.")
 

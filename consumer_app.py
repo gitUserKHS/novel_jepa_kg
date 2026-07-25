@@ -332,8 +332,9 @@ def _story_entry(config: AppConfig, store: ConsumerStore, user: dict[str, Any]) 
                         100.0,
                         int(story["current_chars"]) / max(1, int(story["target_chars"])) * 100,
                     )
+                    completion = "완결 · " if progress >= 100.0 else ""
                     st.caption(
-                        f"{story['genre']} · {int(story['current_chars']):,} / "
+                        f"{completion}{story['genre']} · {int(story['current_chars']):,} / "
                         f"{int(story['target_chars']):,}자 · {progress:.1f}%"
                     )
                     st.progress(progress / 100.0)
@@ -366,11 +367,12 @@ def _story_entry(config: AppConfig, store: ConsumerStore, user: dict[str, Any]) 
                     max_chars=3000,
                     placeholder="한 줄에 한 명씩 이름: 역할과 목표",
                 )
-            target_chars = st.select_slider(
-                "목표 분량",
-                options=[10000, 20000, 30000, 40000, 50000],
-                value=config.consumer.default_target_chars,
-                format_func=lambda value: f"{value // 10000}만 자",
+            target_char_options = config.consumer.target_char_options()
+            target_chars = st.selectbox(
+                "전체 목표 글자 수",
+                options=target_char_options,
+                index=target_char_options.index(config.consumer.default_target_chars),
+                format_func=lambda value: f"{value:,}자",
             )
             consent = st.checkbox("내 원고와 익명 품질 지표를 연구 개선에 활용하는 데 동의해")
             submitted = st.form_submit_button("작품 만들기", type="primary", width="stretch")
@@ -466,6 +468,7 @@ def _story_live(config: AppConfig, store: ConsumerStore, user_id: str, story_id:
     model = active_model_status(config, verify_files=False)
 
     progress = min(1.0, len(draft) / max(1, int(story["target_chars"])))
+    completed = len(draft) >= int(story["target_chars"])
     outline = load_story_outline(workspace.outline)
     if outline and outline.beats:
         active_beat_index = min(
@@ -486,7 +489,10 @@ def _story_live(config: AppConfig, store: ConsumerStore, user_id: str, story_id:
     metric_columns[0].metric("진행률", f"{progress * 100:.1f}%")
     metric_columns[1].metric("분량", f"{len(draft):,} / {int(story['target_chars']):,}자")
     metric_columns[2].metric("섹션", f"{len(sections)}개")
-    metric_columns[3].metric("집필 상태", worker_label if worker_fresh else "연결 확인 중")
+    metric_columns[3].metric(
+        "집필 상태",
+        "완결" if completed else (worker_label if worker_fresh else "연결 확인 중"),
+    )
     st.progress(progress)
 
     if jobs:
@@ -508,7 +514,7 @@ def _story_live(config: AppConfig, store: ConsumerStore, user_id: str, story_id:
         )
     with control_b:
         turn_chars = st.selectbox(
-            "이번 분량",
+            "이번에 생성할 글자 수",
             options=config.consumer.allowed_turn_chars,
             index=config.consumer.allowed_turn_chars.index(config.consumer.default_turn_chars),
             format_func=lambda value: f"약 {value:,}자",
@@ -524,8 +530,8 @@ def _story_live(config: AppConfig, store: ConsumerStore, user_id: str, story_id:
         blocked_reason = f"현재 요청이 {STATUS_LABELS.get(str(outstanding['status']), '처리 중')}이야."
     elif not worker_fresh:
         blocked_reason = "집필 worker 연결을 확인하고 있어."
-    elif len(draft) >= int(story["target_chars"]):
-        blocked_reason = "목표 분량에 도달했어. 전체 원고를 내려받아줘."
+    elif completed:
+        blocked_reason = "결말까지 완성했어. 전체 원고나 이어쓰기 번들을 내려받을 수 있어."
     if blocked_reason:
         st.caption(blocked_reason)
 
