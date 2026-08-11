@@ -69,9 +69,11 @@ def configure_story_run(
     turn_chars: int,
     creativity: float,
     active_manifest: dict[str, Any],
+    genre: str = "",
 ) -> tuple[AppConfig, StoryWorkspace]:
     run_config = config.model_copy(deep=True)
     workspace = StoryWorkspace.for_story(run_config, story_id, create=True)
+    run_config.generation.genre = genre
     run_config.ollama.chat_model = run_config.consumer.chat_model
     run_config.ollama.embed_model = run_config.consumer.embed_model
     run_config.generation.target_novel_chars = target_chars

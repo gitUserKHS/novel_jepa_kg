@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any
 from zipfile import ZipFile
 
-from src.service.consumer_store import JOB_FAILED_RECOVERABLE, JOB_SUCCEEDED, ConsumerStore
+from src.service.consumer_store import (
+    JOB_FAILED_RECOVERABLE,
+    JOB_SUCCEEDED,
+    ConsumerStore,
+    ConsumerStoreError,
+)
 from src.service.story_workspace import (
     StoryWorkspace,
     build_continuation_bundle,
@@ -135,6 +140,15 @@ class ConsumerWorkerTests(unittest.TestCase):
         final_job = self.store.get_job(job["id"])
         self.assertTrue(json.loads(final_job["metrics_json"])["novel_completed"])
         completed_story = self.store.get_owned_story(self.user["id"], self.story["id"])
+        self.assertIsNotNone(completed_story["completed_at"])
+        with self.assertRaises(ConsumerStoreError):
+            self.store.enqueue_job(
+                self.user["id"],
+                self.story["id"],
+                instruction="결말 이후 추가 요청",
+                creativity_profile="balanced",
+                requested_chars=2000,
+            )
         with ZipFile(BytesIO(build_continuation_bundle(workspace, completed_story))) as archive:
             bundled_draft = archive.read("draft.md").decode("utf-8").replace("\r\n", "\n")
             self.assertEqual(bundled_draft, draft)

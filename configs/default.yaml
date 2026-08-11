@@ -12,6 +12,8 @@ ollama:
   num_gpu: 24
   num_batch: 32
   keep_alive: "60s"
+  top_p: 0.92
+  repeat_penalty: 1.12
   manage_vram: true
   retry_attempts: 1
   retry_backoff_sec: 2.0
@@ -98,16 +100,23 @@ generation:
   consumed_beat_context_chars: 1200
   hallucination_target: 0.35
   hallucination_temperature_delta: 0.15
+  hallucination_temperature_span: 0.8
   enable_consistency_repair: false
   enable_story_outline: true
   outline_beat_count: 12
   enable_stability_retry: true
   stability_min_section_ratio: 0.55
+  enable_jepa_coherence_gate: true
+  jepa_coherence_min_cosine: 0.64
+  jepa_coherence_keep_chat_loaded: true
   use_scene_analyzer: true
   style: "한국어 웹소설 문체. 감정선은 선명하게, 장면 전환은 자연스럽게."
 
 evaluation:
   use_llm_judge: false
+  judge_temperature: 0.2
+  judge_max_tokens: 700
+  judge_excerpt_chars: 4000
   repetition_ngram: 4
   report_dir: "reports/runs"
   target_min_chars: 27000

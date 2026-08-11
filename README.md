@@ -71,6 +71,13 @@ New stories can choose an overall target from 10,000 to 50,000 Korean
 characters in 1,000-character steps. Each chat turn separately chooses a
 resource-safe 2,000, 3,000, or 5,000-character generation target.
 
+A story is marked complete only after the generator actually writes the ending
+section, never by character count alone. The turn that reaches the overall
+target keeps writing until that closing section exists, so a draft cannot stall
+at the target with the central conflict still open. Once the ending is written,
+`stories.completed_at` is set, the library card shows `완결`, and further turns
+are refused instead of continuing past the resolution.
+
 The compatibility wrapper `run_server.bat` now opens the same private admin UI
 as `run_admin.bat`. See [DEPLOYMENT.md](DEPLOYMENT.md) for model promotion,
 Windows auto-start, health checks, and CI/CD.
@@ -79,8 +86,24 @@ Windows auto-start, health checks, and CI/CD.
 
 Consumer generation is enabled only when an immutable JEPA artifact version has
 passed the service quality gate and is recorded in `artifacts/active.json`.
-The existing 10-sample/1-validation research checkpoint is preserved, but it is
-not service-ready. In the admin `Service` tab:
+
+The active model is `20260806T111529Z-7262bfe2`: 112 samples over four genres
+(한국형 판타지 미스터리, 한국형 SF 미스터리, 궁중 판타지, 법정 미스터리) with a
+16-row validation split. It replaced a 40-sample model whose validation split
+was only 6 rows, and it improved retrieval sharply:
+
+| metric | 40 samples | 112 samples |
+| --- | --- | --- |
+| validation rows | 6 | 16 |
+| validation_cosine | 0.883 | 0.880 |
+| hit_at_5 | 0.667 | 0.938 |
+| normalized_top1_diversity | 0.833 | 0.938 |
+| jepa_gain_over_rag_next | — | 0.174 |
+
+Retraining also separated the plausibility distributions that previously
+overlapped. Superseded versions stay under `artifacts/versions/`.
+
+To build and promote a new model in the admin `Service` tab:
 
 1. Build at least 40 filtered samples; 96 is recommended.
 2. Enter maintenance and wait for the queue to become idle.
@@ -258,7 +281,7 @@ Keep `Reuse cached data` on. The first run is slower; later runs reuse samples a
 - Embedding: embed summaries and build the FAISS index
 - Train: train the JEPA-inspired MLP predictor
 - Generate: create 5,000/10,000/custom-character turns and continue the saved novel
-- Evaluate: write a Markdown comparison report
+- Evaluate: write a Markdown comparison report, optionally with a local LLM judge review
 - Reports: view saved reports
 - Service: consumer queue, maintenance, worker heartbeat, model gate/promotion, anonymous metrics, and consented drafts
 
@@ -306,12 +329,51 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - RAG/JEPA generation now feeds the LLM a compact beat card instead of dumping all retrieved context into prose.
 - The overall narrative guide defaults to about 30,000 Korean characters, while each click generates a user-selected 5,000/10,000/custom-character turn.
 - Creative Hallucination + JEPA is the only active prose mode. JEPA keeps the direction grounded while the LLM adds plausible clues, symbols, sensory details, and emotional inferences.
+- The creativity level changes sampling, not just prompt text. `hallucination_target` scales the prose temperature around its default through `hallucination_temperature_span`, so the consumer 안정/균형/대담 profiles sample at roughly 0.83/0.95/1.07. The balanced profile keeps the historical temperature.
+- Prose calls also send `ollama.top_p` and `ollama.repeat_penalty`. The repetition penalty attacks long-form phrase looping at sampling time instead of relying only on the after-the-fact repetition guard.
+- When the hierarchical outline is active it owns each section's plot, and the section role asks only for scene craft. Disabling the outline restores the fixed 15-phase spine. This stops two competing plot instructions from entering the same prompt and stops every story from following one hardcoded structure.
 - Long-form prose is generated one section per Ollama call with a bounded recent-context excerpt, avoiding a single oversized 30,000-character request.
 - `reports/runs/creative_longform_latest.md` is updated after every completed section, so a partial draft survives an Ollama failure.
 - Each section also produces a compact private continuity record in the same Ollama response. This avoids an extra summarization call.
 - Story-memory RAG combines relevant section memories with a latest-state ledger, unresolved clue ledger, query-relevant KG triples, and four-section compressed timeline.
 - Per-section direction updates choose exactly one primary narrative function and include a bounded consumed-beat summary.
 - The repetition guard checks completed sections against consumed reveals, alliance shifts, system warnings, movements, clue resolutions, threats, and emotional turns, then retries a repeated section once at a lower temperature.
+- The guard's trigger words are genre-aware. The base table is SF/thriller vocabulary, so `GENRE_BEAT_TRIGGERS` adds each genre's own words for the same seven beats: a court drama matches 밀지/역모/자객, a legal mystery matches 영장/위증/증거. Genre tables extend the base instead of replacing it, and an unknown genre falls back to the base. The consumer passes the story's genre through `configure_story_run`.
+- A JEPA plausibility gate scores 개연성 after each section. The trained predictor turns the preceding context into an expected next-state vector, the section's own continuity record is embedded in the training target's shape, and their cosine says whether the section actually follows from its setup. Below `jepa_coherence_min_cosine` the section enters the same bounded revision pass with an explicit causality instruction. Any missing checkpoint or backend failure downgrades the check to unavailable rather than losing the section.
+- `mean_jepa_coherence`, `min_jepa_coherence`, and the coherence retry counts are stored per job, and each scored section also carries its own `jepa_coherence_score` in `section_metrics`, so plausibility can be correlated with repetition, stability, and creativity per section.
+- Evaluation reports include a `Narrative Plausibility Gate` block under `Planner Diagnostics`.
+- An optional LLM judge (`evaluation.use_llm_judge`, off by default) asks the local chat model
+  to score each output 1-10 on 개연성, 창의성, 할루시네이션 통제, 설정 일관성, and 몰입도, and to
+  list which invented details enriched the story versus contradicted the setup. The judge reads
+  a bounded head/tail excerpt so a 30K-character draft fits the 8K context, its scores are
+  diagnostic only (they never change `overall_score` or the ranking), and any Ollama failure
+  downgrades the section to `unavailable` instead of losing the report. The Evaluate tab has a
+  checkbox to enable it per run; dry-run mode returns a fixed stub review.
+- An accepted rewrite is always rescored. Otherwise a section replaced for a stability or repetition reason would keep the discarded draft's plausibility score.
+- The per-section narrative function still cycles through all six roles, but its phase is offset by a stable story seed, so two different premises do not put the same function in the same slot.
+
+#### Calibrating the plausibility threshold
+
+`jepa_coherence_min_cosine` is **not portable**. Cosine values depend on the embedding model and on how well the predictor was trained, so the default is only valid for the model it was measured on. Recalibrate with:
+
+```bash
+python scripts/calibrate_coherence.py --samples 3 --draft reports/runs/creative_longform_latest.md
+```
+
+The script writes genuine continuations and deliberate causal breaks from the same story state, scores both with the production gate, and reports the thresholds that separate them.
+
+The shipped default of `0.64` was measured on 2026-08-06 against artifact `20260806T111529Z-7262bfe2` (112 samples) with `embeddinggemma:latest`, across two genres:
+
+| sample | n | min | mean | max |
+| --- | --- | --- | --- | --- |
+| genuine sections | 6 | 0.651 | 0.708 | 0.766 |
+| deliberate causal breaks | 6 | 0.502 | 0.596 | 0.637 |
+
+At `0.64` no genuine section is rewritten and every break is caught. The distributions no longer overlap, which they did on the previous 40-sample model (genuine floor 0.708 against a break at 0.713).
+
+Two cautions. **Genre shifts the scale**: the fantasy-mystery floor was 0.732 while the courtroom floor was 0.651, so a threshold tuned on one genre can wrongly rewrite another. And absolute values are compressed by the embedder — even deliberately mismatched dataset pairs never scored below 0.497 — which is why an intuitively low threshold never fires at all. The gate is a filter for gross non-sequiturs, not a proof of causality.
+
+- The gate keeps the chat model resident while embedding (`jepa_coherence_keep_chat_loaded`). Evicting a multi-GB chat model for the small embedder makes the next section pay a full reload: measured 8.96s per section with the eviction versus 3.47s without, against 121.7s of generation, so the overhead drops from 7.4% to 2.9%. Set it to `false` if VRAM is too tight to hold both.
 - Guarded sections still stream immediately in the Generate tab. If a retry is needed, the temporary draft is replaced in place instead of leaving the UI apparently idle or appending duplicate prose.
 - Repetition retries require a high-confidence plot-beat match; adjacent-section vocabulary similarity remains an evaluation metric but does not trigger an expensive rewrite by itself.
 - Run state and evaluation reports track repeated subtitles, repeated narrative beats, adjacent-section similarity, repetition retry count, and retry success rate.
@@ -319,6 +381,7 @@ When `normalize_prediction=True`, cosine alignment is the main objective and nor
 - `reports/runs/creative_longform_memory.jsonl` is updated after every section and can be inspected separately from the prose checkpoint.
 - `reports/runs/creative_longform_ledger.json` stores current states, KG relations, clue status, and hierarchical summaries.
 - `reports/runs/creative_longform_state.json` tracks turn and checkpoint progress so continuation works after restarting Streamlit.
+- The same run state stores `novel_completed`. A finished draft refuses another continuation turn instead of writing a second ending.
 - The Generate tab can export a portable ZIP continuation bundle and import either that bundle or a UTF-8 Markdown/text draft.
 - `Prompt examples` limits how many retrieved examples enter the prompt, while `Retrieval top K` still controls the search pool.
 - Name consistency checks compare generated outputs against the character list and report unknown or likely misspelled names.

@@ -328,11 +328,18 @@ def _story_entry(config: AppConfig, store: ConsumerStore, user: dict[str, Any]) 
                 summary, action = st.columns([5, 1], vertical_alignment="center")
                 with summary:
                     st.markdown(f"**{story['title']}**")
-                    progress = min(
-                        100.0,
-                        int(story["current_chars"]) / max(1, int(story["target_chars"])) * 100,
+                    story_completed = bool(story.get("completed_at"))
+                    progress = (
+                        100.0
+                        if story_completed
+                        else min(
+                            100.0,
+                            int(story["current_chars"])
+                            / max(1, int(story["target_chars"]))
+                            * 100,
+                        )
                     )
-                    completion = "완결 · " if progress >= 100.0 else ""
+                    completion = "완결 · " if story_completed else ""
                     st.caption(
                         f"{completion}{story['genre']} · {int(story['current_chars']):,} / "
                         f"{int(story['target_chars']):,}자 · {progress:.1f}%"
@@ -467,8 +474,8 @@ def _story_live(config: AppConfig, store: ConsumerStore, user_id: str, story_id:
     worker_label, worker_fresh = _worker_state(store)
     model = active_model_status(config, verify_files=False)
 
-    progress = min(1.0, len(draft) / max(1, int(story["target_chars"])))
-    completed = len(draft) >= int(story["target_chars"])
+    completed = bool(story.get("completed_at"))
+    progress = 1.0 if completed else min(1.0, len(draft) / max(1, int(story["target_chars"])))
     outline = load_story_outline(workspace.outline)
     if outline and outline.beats:
         active_beat_index = min(
@@ -534,6 +541,8 @@ def _story_live(config: AppConfig, store: ConsumerStore, user_id: str, story_id:
         blocked_reason = "결말까지 완성했어. 전체 원고나 이어쓰기 번들을 내려받을 수 있어."
     if blocked_reason:
         st.caption(blocked_reason)
+    elif len(draft) >= int(story["target_chars"]):
+        st.caption("목표 분량에 도달했어. 다음 요청에서 결말 장면까지 완성할게.")
 
     prompt = st.chat_input(
         "다음 전개를 알려줘",

@@ -44,6 +44,14 @@ def _predict_from_embeddings(config: AppConfig, context_embeddings: np.ndarray) 
     return pred.astype("float32")
 
 
+def predict_from_context_embeddings(
+    config: AppConfig,
+    context_embeddings: np.ndarray,
+) -> np.ndarray:
+    """Run the trained predictor on already-embedded context vectors."""
+    return _predict_from_embeddings(config, np.asarray(context_embeddings, dtype="float32"))
+
+
 def _generation_context(
     config: AppConfig,
     client: OllamaClient,

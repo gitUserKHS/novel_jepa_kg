@@ -718,25 +718,7 @@ def make_stream_callback(placeholder: Any) -> Callable[[str], None]:
 
 
 def make_client(config: AppConfig, dry_run: bool) -> OllamaClient:
-    return OllamaClient(
-        base_url=config.ollama.base_url,
-        chat_model=config.ollama.chat_model,
-        embed_model=config.ollama.embed_model,
-        timeout_sec=config.ollama.timeout_sec,
-        num_ctx=config.ollama.num_ctx,
-        num_gpu=config.ollama.num_gpu,
-        num_batch=config.ollama.num_batch,
-        keep_alive=config.ollama.keep_alive,
-        manage_vram=config.ollama.manage_vram,
-        dry_run=dry_run,
-        retry_attempts=config.ollama.retry_attempts,
-        retry_backoff_sec=config.ollama.retry_backoff_sec,
-        fallback_num_ctx=config.ollama.fallback_num_ctx,
-        fallback_num_gpu=config.ollama.fallback_num_gpu,
-        fallback_num_batch=config.ollama.fallback_num_batch,
-        fallback_max_tokens=config.ollama.fallback_max_tokens,
-        fallback_keep_alive=config.ollama.fallback_keep_alive,
-    )
+    return make_ollama_client(config, dry_run=dry_run)
 
 
 def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
@@ -1058,6 +1040,22 @@ def sidebar_config(config: AppConfig) -> tuple[AppConfig, bool]:
                 step=100,
                 help="Bounds the compact list of already-used narrative events added to each section prompt.",
                 disabled=not config.generation.enable_consumed_beat_ledger,
+            )
+        )
+        config.generation.enable_jepa_coherence_gate = st.checkbox(
+            "Score narrative plausibility with the JEPA predictor",
+            value=config.generation.enable_jepa_coherence_gate,
+            help="After each section, compares the state it reached with the state the trained predictor expected. Costs one batched embedding call per section.",
+        )
+        config.generation.jepa_coherence_min_cosine = float(
+            st.number_input(
+                "JEPA plausibility threshold",
+                min_value=0.0,
+                max_value=0.95,
+                value=float(config.generation.jepa_coherence_min_cosine),
+                step=0.01,
+                help="Sections scoring below this cosine are rewritten once. Embedder-specific: recalibrate after changing the embedding model.",
+                disabled=not config.generation.enable_jepa_coherence_gate,
             )
         )
         config.generation.hallucination_target = float(
@@ -1554,6 +1552,7 @@ def main() -> None:
         st.subheader("One-click experiment")
         st.write("합성 서사 데이터 생성부터 평가 리포트까지 작은 샘플로 실행합니다.")
         genre = genre_selector("Genre", "한국형 SF 미스터리", "project_genre")
+        config.generation.genre = genre
         scene_preset_label = scene_preset_selector("Scene preset", genre, "project")
         sync_scene_text_defaults(
             "project",
@@ -2085,6 +2084,7 @@ def main() -> None:
             },
         )
         scene_preset = resolve_scene_preset(generation_genre, scene_preset_label)
+        config.generation.genre = generation_genre
         if st.button("Apply selected scene preset", key="generation_apply_scene_defaults"):
             apply_scene_text_defaults(
                 "generation",
@@ -2214,6 +2214,10 @@ def main() -> None:
                 mime="application/zip",
                 width="stretch",
             )
+            if draft_status["novel_completed"]:
+                st.success(
+                    "This draft reached its ending. Start a new novel to continue writing."
+                )
         action_cols = st.columns(2)
         start_clicked = action_cols[0].button(
             "Start new novel",
@@ -2222,7 +2226,7 @@ def main() -> None:
         )
         continue_clicked = action_cols[1].button(
             "Continue next turn",
-            disabled=not draft_status["exists"],
+            disabled=not draft_status["exists"] or draft_status["novel_completed"],
             width="stretch",
         )
         if start_clicked or continue_clicked:
@@ -2343,8 +2347,19 @@ def main() -> None:
         eval_world = st.text_area("World setting for consistency check", height=80, key="eval_world")
         eval_characters = st.text_area("Known characters for consistency check", height=80, key="eval_characters")
         creative_jepa = st.text_area("Creative Hallucination novel", height=220)
+        use_llm_judge = st.checkbox(
+            "LLM judge 심사 사용",
+            value=config.evaluation.use_llm_judge,
+            help=(
+                "로컬 채팅 모델이 개연성/창의성/할루시네이션 통제/일관성/몰입도를 1-10으로 채점하고 "
+                "유용한 할루시네이션과 해로운 할루시네이션을 구분해 리포트에 추가합니다. "
+                "Ollama 호출이 한 번 더 발생하며 순위 계산에는 반영되지 않습니다."
+            ),
+            key="eval_use_llm_judge",
+        )
         if st.button("Write evaluation report"):
             try:
+                config.evaluation.use_llm_judge = use_llm_judge
                 outputs = {"creative_jepa": creative_jepa}
                 report_path = run_exclusive(
                     config,

@@ -47,7 +47,7 @@ class StoryOutlineTests(unittest.TestCase):
             self.assertEqual(loaded.model_dump(), original.model_dump())
             self.assertFalse(path.with_name(".outline.json.tmp").exists())
 
-    def test_only_the_target_crossing_section_closes_the_novel(self) -> None:
+    def test_target_crossing_and_overshot_sections_close_the_novel(self) -> None:
         turn_rule, turn_is_final = _completion_rule(
             12000,
             30000,
@@ -60,12 +60,20 @@ class StoryOutlineTests(unittest.TestCase):
             1800,
             final_section_of_turn=False,
         )
+        overshoot_rule, overshoot_is_final = _completion_rule(
+            30200,
+            30000,
+            1800,
+            final_section_of_turn=False,
+        )
 
         self.assertFalse(turn_is_final)
         self.assertIn("continuation hook", turn_rule)
         self.assertTrue(final_is_final)
         self.assertIn("final section of the novel", final_rule)
         self.assertIn("Do not introduce a new central mystery", final_rule)
+        self.assertTrue(overshoot_is_final)
+        self.assertIn("final section of the novel", overshoot_rule)
 
 
 class StabilityAssessmentTests(unittest.TestCase):

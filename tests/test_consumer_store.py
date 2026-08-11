@@ -9,6 +9,7 @@ from src.service.consumer_store import (
     AccountExistsError,
     AuthorizationError,
     ConsumerStore,
+    ConsumerStoreError,
     MaintenanceModeError,
     StoryBusyError,
 )
@@ -214,6 +215,57 @@ class ConsumerStoreTests(unittest.TestCase):
             self.store.create_story(**common, target_chars=9000)
         with self.assertRaisesRegex(ValueError, "50,000자 이하"):
             self.store.create_story(**common, target_chars=51000)
+
+    def test_reaching_target_without_an_ending_still_allows_continuation(self) -> None:
+        story = self.create_story()
+        job = self.store.enqueue_job(
+            self.alice["id"],
+            story["id"],
+            instruction="Overshoot the target",
+            creativity_profile="balanced",
+            requested_chars=5000,
+        )
+        self.store.claim_next_job("worker", "v1")
+        self.store.complete_job(
+            job["id"],
+            result_chars=31000,
+            result_section_count=8,
+            total_chars=31000,
+            total_section_count=8,
+            metrics={"novel_completed": False},
+            novel_completed=False,
+        )
+
+        reopened = self.store.get_owned_story(self.alice["id"], story["id"])
+        self.assertIsNone(reopened["completed_at"])
+        finale = self.store.enqueue_job(
+            self.alice["id"],
+            story["id"],
+            instruction="Write the ending",
+            creativity_profile="balanced",
+            requested_chars=5000,
+        )
+        self.store.claim_next_job("worker", "v1")
+        self.store.complete_job(
+            finale["id"],
+            result_chars=2000,
+            result_section_count=1,
+            total_chars=33000,
+            total_section_count=9,
+            metrics={"novel_completed": True},
+            novel_completed=True,
+        )
+
+        completed = self.store.get_owned_story(self.alice["id"], story["id"])
+        self.assertIsNotNone(completed["completed_at"])
+        with self.assertRaisesRegex(ConsumerStoreError, "결말까지 완성"):
+            self.store.enqueue_job(
+                self.alice["id"],
+                story["id"],
+                instruction="Keep going past the ending",
+                creativity_profile="balanced",
+                requested_chars=2000,
+            )
 
 
 if __name__ == "__main__":

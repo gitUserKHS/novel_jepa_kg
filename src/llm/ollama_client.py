@@ -31,6 +31,8 @@ class OllamaClient:
         num_gpu: int | None = None,
         num_batch: int | None = None,
         keep_alive: str | None = None,
+        top_p: float | None = None,
+        repeat_penalty: float | None = None,
         manage_vram: bool = True,
         dry_run: bool = False,
         retry_attempts: int = 1,
@@ -49,6 +51,8 @@ class OllamaClient:
         self.num_gpu = num_gpu
         self.num_batch = num_batch
         self.keep_alive = keep_alive
+        self.top_p = top_p
+        self.repeat_penalty = repeat_penalty
         self.manage_vram = manage_vram
         self.dry_run = dry_run
         self.retry_attempts = max(0, retry_attempts)
@@ -214,10 +218,17 @@ class OllamaClient:
                 break
         return "".join(chunks), last_payload
 
-    def embed(self, texts: list[str]) -> np.ndarray:
+    def embed(self, texts: list[str], *, unload_chat: bool | None = None) -> np.ndarray:
+        """Embed texts. `unload_chat=False` keeps the chat model resident.
+
+        The embedding model is small; evicting a multi-GB chat model for it makes
+        the next chat call pay a full reload, which dominates the cost of a
+        short, frequent embed such as the per-section plausibility check.
+        """
         if self.dry_run:
             return np.vstack([self._stable_embedding(text) for text in texts]).astype("float32")
-        if self.manage_vram and self.chat_model and self.chat_model != self.embed_model:
+        should_unload = self.manage_vram if unload_chat is None else unload_chat
+        if should_unload and self.chat_model and self.chat_model != self.embed_model:
             self.unload_model(self.chat_model)
         body: dict[str, Any] = {"model": self.embed_model, "input": texts}
         if self.keep_alive:
@@ -262,6 +273,10 @@ class OllamaClient:
             elif self.fallback_num_batch:
                 num_batch = self.fallback_num_batch
         options: dict[str, Any] = {"temperature": temperature, "num_predict": num_predict}
+        if self.top_p is not None:
+            options["top_p"] = self.top_p
+        if self.repeat_penalty is not None:
+            options["repeat_penalty"] = self.repeat_penalty
         if num_ctx:
             options["num_ctx"] = num_ctx
         if num_gpu is not None:

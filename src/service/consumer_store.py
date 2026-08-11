@@ -161,6 +161,7 @@ class ConsumerStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
+                    completed_at TEXT,
                     deleted_at TEXT
                 );
 
@@ -219,6 +220,15 @@ class ConsumerStore:
             }
             if "owner_id" not in story_columns:
                 connection.execute("ALTER TABLE stories ADD COLUMN owner_id TEXT")
+            if "completed_at" not in story_columns:
+                connection.execute("ALTER TABLE stories ADD COLUMN completed_at TEXT")
+                # Legacy stories finished under the old char-count rule stay closed.
+                connection.execute(
+                    """
+                    UPDATE stories SET completed_at = updated_at
+                    WHERE completed_at IS NULL AND current_chars >= target_chars
+                    """
+                )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS stories_owner_updated ON stories(owner_id, updated_at DESC)"
             )
@@ -498,8 +508,8 @@ class ConsumerStore:
                 raise AuthorizationError("이 계정에서 열 수 없는 작품이야.")
             if story["expires_at"] <= now:
                 raise ConsumerStoreError("보관 기간이 끝난 작품이야.")
-            if int(story["current_chars"]) >= int(story["target_chars"]):
-                raise ConsumerStoreError("작품이 이미 목표 분량에 도달했어.")
+            if story["completed_at"]:
+                raise ConsumerStoreError("이미 결말까지 완성한 작품이야. 전체 원고를 내려받아 감상해줘.")
             try:
                 cursor = connection.execute(
                     """
@@ -673,6 +683,7 @@ class ConsumerStore:
         total_chars: int,
         total_section_count: int,
         metrics: dict[str, Any],
+        novel_completed: bool = False,
     ) -> None:
         now = iso_time()
         with self.connect() as connection:
@@ -697,10 +708,17 @@ class ConsumerStore:
             )
             connection.execute(
                 """
-                UPDATE stories SET current_chars = ?, section_count = ?, updated_at = ?
+                UPDATE stories SET current_chars = ?, section_count = ?, updated_at = ?,
+                    completed_at = COALESCE(completed_at, ?)
                 WHERE id = ? AND deleted_at IS NULL
                 """,
-                (total_chars, total_section_count, now, row["story_id"]),
+                (
+                    total_chars,
+                    total_section_count,
+                    now,
+                    now if novel_completed else None,
+                    row["story_id"],
+                ),
             )
             self._advance_maintenance(connection)
 

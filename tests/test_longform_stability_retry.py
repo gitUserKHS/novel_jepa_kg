@@ -35,7 +35,9 @@ class LongformStabilityRetryTests(unittest.TestCase):
             config.generation.enable_consumed_beat_ledger = False
             config.generation.enable_repetition_retry = False
             config.generation.enable_stability_retry = True
-            config.generation.target_novel_chars = 1000
+            # Keep the overall target far away so the finale clause stays out of
+            # this test; it only exercises the single stability rewrite.
+            config.generation.target_novel_chars = 5000
             config.generation.turn_target_chars = 1000
             config.generation.section_count = 2
             config.generation.longform_max_sections = 2

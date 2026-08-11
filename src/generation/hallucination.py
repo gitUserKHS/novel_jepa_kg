@@ -15,6 +15,7 @@ from src.generation.consistency import (
     extract_character_names,
     repair_name_consistency,
 )
+from src.generation.coherence import UNAVAILABLE, assess_section_coherence
 from src.generation.generate_with_jepa import TraceCallback, _emit, plan_jepa_generation
 from src.generation.stability import assess_section_stability
 from src.llm.ollama_client import OllamaClient
@@ -50,6 +51,10 @@ from src.utils.paths import ensure_parent, resolve_path
 
 
 CREATIVE_HALLUCINATION_MODE = "Creative Hallucination + JEPA"
+
+# Matches GenerationConfig.hallucination_target's default, so the balanced
+# creativity profile keeps its historical sampling temperature.
+HALLUCINATION_TARGET_ANCHOR = 0.35
 
 NARRATIVE_PHASES = [
     "Open with an immediate disturbance and a concrete sensory problem.",
@@ -136,10 +141,32 @@ def build_hallucination_contract(target_ratio: float) -> str:
 def hallucination_temperature(config: AppConfig) -> float:
     base = float(config.generation.temperature)
     delta = float(config.generation.hallucination_temperature_delta)
-    return max(0.1, min(1.3, base + delta))
+    target = max(0.0, min(1.0, float(config.generation.hallucination_target)))
+    span = float(config.generation.hallucination_temperature_span)
+    # The consumer creativity dial only sets hallucination_target, so scale
+    # sampling around the default target; otherwise 안정/균형/대담 would all
+    # sample identically and the control would be decorative.
+    scaled = (target - HALLUCINATION_TARGET_ANCHOR) * span
+    return max(0.1, min(1.3, base + delta + scaled))
 
 
-def _section_role(section_index: int, planned_sections: int) -> str:
+def _section_role(
+    section_index: int,
+    planned_sections: int,
+    *,
+    has_outline: bool = False,
+) -> str:
+    if has_outline:
+        # The per-story outline already owns the plot for this section. Issuing
+        # the fixed phase list too would put two different plot instructions in
+        # one prompt and make every story follow the same 15 beats, so the role
+        # here only asks for scene craft.
+        return (
+            "Realize the active outline beat as one concrete dramatized scene: "
+            "ground it in specific sensory detail, let conflict surface through "
+            "action and subtext rather than explanation, and give the viewpoint "
+            "character an observable reaction."
+        )
     if section_index <= len(NARRATIVE_PHASES):
         return NARRATIVE_PHASES[section_index - 1]
     if section_index >= planned_sections:
@@ -155,7 +182,7 @@ def _completion_rule(
     final_section_of_turn: bool,
 ) -> tuple[str, bool]:
     projected_total = total_chars + section_target_chars
-    final_story_section = total_chars < overall_target_chars <= projected_total
+    final_story_section = projected_total >= overall_target_chars
     if final_story_section:
         return (
             "This is the final section of the novel. Resolve the central conflict and the "
@@ -247,6 +274,10 @@ def _write_run_state(
     stability_retry_count: int = 0,
     stability_retry_success_count: int = 0,
     retry_reasons: list[str] | None = None,
+    novel_completed: bool = False,
+    coherence_scores: list[float] | None = None,
+    coherence_retry_count: int = 0,
+    coherence_retry_success_count: int = 0,
 ) -> str:
     path = resolve_path(config, config.generation.longform_state_path)
     ensure_parent(path)
@@ -257,6 +288,7 @@ def _write_run_state(
         "turns_completed": turns_completed,
         "turn_in_progress": turn_in_progress,
         "turn_target_chars": turn_target_chars,
+        "novel_completed": novel_completed,
         "total_chars": len(text),
         "section_count": len(sections),
         "memory_count": len(memories),
@@ -264,6 +296,15 @@ def _write_run_state(
         "retry_success_count": retry_success_count,
         "stability_retry_count": stability_retry_count,
         "stability_retry_success_count": stability_retry_success_count,
+        "jepa_coherence_scored_sections": len(coherence_scores or []),
+        "mean_jepa_coherence": (
+            round(sum(coherence_scores) / len(coherence_scores), 4)
+            if coherence_scores
+            else 0.0
+        ),
+        "min_jepa_coherence": round(min(coherence_scores), 4) if coherence_scores else 0.0,
+        "coherence_retry_count": coherence_retry_count,
+        "coherence_retry_success_count": coherence_retry_success_count,
         "retry_reasons": (retry_reasons or [])[-20:],
         "checkpoint_path": str(resolve_path(config, config.generation.longform_checkpoint_path)),
         "memory_path": str(resolve_path(config, config.generation.story_memory_path)),
@@ -284,6 +325,7 @@ def longform_artifact_status(config: AppConfig) -> dict[str, Any]:
         "section_count": len(sections),
         "memory_count": len(memories),
         "turns_completed": int(state.get("turns_completed", 0) or 0),
+        "novel_completed": bool(state.get("novel_completed", False)),
         "repetition_retry_count": int(state.get("repetition_retry_count", 0) or 0),
         "retry_success_count": int(state.get("retry_success_count", 0) or 0),
         "stability_retry_count": int(state.get("stability_retry_count", 0) or 0),
@@ -412,6 +454,7 @@ def import_longform_file(
         turns_completed=turns_completed,
         turn_target_chars=turn_target,
         turn_in_progress=None,
+        novel_completed=bool(imported_state.get("novel_completed", False)),
     )
     return {
         **longform_artifact_status(config),
@@ -512,7 +555,15 @@ def generate_with_controlled_hallucination(
         raise FileNotFoundError(
             "No long-form checkpoint exists yet. Start a new novel before continuing."
         )
+    if continue_existing and bool(_load_run_state(config).get("novel_completed", False)):
+        raise RuntimeError(
+            "이 이야기는 이미 결말까지 완성됐어. 전체 원고를 내려받거나 새 이야기를 시작해줘."
+        )
     known_names = extract_character_names(characters)
+    story_genre = str(config.generation.genre or (scene_preset or {}).get("genre_key", ""))
+    # Stable per story: the premise and cast do not change between turns, so the
+    # narrative-function cycle keeps its phase across a resumed draft.
+    story_seed = f"{story_genre}\n{world.strip()}\n{characters.strip()}"
     estimated_planned_sections = max(
         1,
         int(config.generation.section_count),
@@ -654,11 +705,18 @@ def generate_with_controlled_hallucination(
                     existing_section,
                     memory=existing_memory,
                     section_index=existing_index,
+                    genre=story_genre,
                 )
             )
     memory_retrieval_count = 0
     stability_issue_count = 0
     stability_scores: list[float] = []
+    coherence_scores: list[float] = []
+    # Keyed by section index so a section the gate could not score simply has no
+    # entry, instead of silently shifting every later score by one.
+    coherence_by_section: dict[int, float] = {}
+    coherence_retry_count = 0
+    coherence_retry_success_count = 0
     turn_sections: list[str] = []
     turn_start_chars = len(existing_text)
     turn_added_chars = 0
@@ -689,14 +747,23 @@ def generate_with_controlled_hallucination(
     section_index = len(sections) + 1
     generated_this_turn = 0
     ending_section_generated = False
-    while (
-        turn_added_chars < turn_floor
-        and generated_this_turn < turn_section_cap
-        and section_index <= max_total_sections
+    # The ending clause keeps the loop alive past the per-turn budget once the
+    # draft is within one section of the overall target, so the turn that
+    # crosses the target also lands the finale instead of stranding the draft.
+    while section_index <= max_total_sections and (
+        (
+            not ending_section_generated
+            and total_chars + section_target_chars >= overall_target_chars
+        )
+        or (turn_added_chars < turn_floor and generated_this_turn < turn_section_cap)
     ):
         recent_excerpt = sections[-1][-recent_context_chars:] if sections else previous_scene[-recent_context_chars:]
         prior_titles = " / ".join(section_titles[-8:]) or "(none)"
-        section_role = _section_role(section_index, planned_sections)
+        section_role = _section_role(
+            section_index,
+            planned_sections,
+            has_outline=story_outline is not None,
+        )
         final_section_of_turn = generated_this_turn + 1 >= expected_turn_sections
         completion_rule, final_story_section = _completion_rule(
             total_chars,
@@ -729,6 +796,7 @@ def generate_with_controlled_hallucination(
         primary_function_name, primary_function_rule = choose_primary_function(
             section_index,
             consumed_beats,
+            story_seed=story_seed,
         )
         section_direction = build_section_direction(
             "\n".join([str(plan["direction"]), section_outline_context]),
@@ -896,6 +964,7 @@ def generate_with_controlled_hallucination(
                 section,
                 consumed_beats,
                 memory=story_memory,
+                genre=story_genre,
             )
             stability = assess_section_stability(
                 section,
@@ -908,19 +977,35 @@ def generate_with_controlled_hallucination(
                     * float(config.generation.stability_min_section_ratio)
                 ),
             )
+            coherence = assess_section_coherence(
+                config,
+                client,
+                world=world,
+                characters=characters,
+                preceding_context=continuity_context,
+                section=section,
+                memory=story_memory,
+            )
+            if coherence.available:
+                coherence_scores.append(coherence.score)
+                coherence_by_section[section_index] = coherence.score
             retry_for_repetition = bool(
                 repeated and config.generation.enable_repetition_retry
             )
             retry_for_stability = bool(
                 stability.issues and config.generation.enable_stability_retry
             )
-            if retry_for_repetition or retry_for_stability:
+            retry_for_coherence = bool(coherence.issue)
+            if retry_for_repetition or retry_for_stability or retry_for_coherence:
                 if retry_for_repetition:
                     repetition_retry_count += 1
                 if retry_for_stability:
                     stability_retry_count += 1
+                if retry_for_coherence:
+                    coherence_retry_count += 1
                 revision_reasons = list(repeat_reasons if retry_for_repetition else [])
                 revision_reasons.extend(stability.issues if retry_for_stability else [])
+                revision_reasons.extend(coherence.issues)
                 revision_reasons = list(dict.fromkeys(revision_reasons))
                 retry_reasons.extend(
                     f"Section {section_index}: {reason}"
@@ -935,6 +1020,8 @@ def generate_with_controlled_hallucination(
                         "reasons": revision_reasons,
                         "repetition_detected": retry_for_repetition,
                         "stability_issues": len(stability.issues),
+                        "jepa_coherence": coherence.score if coherence.available else None,
+                        "coherence_below_threshold": retry_for_coherence,
                         "retry_temperature": max(
                             0.1,
                             min(
@@ -950,7 +1037,8 @@ def generate_with_controlled_hallucination(
                     "기억과 사건의 인과를 맞추기 위해 이 섹션을 한 번 다듬고 있어...",
                 )
                 retry_prompt = "\n\n".join(
-                    [
+                    part
+                    for part in [
                         prompt,
                         "[Revision required: continuity or progression issue detected]",
                         "\n".join(f"- {reason}" for reason in revision_reasons),
@@ -960,9 +1048,17 @@ def generate_with_controlled_hallucination(
                         f"Advance only this primary function: {primary_function_name} - {primary_function_rule}",
                         "Replace repeated explanation with a concrete action, consequence, movement, or newly specific clue.",
                         "If a character, object, relationship, location, or clue changes state, show the cause before the change.",
+                        (
+                            "Make this section follow causally from the preceding scene: "
+                            "start from the situation it left open, and let the events here "
+                            "be caused by what the characters already know, want, and risk."
+                            if retry_for_coherence
+                            else ""
+                        ),
                         f"Write at least {max(200, int(section_target_chars * float(config.generation.stability_min_section_ratio)))} Korean body characters and finish the final sentence.",
                         "Keep exactly one `###` Korean subtitle and include the private story-memory block.",
                     ]
+                    if part
                 )
                 retry_visible_callback = (
                     stream_callback
@@ -1010,6 +1106,7 @@ def generate_with_controlled_hallucination(
                     retry_section,
                     consumed_beats,
                     memory=retry_memory,
+                    genre=story_genre,
                 )
                 retry_stability = assess_section_stability(
                     retry_section,
@@ -1022,9 +1119,34 @@ def generate_with_controlled_hallucination(
                         * float(config.generation.stability_min_section_ratio)
                     ),
                 )
+                # Rescore whenever the original was scored, not only when the
+                # rewrite was triggered by coherence: any accepted rewrite
+                # replaces the prose, so a score kept from the discarded draft
+                # would describe text that is not in the novel.
+                retry_coherence = (
+                    assess_section_coherence(
+                        config,
+                        client,
+                        world=world,
+                        characters=characters,
+                        preceding_context=continuity_context,
+                        section=retry_section,
+                        memory=retry_memory,
+                    )
+                    if (retry_for_coherence or coherence.available)
+                    else UNAVAILABLE
+                )
                 original_issue_count = len(revision_reasons)
                 retry_issue_count = len(
-                    list(dict.fromkeys([*retry_remaining_reasons, *retry_stability.issues]))
+                    list(
+                        dict.fromkeys(
+                            [
+                                *retry_remaining_reasons,
+                                *retry_stability.issues,
+                                *retry_coherence.issues,
+                            ]
+                        )
+                    )
                 )
                 use_retry = bool(
                     retry_section
@@ -1039,16 +1161,28 @@ def generate_with_controlled_hallucination(
                     repeated = retry_repeated
                     repeat_reasons = retry_remaining_reasons
                     stability = retry_stability
+                    if retry_coherence.available:
+                        coherence = retry_coherence
+                        if coherence_scores:
+                            coherence_scores[-1] = retry_coherence.score
+                        else:
+                            coherence_scores.append(retry_coherence.score)
+                        coherence_by_section[section_index] = retry_coherence.score
                 repetition_resolved = bool(
                     retry_for_repetition and use_retry and not retry_repeated
                 )
                 stability_resolved = bool(
                     retry_for_stability and use_retry and not retry_stability.issues
                 )
+                coherence_resolved = bool(
+                    retry_for_coherence and use_retry and not retry_coherence.issue
+                )
                 if repetition_resolved:
                     retry_success_count += 1
                 if stability_resolved:
                     stability_retry_success_count += 1
+                if coherence_resolved:
+                    coherence_retry_success_count += 1
                 _emit(
                     trace_callback,
                     "Revise unstable section",
@@ -1058,8 +1192,11 @@ def generate_with_controlled_hallucination(
                         "used_revision": use_retry,
                         "repetition_resolved": repetition_resolved,
                         "stability_resolved": stability_resolved,
+                        "coherence_resolved": coherence_resolved,
                         "remaining_reasons": list(
-                            dict.fromkeys([*repeat_reasons, *stability.issues])
+                            dict.fromkeys(
+                                [*repeat_reasons, *stability.issues, *coherence.issues]
+                            )
                         ),
                     },
                 )
@@ -1111,6 +1248,7 @@ def generate_with_controlled_hallucination(
                 stability_retry_count=stability_retry_count,
                 stability_retry_success_count=stability_retry_success_count,
                 retry_reasons=retry_reasons,
+                novel_completed=ending_section_generated,
             )
             raise RuntimeError(
                 f"Long-form generation stopped at section {section_index}. "
@@ -1132,6 +1270,7 @@ def generate_with_controlled_hallucination(
                     section,
                     memory=story_memory,
                     section_index=section_index,
+                    genre=story_genre,
                 )
             )
         total_chars = len("\n\n".join(sections))
@@ -1160,6 +1299,10 @@ def generate_with_controlled_hallucination(
             stability_retry_count=stability_retry_count,
             stability_retry_success_count=stability_retry_success_count,
             retry_reasons=retry_reasons,
+            novel_completed=ending_section_generated,
+            coherence_scores=coherence_scores,
+            coherence_retry_count=coherence_retry_count,
+            coherence_retry_success_count=coherence_retry_success_count,
         )
         _emit(
             trace_callback,
@@ -1206,6 +1349,10 @@ def generate_with_controlled_hallucination(
         stability_retry_count=stability_retry_count,
         stability_retry_success_count=stability_retry_success_count,
         retry_reasons=retry_reasons,
+        novel_completed=ending_section_generated,
+        coherence_scores=coherence_scores,
+        coherence_retry_count=coherence_retry_count,
+        coherence_retry_success_count=coherence_retry_success_count,
     )
     final_ledger = write_story_ledger(
         resolve_path(config, config.generation.story_ledger_path),
@@ -1283,6 +1430,20 @@ def generate_with_controlled_hallucination(
             stability_retry_success_count - turn_stability_success_start
         )
         details["stability_issue_count"] = stability_issue_count
+        details["jepa_coherence_gate_enabled"] = config.generation.enable_jepa_coherence_gate
+        details["jepa_coherence_threshold"] = config.generation.jepa_coherence_min_cosine
+        details["jepa_coherence_scored_sections"] = len(coherence_scores)
+        details["jepa_coherence_by_section"] = dict(coherence_by_section)
+        details["mean_jepa_coherence"] = (
+            round(sum(coherence_scores) / len(coherence_scores), 4)
+            if coherence_scores
+            else 0.0
+        )
+        details["min_jepa_coherence"] = (
+            round(min(coherence_scores), 4) if coherence_scores else 0.0
+        )
+        details["turn_coherence_retries"] = coherence_retry_count
+        details["turn_coherence_retry_successes"] = coherence_retry_success_count
         details["mean_stability_score"] = (
             round(sum(stability_scores) / len(stability_scores), 4)
             if stability_scores

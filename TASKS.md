@@ -105,7 +105,9 @@
 - [x] Report validation-first planner metrics and RAG-current/RAG-next/JEPA-next baseline overlap.
 - [x] Measure creative expansion, hallucination presence, useful hallucination score, and hallucination risk.
 - [x] Measure section count fit and per-section body coverage.
-- [ ] Optional LLM judge.
+- [x] Optional LLM judge: local-model 1-10 rubric scoring (개연성/창의성/할루시네이션
+      통제/일관성/몰입도) with useful-vs-harmful hallucination findings, off by default
+      and diagnostic only.
 - [x] Markdown report export.
 
 ## Phase 6 - Demo Hardening
@@ -142,3 +144,30 @@
 - [x] Store per-section generation stability and revision metrics.
 - [x] Let consumers choose the overall character target and per-turn generation length.
 - [x] Give the final target section an explicit central-conflict resolution contract.
+- [x] Guarantee the ending: finish the finale in the turn that crosses the target, persist
+      `novel_completed` in run state and `stories.completed_at`, and gate completion on the
+      written ending instead of the character count.
+- [x] Make the creativity dial real: scale sampling temperature from the selected
+      hallucination target so 안정/균형/대담 differ mechanically, not only in prompt text.
+- [x] Send `top_p` and `repeat_penalty` on prose calls to curb long-form phrase looping.
+- [x] Let the per-story outline own section plot so every novel no longer follows the same
+      hardcoded 15-phase spine.
+- [x] Add genre-specific beat trigger tables so the repetition guard works outside SF/thriller,
+      and thread the story genre from the consumer through generation.
+- [x] Score narrative plausibility with the trained JEPA predictor: compare each section's
+      realized next-state embedding against the predicted one and route low-cosine sections
+      into the bounded revision pass.
+- [x] Calibrate the plausibility threshold on real generated prose (9 genuine sections vs
+      7 deliberate causal breaks) and ship `scripts/calibrate_coherence.py` so the number
+      can be re-measured after changing the embedding model or retraining the predictor.
+- [x] Keep the chat model resident during the gate's embedding call, cutting its overhead
+      from 7.4% to 2.9% of section generation time.
+- [x] Record plausibility per section in `section_metrics`, not only as a per-turn average.
+- [x] Report the plausibility gate in the Markdown evaluation report.
+- [x] Rescore an accepted rewrite so the stored score never describes discarded prose.
+- [x] Offset the primary-function cycle by a story seed so different premises do not share
+      the same function order.
+- [x] Retrain and promote the service model on 112 samples across four genres, lifting the
+      validation split from 6 to 16 rows and hit@5 from 0.667 to 0.938.
+- [x] Recalibrate the plausibility threshold against the promoted model over two genres
+      (0.69 -> 0.64) after confirming that genre shifts the cosine scale.

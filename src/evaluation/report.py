@@ -22,6 +22,7 @@ from src.evaluation.metrics import (
     section_structure_metrics,
     sentence_stats,
 )
+from src.evaluation.llm_judge import JUDGE_SCORE_KEYS, JUDGE_SCORE_LABELS, run_llm_judge
 from src.generation.consistency import check_name_consistency
 from src.llm.ollama_client import OllamaClient
 from src.memory.beat_ledger import narrative_beat_metrics
@@ -52,6 +53,7 @@ def evaluate_outputs(
     previous_scene: str,
     outputs: dict[str, str],
     characters: str = "",
+    world: str = "",
 ) -> dict:
     reference_vector, output_vectors = _embedding_map(client, previous_scene, outputs)
     rows = {}
@@ -93,6 +95,20 @@ def evaluate_outputs(
         )
         row["overall_score"] = overall_score(row)
         rows[name] = row
+    if config.evaluation.use_llm_judge:
+        # The judge is diagnostic only: it never feeds overall_score or the
+        # ranking, so enabling it cannot reorder existing comparisons.
+        for name, text in outputs.items():
+            rows[name]["llm_judge"] = run_llm_judge(
+                client,
+                previous_scene,
+                text,
+                world=world,
+                characters=characters,
+                temperature=config.evaluation.judge_temperature,
+                max_tokens=config.evaluation.judge_max_tokens,
+                excerpt_chars=config.evaluation.judge_excerpt_chars,
+            )
     ranking = sorted(rows, key=lambda key: rows[key]["overall_score"], reverse=True)
     return {
         "modes": rows,
@@ -111,7 +127,7 @@ def evaluate_and_write_report(
 ) -> str:
     report_dir = resolve_path(config, config.evaluation.report_dir)
     report_dir.mkdir(parents=True, exist_ok=True)
-    metrics = evaluate_outputs(config, client, previous_scene, outputs, characters=characters)
+    metrics = evaluate_outputs(config, client, previous_scene, outputs, characters=characters, world=world)
     run_state_path = resolve_path(config, config.generation.longform_state_path)
     generation_guard = {
         "repetition_retry_count": 0,
@@ -132,6 +148,32 @@ def evaluate_and_write_report(
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             pass
     metrics["generation_guard"] = generation_guard
+    plausibility = {
+        "enabled": bool(config.generation.enable_jepa_coherence_gate),
+        "threshold": float(config.generation.jepa_coherence_min_cosine),
+        "scored_sections": 0,
+        "mean_jepa_coherence": 0.0,
+        "min_jepa_coherence": 0.0,
+        "coherence_retry_count": 0,
+        "coherence_retry_success_count": 0,
+    }
+    if run_state_path.exists():
+        try:
+            run_state = json.loads(run_state_path.read_text(encoding="utf-8"))
+            plausibility.update(
+                {
+                    "scored_sections": int(run_state.get("jepa_coherence_scored_sections", 0) or 0),
+                    "mean_jepa_coherence": float(run_state.get("mean_jepa_coherence", 0.0) or 0.0),
+                    "min_jepa_coherence": float(run_state.get("min_jepa_coherence", 0.0) or 0.0),
+                    "coherence_retry_count": int(run_state.get("coherence_retry_count", 0) or 0),
+                    "coherence_retry_success_count": int(
+                        run_state.get("coherence_retry_success_count", 0) or 0
+                    ),
+                }
+            )
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            pass
+    metrics["jepa_plausibility_gate"] = plausibility
     planner_diagnostics = evaluate_planner_diagnostics(config, top_k=config.generation.top_k)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = report_dir / f"comparison_{timestamp}.md"
@@ -151,6 +193,21 @@ def evaluate_and_write_report(
         f"- validation_retrieval_hit_at_k: {planner_diagnostics.get('validation_retrieval_hit_at_k', 0.0):.4f}",
         f"- validation_retrieval_mean_score: {planner_diagnostics.get('validation_retrieval_mean_score', 0.0):.4f}",
         f"- validation_transition_direction_diversity: {planner_diagnostics.get('validation_transition_direction_diversity', 0.0):.4f}",
+        "",
+        "### Narrative Plausibility Gate",
+        "",
+        "The trained predictor also scores finished prose: each section's realized next-state "
+        "embedding is compared with the state predicted from the preceding context. Low-cosine "
+        "sections are rewritten once. The threshold is specific to this embedding model and "
+        "predictor; re-measure it with `scripts/calibrate_coherence.py`.",
+        "",
+        f"- gate enabled: {plausibility['enabled']}",
+        f"- threshold: {plausibility['threshold']:.3f}",
+        f"- scored sections: {plausibility['scored_sections']}",
+        f"- mean_jepa_coherence: {plausibility['mean_jepa_coherence']:.4f}",
+        f"- min_jepa_coherence: {plausibility['min_jepa_coherence']:.4f}",
+        f"- coherence rewrites: {plausibility['coherence_retry_count']} "
+        f"(resolved {plausibility['coherence_retry_success_count']})",
         "",
         "```json",
         json.dumps(planner_diagnostics, ensure_ascii=False, indent=2),
@@ -181,6 +238,47 @@ def evaluate_and_write_report(
                 "",
             ]
         )
+    lines.extend(
+        [
+            "## LLM Judge",
+            "",
+            "An optional local-model review of each output. Scores are 1-10 per rubric axis and "
+            "diagnostic only: they never change overall_score or the ranking. "
+            "`hallucination_control` separates invented detail that enriches the story from "
+            "invented detail that contradicts the established setup.",
+            "",
+        ]
+    )
+    if not config.evaluation.use_llm_judge:
+        lines.extend(["- disabled (`evaluation.use_llm_judge: false`)", ""])
+    else:
+        for name, row in metrics["modes"].items():
+            judge = row.get("llm_judge", {})
+            lines.extend([f"### {name}", ""])
+            if not judge.get("available"):
+                lines.extend(
+                    [
+                        f"- unavailable: {judge.get('error', 'no result')}",
+                        "",
+                    ]
+                )
+                continue
+            scores = judge.get("scores", {})
+            for key in JUDGE_SCORE_KEYS:
+                if key in scores:
+                    lines.append(f"- {key} ({JUDGE_SCORE_LABELS[key]}): {scores[key]:.1f} / 10")
+            lines.append(f"- judge_overall: {judge.get('overall', 0.0):.4f}")
+            if judge.get("verdict"):
+                lines.append(f"- verdict: {judge['verdict']}")
+            useful = judge.get("useful_hallucinations", [])
+            if useful:
+                lines.extend(["", "Useful hallucinations:", ""])
+                lines.extend(f"- {item}" for item in useful)
+            harmful = judge.get("harmful_hallucinations", [])
+            if harmful:
+                lines.extend(["", "Harmful hallucinations:", ""])
+                lines.extend(f"- {item}" for item in harmful)
+            lines.append("")
     lines.extend(
         [
             "## Narrative Repetition Guard",

@@ -21,6 +21,8 @@ class OllamaConfig(BaseModel):
     num_gpu: int = 24
     num_batch: int = 32
     keep_alive: str = "60s"
+    top_p: float = 0.92
+    repeat_penalty: float = 1.12
     manage_vram: bool = True
     retry_attempts: int = 1
     retry_backoff_sec: float = 2.0
@@ -110,17 +112,34 @@ class GenerationConfig(BaseModel):
     consumed_beat_context_chars: int = 1200
     hallucination_target: float = 0.35
     hallucination_temperature_delta: float = 0.15
+    hallucination_temperature_span: float = 0.8
     enable_consistency_repair: bool = False
     enable_story_outline: bool = True
     outline_beat_count: int = 12
     enable_stability_retry: bool = True
     stability_min_section_ratio: float = 0.55
+    enable_jepa_coherence_gate: bool = True
+    # Calibrated 2026-08-06 against artifact 20260806T111529Z-7262bfe2 (112
+    # samples) with embeddinggemma, over two genres: 6 genuine sections scored
+    # 0.651-0.766 and 6 deliberate causal breaks scored 0.502-0.637. At 0.64 no
+    # genuine section is rewritten and every break is caught. Genre shifts the
+    # scale (fantasy floor 0.732, courtroom floor 0.651), so recalibrate with
+    # scripts/calibrate_coherence.py after retraining the predictor, changing
+    # the embedding model, or writing in a very different genre.
+    jepa_coherence_min_cosine: float = 0.64
+    jepa_coherence_keep_chat_loaded: bool = True
     use_scene_analyzer: bool = True
+    genre: str = ""
     style: str = "한국어 웹소설 문체. 감정선은 선명하게, 장면 전환은 자연스럽게."
 
 
 class EvaluationConfig(BaseModel):
     use_llm_judge: bool = False
+    # The judge reads a bounded head/tail excerpt so a 30K-char draft still
+    # fits the 8K-token local context alongside the scene and setting text.
+    judge_temperature: float = 0.2
+    judge_max_tokens: int = 700
+    judge_excerpt_chars: int = 4000
     repetition_ngram: int = 4
     report_dir: str = "reports/runs"
     target_min_chars: int = 27000

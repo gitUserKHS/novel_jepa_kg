@@ -86,6 +86,10 @@ def _section_metrics(
     output: list[tuple[int, dict[str, Any]]] = []
     planner_score = float(planner.get("retrieval_mean_score", 0.0))
     memory_retrievals = int(planner.get("story_memory_retrievals", 0))
+    coherence_by_section = {
+        int(key): float(value)
+        for key, value in dict(planner.get("jepa_coherence_by_section", {})).items()
+    }
     metric_memories = list(memories or [])
     while len(metric_memories) < len(sections):
         index = len(metric_memories)
@@ -131,6 +135,10 @@ def _section_metrics(
             "generation_stability_issue_count": len(stability.issues),
             "generation_stability_hard_failure": stability.hard_failure,
         }
+        # Only sections written this turn were scored by the gate; older rows
+        # keep whatever they were given when they were generated.
+        if zero_index + 1 in coherence_by_section:
+            values["jepa_coherence_score"] = round(coherence_by_section[zero_index + 1], 4)
         output.append((zero_index + 1, values))
     return output
 
@@ -240,6 +248,7 @@ class ConsumerWorker:
             turn_chars=turn_chars,
             creativity=creativity,
             active_manifest=manifest,
+            genre=str(story["genre"]),
         )
         client = self.client_factory(run_config)
 
@@ -297,6 +306,12 @@ class ConsumerWorker:
                     planner.get("turn_stability_retry_successes", 0)
                 ),
                 "mean_stability_score": float(planner.get("mean_stability_score", 0.0)),
+                "mean_jepa_coherence": float(planner.get("mean_jepa_coherence", 0.0)),
+                "min_jepa_coherence": float(planner.get("min_jepa_coherence", 0.0)),
+                "coherence_retries": int(planner.get("turn_coherence_retries", 0)),
+                "coherence_retry_successes": int(
+                    planner.get("turn_coherence_retry_successes", 0)
+                ),
                 "story_outline_beats": int(planner.get("story_outline_beats", 0)),
                 "novel_completed": bool(planner.get("novel_completed", False)),
             }
@@ -307,6 +322,7 @@ class ConsumerWorker:
                 total_chars=len(after_text),
                 total_section_count=len(after_sections),
                 metrics=job_metrics,
+                novel_completed=bool(job_metrics["novel_completed"]),
             )
             self.store.heartbeat_worker(self.worker_id, "idle")
         except Exception as exc:
