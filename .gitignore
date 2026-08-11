@@ -1,6 +1,7 @@
 .venv/
 .env
 .runtime/
+.claude/settings.local.json
 __pycache__/
 *.pyc
 *.pyo
