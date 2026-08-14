@@ -22,6 +22,7 @@ from src.service.story_workspace import (
     StoryWorkspace,
     build_continuation_bundle,
     read_draft,
+    read_live_prose,
     split_sections,
 )
 from src.memory.story_outline import load_story_outline
@@ -431,10 +432,27 @@ def _render_job(
     sections: list[str],
     store: ConsumerStore,
     user_id: str,
+    story_id: str = "",
+    live_prose: str = "",
 ) -> None:
-    with st.chat_message("user"):
-        st.markdown(str(job["instruction"]))
     status = str(job["status"])
+    job_id = int(job["id"])
+    with st.chat_message("user"):
+        instruction_column, delete_column = st.columns([9, 1], vertical_alignment="top")
+        instruction_column.markdown(str(job["instruction"]))
+        # An active turn is the work in flight, not history, so it is not erasable.
+        if story_id and status not in (JOB_QUEUED, JOB_RUNNING):
+            if delete_column.button(
+                "✕",
+                key=f"delete_job_{job_id}",
+                help="이 대화만 지워. 원고는 그대로 남아.",
+            ):
+                try:
+                    store.delete_owned_job(user_id, story_id, job_id)
+                except ConsumerStoreError as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun(scope="fragment")
     with st.chat_message("assistant"):
         if status == JOB_SUCCEEDED:
             start = int(job["start_section_count"])
@@ -452,14 +470,19 @@ def _render_job(
                 unsafe_allow_html=True,
             )
         elif status == JOB_RUNNING:
-            st.info("집필하고 있어. 브라우저를 닫아도 작업은 계속돼.")
+            if live_prose:
+                # The worker appends as it writes, so this grows between polls.
+                st.markdown(live_prose)
+                st.caption("✍️ 집필하는 중이야. 브라우저를 닫아도 작업은 계속돼.")
+            else:
+                st.info("집필하고 있어. 브라우저를 닫아도 작업은 계속돼.")
         elif status == JOB_FAILED_RECOVERABLE:
             st.warning(str(job.get("error_public") or "저장된 섹션부터 다시 이어 쓸 수 있어."))
         else:
             st.error(str(job.get("error_public") or "생성하지 못했어. 다시 요청해줘."))
 
 
-@st.fragment(run_every=2.0)
+@st.fragment(run_every=1.0)
 def _story_live(config: AppConfig, store: ConsumerStore, user_id: str, story_id: str) -> None:
     story = store.get_owned_story(user_id, story_id)
     if story is None:
@@ -468,6 +491,7 @@ def _story_live(config: AppConfig, store: ConsumerStore, user_id: str, story_id:
     workspace = StoryWorkspace.for_story(config, story_id, create=True)
     draft = read_draft(workspace.draft)
     sections = split_sections(draft)
+    live_prose = read_live_prose(workspace)
     jobs = list(reversed(store.list_owned_jobs(user_id, story_id)))
     outstanding = store.owned_outstanding_job(user_id, story_id)
     queue = store.queue_stats()
@@ -475,7 +499,10 @@ def _story_live(config: AppConfig, store: ConsumerStore, user_id: str, story_id:
     model = active_model_status(config, verify_files=False)
 
     completed = bool(story.get("completed_at"))
-    progress = 1.0 if completed else min(1.0, len(draft) / max(1, int(story["target_chars"])))
+    # Count the in-flight section too, so the bar keeps moving while a section is
+    # being written instead of freezing until it commits.
+    written_chars = len(draft) + len(live_prose)
+    progress = 1.0 if completed else min(1.0, written_chars / max(1, int(story["target_chars"])))
     outline = load_story_outline(workspace.outline)
     if outline and outline.beats:
         active_beat_index = min(
@@ -494,7 +521,7 @@ def _story_live(config: AppConfig, store: ConsumerStore, user_id: str, story_id:
         )
     metric_columns = st.columns(4)
     metric_columns[0].metric("진행률", f"{progress * 100:.1f}%")
-    metric_columns[1].metric("분량", f"{len(draft):,} / {int(story['target_chars']):,}자")
+    metric_columns[1].metric("분량", f"{written_chars:,} / {int(story['target_chars']):,}자")
     metric_columns[2].metric("섹션", f"{len(sections)}개")
     metric_columns[3].metric(
         "집필 상태",
@@ -503,8 +530,23 @@ def _story_live(config: AppConfig, store: ConsumerStore, user_id: str, story_id:
     st.progress(progress)
 
     if jobs:
+        clearable = [job for job in jobs if str(job["status"]) not in (JOB_QUEUED, JOB_RUNNING)]
+        if len(clearable) > 1:
+            header_spacer, clear_column = st.columns([4, 1], vertical_alignment="center")
+            if clear_column.button(
+                "대화 비우기",
+                key="clear_job_history",
+                help="끝난 대화 기록만 지워. 원고는 그대로 남아.",
+                width="stretch",
+            ):
+                try:
+                    store.clear_owned_job_history(user_id, story_id)
+                except ConsumerStoreError as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun(scope="fragment")
         for job in jobs:
-            _render_job(job, sections, store, user_id)
+            _render_job(job, sections, store, user_id, story_id=story_id, live_prose=live_prose)
     else:
         with st.chat_message("assistant"):
             st.markdown("첫 장면에서 일어날 사건이나 원하는 분위기를 말해줘.")
@@ -636,6 +678,12 @@ def main() -> None:
         return
 
     _story_management(store, user, story)
+    # The sidebar also has this, but it collapses on narrow screens, so the main
+    # column keeps its own way back to the library.
+    back_column, _spacer = st.columns([1, 5])
+    if back_column.button("← 내 작품", key="story_back_to_library", width="stretch"):
+        _clear_story_session()
+        st.rerun()
     st.markdown('<div class="story-kicker">IN PROGRESS</div>', unsafe_allow_html=True)
     st.title(str(story["title"]))
     st.markdown(

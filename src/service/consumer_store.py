@@ -927,3 +927,44 @@ class ConsumerStore:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("DELETE FROM stories WHERE id = ?", (story_id,))
         workspace.delete()
+
+    def delete_owned_job(self, owner_id: str, story_id: str, job_id: int) -> None:
+        """Remove one finished turn from the conversation log.
+
+        This deletes the chat record only. Prose the turn produced already lives
+        in the manuscript, and pulling a section back out would break the memory,
+        ledger, and outline that later sections were written against.
+        """
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT jobs.status FROM jobs
+                JOIN stories ON stories.id = jobs.story_id
+                WHERE jobs.id = ? AND jobs.story_id = ?
+                  AND stories.owner_id = ? AND stories.deleted_at IS NULL
+                """,
+                (job_id, story_id, owner_id),
+            ).fetchone()
+            if row is None:
+                raise AuthorizationError("이 계정에서 삭제할 수 없는 대화야.")
+            if str(row["status"]) in OUTSTANDING_JOB_STATUSES:
+                raise ConsumerStoreError("집필 중이거나 대기 중인 요청은 지울 수 없어.")
+            connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+
+    def clear_owned_job_history(self, owner_id: str, story_id: str) -> int:
+        """Delete every finished turn from the log, keeping active ones."""
+        placeholders = ",".join("?" for _ in OUTSTANDING_JOB_STATUSES)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            owned = connection.execute(
+                "SELECT 1 FROM stories WHERE id = ? AND owner_id = ? AND deleted_at IS NULL",
+                (story_id, owner_id),
+            ).fetchone()
+            if owned is None:
+                raise AuthorizationError("이 계정에서 삭제할 수 없는 작품이야.")
+            cursor = connection.execute(
+                f"DELETE FROM jobs WHERE story_id = ? AND status NOT IN ({placeholders})",
+                (story_id, *OUTSTANDING_JOB_STATUSES),
+            )
+        return int(cursor.rowcount or 0)

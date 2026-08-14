@@ -171,6 +171,15 @@
       validation split from 6 to 16 rows and hit@5 from 0.667 to 0.938.
 - [x] Recalibrate the plausibility threshold against the promoted model over two genres
       (0.69 -> 0.64) after confirming that genre shifts the cosine scale.
+- [x] Let consumers delete a finished chat turn or clear the whole conversation log, and
+      give the writing screen its own back link to the library. Deletion is scoped to the
+      chat record: an active turn is protected, and the manuscript is never touched.
+- [x] Stop trusting the model to delimit its own private record. Match the whole marker
+      family, and strip any unmarked or truncated record before prose reaches a reader,
+      so `<STORY_MEMORY>` JSON can never appear in the novel.
+- [x] Stream prose to the consumer UI. The worker writes the in-flight section to a live
+      file that the polling fragment renders, so a reader sees text arriving instead of
+      a two-minute silence per section.
 - [x] Size the Ollama context window from a measurement instead of assumption: the prose
       prompt reaches ~14.6K characters late in a story, so `num_ctx` 8192 was silently
       truncating the front of the prompt, where the world and character canon live.
