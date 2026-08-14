@@ -171,6 +171,9 @@
       validation split from 6 to 16 rows and hit@5 from 0.667 to 0.938.
 - [x] Recalibrate the plausibility threshold against the promoted model over two genres
       (0.69 -> 0.64) after confirming that genre shifts the cosine scale.
+- [x] Let consumers read and edit the settings a story was created with — title, genre,
+      premise, world, protagonist, characters, target length, research consent — from the
+      writing screen. Edits apply from the next turn; written sections are left alone.
 - [x] Let consumers delete a finished chat turn, clear the whole conversation log, reset a
       story's manuscript while keeping its settings, or delete the story outright, and give
       the writing screen its own back link to the library. Every path deletes rows rather

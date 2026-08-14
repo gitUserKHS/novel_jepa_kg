@@ -115,6 +115,14 @@ def _styles() -> None:
             margin-bottom: 0.35rem;
         }
         .story-meta { color: var(--muted); font-size: 0.9rem; }
+        .settings-block {
+            border-left: 2px solid var(--line);
+            padding: 0.2rem 0 0.2rem 0.8rem;
+            margin: 0 0 0.9rem;
+            color: var(--muted);
+            font-size: 0.92rem;
+            white-space: pre-wrap;
+        }
         .auth-copy { color: var(--muted); font-size: 1rem; margin: 0 0 1.4rem; }
         .auth-note {
             border-top: 1px solid var(--line);
@@ -482,6 +490,103 @@ def _render_job(
             st.error(str(job.get("error_public") or "생성하지 못했어. 다시 요청해줘."))
 
 
+def _settings_view(story: dict[str, Any]) -> None:
+    st.markdown(f"**제목** · {story['title']}")
+    st.markdown(f"**장르** · {story['genre']}")
+    st.caption(f"목표 분량 {int(story['target_chars']):,}자")
+    for label, key in (
+        ("핵심 소재", "premise"),
+        ("세계관", "world"),
+        ("주인공", "protagonist"),
+        ("주요 인물", "characters"),
+    ):
+        value = str(story[key] or "").strip()
+        st.markdown(f"**{label}**")
+        st.markdown(
+            f'<div class="settings-block">{html.escape(value) or "(비어 있음)"}</div>',
+            unsafe_allow_html=True,
+        )
+    st.caption(
+        "연구 활용 동의: " + ("동의함" if int(story["research_consent"] or 0) else "동의하지 않음")
+    )
+
+
+def _settings_form(
+    config: AppConfig,
+    store: ConsumerStore,
+    user_id: str,
+    story: dict[str, Any],
+) -> None:
+    story_id = str(story["id"])
+    with st.form(f"edit_story_{story_id}"):
+        title_column, genre_column = st.columns([1.2, 1])
+        title = title_column.text_input("제목", value=str(story["title"]), max_chars=100)
+        genre = genre_column.text_input("장르", value=str(story["genre"]), max_chars=80)
+        premise = st.text_area("핵심 소재", value=str(story["premise"]), height=100, max_chars=1500)
+        world = st.text_area("세계관", value=str(story["world"]), height=140, max_chars=4000)
+        protagonist_column, characters_column = st.columns(2)
+        protagonist = protagonist_column.text_area(
+            "주인공", value=str(story["protagonist"]), height=120, max_chars=2000
+        )
+        characters = characters_column.text_area(
+            "주요 인물 (선택)", value=str(story["characters"] or ""), height=120, max_chars=3000
+        )
+        current_chars = int(story["current_chars"])
+        options = [value for value in config.consumer.target_char_options() if value >= current_chars]
+        current_target = int(story["target_chars"])
+        if current_target not in options:
+            options = sorted({*options, current_target})
+        target_chars = st.selectbox(
+            "전체 목표 글자 수",
+            options=options,
+            index=options.index(current_target),
+            format_func=lambda value: f"{value:,}자",
+            help="이미 쓴 분량보다 작게 줄일 수는 없어.",
+        )
+        consent = st.checkbox(
+            "내 원고와 익명 품질 지표를 연구 개선에 활용하는 데 동의해",
+            value=bool(int(story["research_consent"] or 0)),
+        )
+        saved = st.form_submit_button("설정 저장", type="primary", width="stretch")
+    if saved:
+        try:
+            store.update_owned_story(
+                user_id,
+                story_id,
+                title=title,
+                genre=genre,
+                premise=premise,
+                world=world,
+                protagonist=protagonist,
+                characters=characters,
+                target_chars=int(target_chars),
+                research_consent=consent,
+            )
+        except (ValueError, ConsumerStoreError) as exc:
+            st.error(str(exc))
+        else:
+            st.success("설정을 저장했어. 다음 턴부터 반영돼.")
+            st.rerun()
+
+
+def _story_settings_panel(
+    config: AppConfig,
+    store: ConsumerStore,
+    user_id: str,
+    story: dict[str, Any],
+) -> None:
+    with st.expander("작품 설정 · 세계관과 인물"):
+        view_tab, edit_tab = st.tabs(["설정 보기", "설정 수정"])
+        with view_tab:
+            _settings_view(story)
+        with edit_tab:
+            st.caption(
+                "세계관과 인물은 매 섹션 프롬프트에 다시 들어가. "
+                "수정하면 다음 턴부터 반영되고, 이미 쓴 본문은 그대로 남아."
+            )
+            _settings_form(config, store, user_id, story)
+
+
 @st.fragment(run_every=1.0)
 def _story_live(config: AppConfig, store: ConsumerStore, user_id: str, story_id: str) -> None:
     story = store.get_owned_story(user_id, story_id)
@@ -731,6 +836,9 @@ def main() -> None:
         '섹션을 이어 쓰며 완성하는 장편</div>',
         unsafe_allow_html=True,
     )
+    # Outside _story_live: that fragment reruns every second to stream prose, and
+    # a form full of text areas cannot live inside a one-second refresh loop.
+    _story_settings_panel(config, store, str(user["id"]), story)
     _story_live(config, store, str(user["id"]), str(story["id"]))
 
 

@@ -928,6 +928,106 @@ class ConsumerStore:
             connection.execute("DELETE FROM stories WHERE id = ?", (story_id,))
         workspace.delete()
 
+    def _validated_story_fields(
+        self,
+        *,
+        title: str,
+        genre: str,
+        premise: str,
+        world: str,
+        protagonist: str,
+        characters: str,
+        target_chars: int,
+        floor_chars: int = 0,
+    ) -> dict[str, Any]:
+        fields = {
+            "title": title.strip(),
+            "genre": genre.strip(),
+            "premise": premise.strip(),
+            "world": world.strip(),
+            "protagonist": protagonist.strip(),
+            "characters": characters.strip(),
+        }
+        if any(not fields[name] for name in ("title", "genre", "premise", "world", "protagonist")):
+            raise ValueError("제목, 장르, 소재, 세계관, 주인공을 모두 입력해줘.")
+        target = int(target_chars)
+        if target < self.config.consumer.min_target_chars:
+            raise ValueError(
+                f"전체 목표 분량은 {self.config.consumer.min_target_chars:,}자 이상이어야 해."
+            )
+        if target > self.config.consumer.max_target_chars:
+            raise ValueError(
+                f"전체 목표 분량은 {self.config.consumer.max_target_chars:,}자 이하여야 해."
+            )
+        if target < floor_chars:
+            raise ValueError(
+                f"이미 {floor_chars:,}자를 썼어. 목표는 그보다 작을 수 없어."
+            )
+        fields["target_chars"] = target
+        return fields
+
+    def update_owned_story(
+        self,
+        owner_id: str,
+        story_id: str,
+        *,
+        title: str,
+        genre: str,
+        premise: str,
+        world: str,
+        protagonist: str,
+        characters: str = "",
+        target_chars: int,
+        research_consent: bool,
+    ) -> dict[str, Any]:
+        """Edit the settings a story was created with.
+
+        The world and character sheets are rebuilt into every section prompt, so
+        an edit changes the canon from the next turn onward. Sections already
+        written are left alone; rewriting them would invalidate the memory and
+        ledger that later sections were built on.
+        """
+        story = self.get_owned_story(owner_id, story_id)
+        if story is None:
+            raise AuthorizationError("이 계정에서 수정할 수 없는 작품이야.")
+        fields = self._validated_story_fields(
+            title=title,
+            genre=genre,
+            premise=premise,
+            world=world,
+            protagonist=protagonist,
+            characters=characters,
+            target_chars=target_chars,
+            floor_chars=int(story["current_chars"]),
+        )
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE stories
+                SET title = ?, genre = ?, premise = ?, world = ?, protagonist = ?,
+                    characters = ?, target_chars = ?, research_consent = ?, updated_at = ?
+                WHERE id = ? AND owner_id = ? AND deleted_at IS NULL
+                """,
+                (
+                    fields["title"],
+                    fields["genre"],
+                    fields["premise"],
+                    fields["world"],
+                    fields["protagonist"],
+                    fields["characters"],
+                    fields["target_chars"],
+                    1 if research_consent else 0,
+                    iso_time(),
+                    story_id,
+                    owner_id,
+                ),
+            )
+        updated = self.get_owned_story(owner_id, story_id)
+        if updated is None:
+            raise AuthorizationError("이 계정에서 수정할 수 없는 작품이야.")
+        return updated
+
     def reset_owned_story(self, owner_id: str, story_id: str) -> None:
         """Throw away the manuscript but keep the story and its settings.
 

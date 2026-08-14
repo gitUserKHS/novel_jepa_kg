@@ -163,6 +163,92 @@ class ChatDeletionTests(unittest.TestCase):
 
         self.assertEqual(set(OUTSTANDING_JOB_STATUSES), {JOB_QUEUED, JOB_RUNNING})
 
+    def _edit(self, **overrides: object) -> dict:
+        payload = {
+            "title": "파혼 선언",
+            "genre": "궁중 로맨스 판타지",
+            "premise": "시한부 판정을 받은 악녀가 파혼을 선언한다.",
+            "world": "황실과 귀족 가문이 예언으로 얽힌 제국",
+            "protagonist": "에블린: 시한부 판정을 받은 공작가 영애",
+            "characters": "칼릭스: 황태자",
+            "target_chars": 10000,
+            "research_consent": False,
+        }
+        payload.update(overrides)
+        return self.store.update_owned_story(
+            str(self.owner["id"]), str(self.story["id"]), **payload
+        )
+
+    def test_settings_can_be_edited(self) -> None:
+        updated = self._edit(
+            world="예언이 금지된 제국, 황실 서고는 봉인되어 있다",
+            protagonist="에블린: 시한부를 숨긴 공작가 영애",
+            characters="칼릭스: 황태자\n아르젠: 방계 귀족",
+        )
+
+        self.assertIn("서고는 봉인", str(updated["world"]))
+        self.assertIn("시한부를 숨긴", str(updated["protagonist"]))
+        self.assertIn("아르젠", str(updated["characters"]))
+
+    def test_editing_does_not_disturb_the_manuscript(self) -> None:
+        workspace = self._write_manuscript()
+        self._finished_job()
+
+        self._edit(world="완전히 다른 세계관")
+
+        story = self.store.get_owned_story(str(self.owner["id"]), str(self.story["id"]))
+        self.assertEqual(int(story["current_chars"]), 1800)
+        self.assertTrue(workspace.draft.exists())
+        self.assertEqual(len(self._owner_job_ids()), 1)
+
+    def test_required_fields_cannot_be_blanked(self) -> None:
+        for field in ("title", "genre", "premise", "world", "protagonist"):
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    self._edit(**{field: "   "})
+
+    def test_optional_characters_may_be_cleared(self) -> None:
+        updated = self._edit(characters="")
+
+        self.assertEqual(str(updated["characters"]), "")
+
+    def test_the_target_cannot_drop_below_what_is_written(self) -> None:
+        self._finished_job()
+
+        with self.assertRaises(ValueError):
+            self._edit(target_chars=1000)
+
+    def test_the_target_stays_within_the_configured_range(self) -> None:
+        with self.assertRaises(ValueError):
+            self._edit(target_chars=self.config.consumer.max_target_chars + 1000)
+        with self.assertRaises(ValueError):
+            self._edit(target_chars=self.config.consumer.min_target_chars - 1000)
+
+    def test_research_consent_can_be_withdrawn_and_granted(self) -> None:
+        granted = self._edit(research_consent=True)
+        self.assertEqual(int(granted["research_consent"]), 1)
+
+        withdrawn = self._edit(research_consent=False)
+        self.assertEqual(int(withdrawn["research_consent"]), 0)
+
+    def test_another_account_cannot_edit(self) -> None:
+        with self.assertRaises(AuthorizationError):
+            self.store.update_owned_story(
+                str(self.intruder["id"]),
+                str(self.story["id"]),
+                title="가로챈 제목",
+                genre="장르",
+                premise="소재",
+                world="세계관",
+                protagonist="주인공",
+                characters="",
+                target_chars=10000,
+                research_consent=False,
+            )
+
+        story = self.store.get_owned_story(str(self.owner["id"]), str(self.story["id"]))
+        self.assertEqual(str(story["title"]), "파혼 선언")
+
     def _workspace(self) -> StoryWorkspace:
         return StoryWorkspace.for_story(self.config, str(self.story["id"]), create=True)
 
