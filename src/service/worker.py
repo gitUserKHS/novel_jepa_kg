@@ -271,7 +271,9 @@ class ConsumerWorker:
                     world,
                     characters,
                     previous_scene,
-                    stream_callback=live.feed,
+                    # The writer itself, not live.feed: the generator only streams
+                    # when the callback carries the section-control protocol.
+                    stream_callback=live,
                     return_details=True,
                     continue_existing=before_sections > 0,
                     turn_target_chars=turn_chars,

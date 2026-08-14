@@ -183,6 +183,50 @@ class LiveProseTests(unittest.TestCase):
 
         self.assertEqual(read_live_prose(self.workspace), "")
 
+    def test_it_satisfies_the_generator_section_stream_protocol(self) -> None:
+        """Without these the generator defers streaming and live.txt stays empty."""
+        from src.generation.hallucination import _has_section_stream_control
+
+        writer = LiveProseWriter(self.workspace)
+
+        self.assertTrue(_has_section_stream_control(writer))
+
+    def test_a_committed_section_clears_the_live_file(self) -> None:
+        writer = LiveProseWriter(self.workspace, flush_chars=1)
+        writer.begin_section("\n\n")
+        writer.feed("완성된 섹션 본문")
+
+        writer.commit_section()
+
+        self.assertEqual(read_live_prose(self.workspace), "")
+
+    def test_a_restarted_section_replaces_rather_than_appends(self) -> None:
+        writer = LiveProseWriter(self.workspace, flush_chars=1)
+        writer.begin_section()
+        writer.feed("버려질 초안")
+
+        writer.restart_section("반복 때문에 다시 씀")
+        writer.feed("새 초안")
+        writer.flush()
+
+        self.assertEqual(read_live_prose(self.workspace), "새 초안")
+
+    def test_an_aborted_section_leaves_nothing_behind(self) -> None:
+        writer = LiveProseWriter(self.workspace, flush_chars=1)
+        writer.begin_section()
+        writer.feed("실패한 섹션")
+
+        writer.abort_section()
+
+        self.assertEqual(read_live_prose(self.workspace), "")
+
+    def test_calling_the_writer_directly_streams(self) -> None:
+        writer = LiveProseWriter(self.workspace, flush_chars=1)
+
+        writer("직접 호출된 조각")
+
+        self.assertEqual(read_live_prose(self.workspace), "직접 호출된 조각")
+
     def test_live_path_stays_inside_the_story_directory(self) -> None:
         self.assertEqual(self.workspace.live.parent, self.workspace.root)
         self.assertEqual(Path(self.workspace.live).name, "live.txt")

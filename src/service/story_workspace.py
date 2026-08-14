@@ -148,7 +148,17 @@ def clear_live_prose(workspace: StoryWorkspace) -> None:
 
 
 class LiveProseWriter:
-    """Append streamed prose to the workspace live file for the consumer UI.
+    """Stream the in-flight section to the workspace live file.
+
+    Implements the section-stream control protocol the generator looks for
+    (`begin_section` / `restart_section` / `commit_section` / `abort_section`).
+    Without those methods the generator defers streaming entirely whenever the
+    revision guard is armed, because a plain callback cannot take back prose
+    that a rewrite replaces -- and the guard is armed on every ordinary run, so
+    a plain callback never streams at all.
+
+    The file holds only the section being written. Committed sections are read
+    from draft.md, so a commit clears the file rather than appending to it.
 
     Flushes are batched so a per-character callback does not turn into one
     filesystem write per character.
@@ -159,6 +169,23 @@ class LiveProseWriter:
         self.flush_chars = max(1, flush_chars)
         self._pending: list[str] = []
         self._pending_chars = 0
+
+    def __call__(self, chunk: str) -> None:
+        self.feed(chunk)
+
+    def begin_section(self, separator: str = "") -> None:
+        self.reset()
+
+    def restart_section(self, reason: str = "") -> None:
+        # The rewrite replaces the draft in place; showing both would duplicate it.
+        self.reset()
+
+    def commit_section(self) -> None:
+        # The section is in draft.md now, and the UI renders that.
+        self.reset()
+
+    def abort_section(self) -> None:
+        self.reset()
 
     def feed(self, chunk: str) -> None:
         if not chunk:
