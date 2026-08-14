@@ -30,7 +30,7 @@ from src.memory.story_rag import (
 )
 from src.service.artifacts import ActiveModelUnavailable, load_active_manifest
 from src.service.consumer_store import CREATIVITY_LEVELS, MAINTENANCE_ACTIVE, ConsumerStore
-from src.service.job_lock import ServiceBusyError, acquire_project_job
+from src.service.job_lock import ServiceBusyError, acquire_lock_file, acquire_project_job
 from src.service.runtime import make_ollama_client
 from src.service.story_workspace import (
     LiveProseWriter,
@@ -41,6 +41,7 @@ from src.service.story_workspace import (
     split_sections,
 )
 from src.utils.config import AppConfig, load_config
+from src.utils.paths import resolve_path
 
 
 logger = logging.getLogger(__name__)
@@ -378,7 +379,19 @@ def main() -> None:
         result = worker.process_one()
         print(json.dumps({"processed": result, "worker_id": worker.worker_id}, ensure_ascii=False))
         return
-    worker.run_forever()
+    # A launcher that is closed without running its cleanup leaves its hidden
+    # worker behind. Without this lock those pile up invisibly, and each one
+    # holds enough commit charge to make llama-server fail to allocate.
+    try:
+        lease = acquire_lock_file(
+            resolve_path(config, config.consumer.worker_lock_path),
+            "consumer worker",
+        )
+    except ServiceBusyError as exc:
+        logger.warning("Another consumer worker is already running; exiting. %s", exc)
+        return
+    with lease:
+        worker.run_forever()
 
 
 if __name__ == "__main__":

@@ -154,6 +154,7 @@ consumer:
   story_root: "data/consumer_stories"
   retention_days: 30
   worker_poll_sec: 2.0
+  worker_lock_path: ".runtime/consumer.worker.lock"
   worker_heartbeat_sec: 5.0
   stale_job_sec: 90
   allowed_turn_chars: [2000, 3000, 5000]

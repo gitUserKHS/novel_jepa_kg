@@ -200,6 +200,10 @@ class ConsumerConfig(BaseModel):
     story_root: str = "data/consumer_stories"
     retention_days: int = 30
     worker_poll_sec: float = 2.0
+    # One worker is enough, and each extra one reserves gigabytes of commit
+    # charge that llama-server then cannot allocate. An OS-level lock keeps a
+    # leaked launcher from silently stacking hidden workers.
+    worker_lock_path: str = ".runtime/consumer.worker.lock"
     worker_heartbeat_sec: float = 5.0
     stale_job_sec: int = 90
     allowed_turn_chars: list[int] = Field(default_factory=lambda: [2000, 3000, 5000])

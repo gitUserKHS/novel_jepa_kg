@@ -79,7 +79,15 @@ class ProjectJobLease:
 
 
 def acquire_project_job(config: AppConfig, operation: str) -> ProjectJobLease:
-    path = resolve_path(config, config.service.job_lock_path)
+    return acquire_lock_file(resolve_path(config, config.service.job_lock_path), operation)
+
+
+def acquire_lock_file(path: Path, operation: str) -> ProjectJobLease:
+    """Take an exclusive OS lock on `path`, or raise ServiceBusyError.
+
+    The lock is held by the file handle, so the OS releases it when the process
+    exits -- including a process killed without running its cleanup.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
     handle = os.fdopen(descriptor, "r+b", buffering=0)
