@@ -14,8 +14,80 @@ from src.utils.paths import ensure_parent
 
 MEMORY_START = "<<<STORY_MEMORY>>>"
 MEMORY_END = "<<<END_STORY_MEMORY>>>"
+# The prompt asks for the markers above, but the model decides what it actually
+# writes: `<STORY_MEMORY>` and `</STORY_MEMORY>` both occur in practice, and an
+# exact-string search silently fails on them, dumping raw JSON into the reader's
+# prose. Match the whole family of markers instead of one literal.
+MEMORY_TAG_RE = re.compile(
+    r"<{1,3}\s*(?P<close>/)?\s*(?P<end>END[_\s]*)?STORY[_\s]*MEMORY\s*>{1,3}",
+    re.IGNORECASE,
+)
+# Longest marker we tolerate, plus slack. The stream filter holds back this much
+# of its tail so a marker split across two chunks is still recognised.
+MAX_TAG_CHARS = 32
+# Field names from the private record. They are JSON keys, so they never appear
+# in Korean prose, which makes them a safe signal for a block the model emitted
+# without any marker at all.
+MEMORY_JSON_KEYS = (
+    '"section_index"',
+    '"open_clues"',
+    '"resolved_clues"',
+    '"state_updates"',
+    '"state_changes"',
+    '"keywords"',
+    '"characters"',
+    '"summary"',
+    '"facts"',
+)
+_MEMORY_SCAN_CHARS = 600
 TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[가-힣]{2,}")
 SENTENCE_RE = re.compile(r"(?<=[.!?。！？])\s+|\n+")
+
+
+def _is_end_tag(match: re.Match[str]) -> bool:
+    return bool(match.group("close") or match.group("end"))
+
+
+def _find_end_tag(text: str, start: int = 0) -> re.Match[str] | None:
+    for match in MEMORY_TAG_RE.finditer(text, start):
+        if _is_end_tag(match):
+            return match
+    return None
+
+
+def _memory_key_hits(text: str) -> int:
+    window = text[:_MEMORY_SCAN_CHARS]
+    return sum(1 for key in MEMORY_JSON_KEYS if key in window)
+
+
+def _find_unmarked_memory_start(text: str, *, min_key_hits: int) -> int:
+    """Index of a `{` that opens the private record, or -1.
+
+    Used as a backstop for responses where the model dropped the markers but
+    still appended the JSON object.
+    """
+    for match in re.finditer(r"\{", text):
+        if _memory_key_hits(text[match.start() :]) >= min_key_hits:
+            return match.start()
+    return -1
+
+
+def strip_machine_block(prose: str) -> str:
+    """Remove any private continuity record left in reader-facing prose.
+
+    The marker split runs first; this is the guarantee that holds when the model
+    ignores the marker contract entirely. Requiring two distinct JSON keys keeps
+    ordinary prose containing a brace from being truncated.
+
+    Whitespace at the edges is preserved: the stream filter passes its withheld
+    tail through here, and trimming a leading space would glue that tail onto the
+    previously emitted word.
+    """
+    text = MEMORY_TAG_RE.sub("", prose)
+    cut = _find_unmarked_memory_start(text, min_key_hits=2)
+    if cut >= 0:
+        text = text[:cut]
+    return re.sub(r"```(?:json)?\s*$", "", text)
 
 
 class StateUpdate(BaseModel):
@@ -82,36 +154,60 @@ class StoryMemoryStreamFilter:
         self.buffer = ""
         self.hidden = False
 
+    def _emit(self, text: str) -> None:
+        if text:
+            self.callback(text)
+
     def feed(self, chunk: str) -> None:
         self.buffer += chunk
         while self.buffer:
             if self.hidden:
-                end_index = self.buffer.find(MEMORY_END)
-                if end_index < 0:
-                    self.buffer = self.buffer[-(len(MEMORY_END) - 1) :]
+                end_match = _find_end_tag(self.buffer)
+                if end_match is None:
+                    self.buffer = self.buffer[-(MAX_TAG_CHARS - 1) :]
                     return
-                self.buffer = self.buffer[end_index + len(MEMORY_END) :]
+                self.buffer = self.buffer[end_match.end() :]
                 self.hidden = False
                 continue
 
-            start_index = self.buffer.find(MEMORY_START)
-            if start_index >= 0:
-                visible = self.buffer[:start_index]
-                if visible:
-                    self.callback(visible)
-                self.buffer = self.buffer[start_index + len(MEMORY_START) :]
-                self.hidden = True
+            tag = MEMORY_TAG_RE.search(self.buffer)
+            if tag is not None:
+                self._emit(self.buffer[: tag.start()])
+                self.buffer = self.buffer[tag.end() :]
+                # A stray closing marker is dropped rather than shown.
+                self.hidden = not _is_end_tag(tag)
                 continue
 
-            safe_length = len(self.buffer) - (len(MEMORY_START) - 1)
+            # The record can also arrive with no marker at all. A brace is the
+            # only thing that can open one, and it is vanishingly rare in Korean
+            # prose, so withhold from it until there is enough text to judge.
+            brace = self.buffer.find("{")
+            if brace >= 0:
+                if _memory_key_hits(self.buffer[brace:]) >= 1:
+                    self._emit(self.buffer[:brace])
+                    self.buffer = self.buffer[brace:]
+                    self.hidden = True
+                    return
+                if len(self.buffer) - brace < _MEMORY_SCAN_CHARS:
+                    self._emit(self.buffer[:brace])
+                    self.buffer = self.buffer[brace:]
+                    return
+                # Enough text followed the brace without a record key: ordinary
+                # prose, so release it and look for the next candidate.
+                self._emit(self.buffer[: brace + 1])
+                self.buffer = self.buffer[brace + 1 :]
+                continue
+
+            safe_length = len(self.buffer) - (MAX_TAG_CHARS - 1)
             if safe_length <= 0:
                 return
-            self.callback(self.buffer[:safe_length])
+            self._emit(self.buffer[:safe_length])
             self.buffer = self.buffer[safe_length:]
 
     def finish(self) -> None:
         if self.buffer and not self.hidden:
-            self.callback(self.buffer)
+            # A withheld tail may still hold a truncated record.
+            self._emit(strip_machine_block(self.buffer))
         self.buffer = ""
 
 
@@ -122,12 +218,23 @@ def split_story_memory(
 ) -> tuple[str, StoryMemory]:
     prose = response
     payload = ""
-    start_index = response.find(MEMORY_START)
-    if start_index >= 0:
-        end_index = response.find(MEMORY_END, start_index + len(MEMORY_START))
-        prose = response[:start_index]
-        payload = response[start_index + len(MEMORY_START) : end_index if end_index >= 0 else None]
+    start = MEMORY_TAG_RE.search(response)
+    while start is not None and _is_end_tag(start):
+        start = MEMORY_TAG_RE.search(response, start.end())
+    if start is not None:
+        end_match = _find_end_tag(response, start.end())
+        prose = response[: start.start()]
+        payload = response[start.end() : end_match.start() if end_match else None]
+    else:
+        # No marker survived, but the record itself may still be there. Reading
+        # it keeps the structured memory instead of silently degrading to the
+        # heuristic fallback.
+        bare = _find_unmarked_memory_start(response, min_key_hits=2)
+        if bare >= 0:
+            prose = response[:bare]
+            payload = response[bare:]
 
+    prose = strip_machine_block(prose)
     title = _section_title(prose)
     memory = _parse_memory_payload(payload, section_index, title)
     if memory is None:

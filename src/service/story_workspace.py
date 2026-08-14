@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from src.utils.config import AppConfig
-from src.utils.paths import resolve_path
+from src.utils.paths import ensure_parent, resolve_path
 
 
 STORY_ID_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -25,6 +25,10 @@ class StoryWorkspace:
     memory: Path
     ledger: Path
     outline: Path
+    # Prose for the section being written right now. The worker runs in its own
+    # process, so a stream callback cannot reach the browser directly; this file
+    # is the handoff the consumer UI polls.
+    live: Path
 
     @classmethod
     def for_story(
@@ -44,6 +48,7 @@ class StoryWorkspace:
             memory=root / "memory.jsonl",
             ledger=root / "ledger.json",
             outline=root / "outline.json",
+            live=root / "live.txt",
         )
 
     def delete(self) -> None:
@@ -107,6 +112,66 @@ def configure_story_run(
 
 def read_draft(path: Path) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+def read_live_prose(workspace: StoryWorkspace) -> str:
+    """Prose of the in-flight section, or "" when nothing is being written.
+
+    Reading races with the worker's appends by design: a torn read just shows a
+    slightly shorter tail on one poll, which the next poll corrects.
+    """
+    try:
+        return workspace.live.read_text(encoding="utf-8") if workspace.live.exists() else ""
+    except OSError:
+        return ""
+
+
+def clear_live_prose(workspace: StoryWorkspace) -> None:
+    try:
+        workspace.live.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+class LiveProseWriter:
+    """Append streamed prose to the workspace live file for the consumer UI.
+
+    Flushes are batched so a per-character callback does not turn into one
+    filesystem write per character.
+    """
+
+    def __init__(self, workspace: StoryWorkspace, *, flush_chars: int = 48) -> None:
+        self.workspace = workspace
+        self.flush_chars = max(1, flush_chars)
+        self._pending: list[str] = []
+        self._pending_chars = 0
+
+    def feed(self, chunk: str) -> None:
+        if not chunk:
+            return
+        self._pending.append(chunk)
+        self._pending_chars += len(chunk)
+        if self._pending_chars >= self.flush_chars:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self._pending:
+            return
+        text = "".join(self._pending)
+        self._pending.clear()
+        self._pending_chars = 0
+        try:
+            ensure_parent(self.workspace.live)
+            with self.workspace.live.open("a", encoding="utf-8") as handle:
+                handle.write(text)
+        except OSError:
+            # The live view is cosmetic; never fail a generation over it.
+            pass
+
+    def reset(self) -> None:
+        self._pending.clear()
+        self._pending_chars = 0
+        clear_live_prose(self.workspace)
 
 
 def split_sections(text: str) -> list[str]:

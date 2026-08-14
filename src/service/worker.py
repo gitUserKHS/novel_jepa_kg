@@ -33,6 +33,7 @@ from src.service.consumer_store import CREATIVITY_LEVELS, MAINTENANCE_ACTIVE, Co
 from src.service.job_lock import ServiceBusyError, acquire_project_job
 from src.service.runtime import make_ollama_client
 from src.service.story_workspace import (
+    LiveProseWriter,
     StoryWorkspace,
     configure_story_run,
     draft_progress,
@@ -251,6 +252,10 @@ class ConsumerWorker:
             genre=str(story["genre"]),
         )
         client = self.client_factory(run_config)
+        # Generation runs in this worker process, so the only way the browser can
+        # watch prose arrive is through a file the consumer UI polls.
+        live = LiveProseWriter(workspace)
+        live.reset()
 
         try:
             with _Heartbeat(
@@ -265,6 +270,7 @@ class ConsumerWorker:
                     world,
                     characters,
                     previous_scene,
+                    stream_callback=live.feed,
                     return_details=True,
                     continue_existing=before_sections > 0,
                     turn_target_chars=turn_chars,
@@ -335,6 +341,10 @@ class ConsumerWorker:
                 recoverable=after_section_count > before_sections,
             )
             self.store.heartbeat_worker(self.worker_id, "idle")
+        finally:
+            # Committed sections live in draft.md; leaving the live tail behind
+            # would double them in the reader's view.
+            live.reset()
 
     def run_forever(self) -> None:
         logger.info("Consumer worker %s started", self.worker_id)
