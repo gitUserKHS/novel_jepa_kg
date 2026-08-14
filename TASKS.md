@@ -171,9 +171,11 @@
       validation split from 6 to 16 rows and hit@5 from 0.667 to 0.938.
 - [x] Recalibrate the plausibility threshold against the promoted model over two genres
       (0.69 -> 0.64) after confirming that genre shifts the cosine scale.
-- [x] Let consumers delete a finished chat turn or clear the whole conversation log, and
-      give the writing screen its own back link to the library. Deletion is scoped to the
-      chat record: an active turn is protected, and the manuscript is never touched.
+- [x] Let consumers delete a finished chat turn, clear the whole conversation log, reset a
+      story's manuscript while keeping its settings, or delete the story outright, and give
+      the writing screen its own back link to the library. Every path deletes rows rather
+      than flagging them, and an active turn blocks reset so the worker cannot write into a
+      story that was just cleared.
 - [x] Stop trusting the model to delimit its own private record. Match the whole marker
       family, and strip any unmarked or truncated record before prose reaches a reader,
       so `<STORY_MEMORY>` JSON can never appear in the novel.

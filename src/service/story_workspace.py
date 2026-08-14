@@ -55,6 +55,20 @@ class StoryWorkspace:
         if self.root.exists():
             shutil.rmtree(self.root)
 
+    def reset(self) -> None:
+        """Erase the manuscript and everything derived from it.
+
+        The directory itself stays, so a reset story can be written again under
+        the same id. Every artifact a later section would read has to go
+        together: keeping a stale memory, ledger, or outline beside an empty
+        draft would make the next section continue a story that no longer exists.
+        """
+        for path in (self.draft, self.state, self.memory, self.ledger, self.outline, self.live):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
 
 def safe_story_path(config: AppConfig, story_id: str) -> Path:
     if not STORY_ID_RE.fullmatch(story_id):

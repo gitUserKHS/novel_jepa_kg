@@ -531,12 +531,13 @@ def _story_live(config: AppConfig, store: ConsumerStore, user_id: str, story_id:
 
     if jobs:
         clearable = [job for job in jobs if str(job["status"]) not in (JOB_QUEUED, JOB_RUNNING)]
-        if len(clearable) > 1:
-            header_spacer, clear_column = st.columns([4, 1], vertical_alignment="center")
+        if clearable:
+            header_spacer, clear_column = st.columns([3, 1], vertical_alignment="center")
+            header_spacer.caption(f"대화 {len(clearable)}개")
             if clear_column.button(
-                "대화 비우기",
+                f"대화 전체 삭제 ({len(clearable)})",
                 key="clear_job_history",
-                help="끝난 대화 기록만 지워. 원고는 그대로 남아.",
+                help="끝난 대화 기록을 모두 지워. 원고는 그대로 남아.",
                 width="stretch",
             ):
                 try:
@@ -629,6 +630,45 @@ def _story_live(config: AppConfig, store: ConsumerStore, user_id: str, story_id:
         mime="application/zip",
         width="stretch",
     )
+
+    with st.expander("작품 관리 · 초기화와 삭제"):
+        st.caption(
+            "되돌릴 수 없어. 먼저 위에서 원고를 내려받아 두는 걸 권해."
+        )
+        reset_column, delete_column = st.columns(2)
+        with reset_column:
+            st.markdown("**원고 초기화**")
+            st.caption("제목·장르·세계관·인물 설정은 남기고 본문과 기억을 모두 지워.")
+            reset_ready = st.checkbox("원고를 지우고 처음부터 다시 쓸게", key="reset_story_confirmation")
+            if st.button(
+                "원고 초기화",
+                disabled=not reset_ready,
+                width="stretch",
+                key="reset_story_button",
+            ):
+                try:
+                    store.reset_owned_story(user_id, story_id)
+                except ConsumerStoreError as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun(scope="fragment")
+        with delete_column:
+            st.markdown("**작품 삭제**")
+            st.caption("작품과 원고를 데이터베이스에서 완전히 지우고 목록에서 없애.")
+            delete_ready = st.checkbox("이 작품을 완전히 삭제할게", key="delete_story_main_confirmation")
+            if st.button(
+                "작품 삭제",
+                disabled=not delete_ready,
+                width="stretch",
+                key="delete_story_main_button",
+            ):
+                try:
+                    store.delete_owned_story(user_id, story_id)
+                except ConsumerStoreError as exc:
+                    st.error(str(exc))
+                else:
+                    _clear_story_session()
+                    st.rerun()
 
 
 def _story_management(

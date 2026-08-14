@@ -928,6 +928,39 @@ class ConsumerStore:
             connection.execute("DELETE FROM stories WHERE id = ?", (story_id,))
         workspace.delete()
 
+    def reset_owned_story(self, owner_id: str, story_id: str) -> None:
+        """Throw away the manuscript but keep the story and its settings.
+
+        Rows go, not flags: the jobs are deleted outright and the progress
+        counters return to zero, so the story is indistinguishable from one that
+        was just created.
+        """
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            owned = connection.execute(
+                "SELECT 1 FROM stories WHERE id = ? AND owner_id = ? AND deleted_at IS NULL",
+                (story_id, owner_id),
+            ).fetchone()
+            if owned is None:
+                raise AuthorizationError("이 계정에서 초기화할 수 없는 작품이야.")
+            placeholders = ",".join("?" for _ in OUTSTANDING_JOB_STATUSES)
+            active = connection.execute(
+                f"SELECT 1 FROM jobs WHERE story_id = ? AND status IN ({placeholders})",
+                (story_id, *OUTSTANDING_JOB_STATUSES),
+            ).fetchone()
+            if active is not None:
+                raise StoryBusyError("집필이 끝난 뒤에 초기화할 수 있어.")
+            connection.execute("DELETE FROM jobs WHERE story_id = ?", (story_id,))
+            connection.execute(
+                """
+                UPDATE stories
+                SET current_chars = 0, section_count = 0, completed_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (iso_time(), story_id),
+            )
+        StoryWorkspace.for_story(self.config, story_id).reset()
+
     def delete_owned_job(self, owner_id: str, story_id: str, job_id: int) -> None:
         """Remove one finished turn from the conversation log.
 
