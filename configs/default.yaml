@@ -8,7 +8,7 @@ ollama:
   chat_model: "gemma4:e4b"
   embed_model: "embeddinggemma:latest"
   timeout_sec: 300
-  num_ctx: 8192
+  num_ctx: 16384
   num_gpu: 24
   num_batch: 32
   keep_alive: "60s"
@@ -17,7 +17,7 @@ ollama:
   manage_vram: true
   retry_attempts: 1
   retry_backoff_sec: 2.0
-  fallback_num_ctx: 4096
+  fallback_num_ctx: 8192
   fallback_num_gpu: 16
   fallback_num_batch: 16
   fallback_max_tokens: 1200

@@ -17,7 +17,15 @@ class OllamaConfig(BaseModel):
     chat_model: str = DEFAULT_CHAT_MODEL
     embed_model: str = "embeddinggemma:latest"
     timeout_sec: int = 300
-    num_ctx: int = 8192
+    # Measured against dry-run long-form turns: the assembled prose prompt grows
+    # to ~14.6K characters by turn 6 and converges near 15K, because the recent
+    # excerpt, story memory, and consumed-beat budgets are each capped. At
+    # roughly 1.5-2 Korean characters per token that is ~8-10K input tokens,
+    # and `generation.max_tokens` adds 1800 more. The old 8192 window could not
+    # hold that, and prose_prompt() front-loads [세계관] and [인물], so an
+    # overflow drops the story canon first. 16384 covers the measured plateau
+    # with margin; raising it further mainly costs KV cache on an 8GB card.
+    num_ctx: int = 16384
     num_gpu: int = 24
     num_batch: int = 32
     keep_alive: str = "60s"
@@ -26,7 +34,10 @@ class OllamaConfig(BaseModel):
     manage_vram: bool = True
     retry_attempts: int = 1
     retry_backoff_sec: float = 2.0
-    fallback_num_ctx: int = 4096
+    # The recovery path trades quality for VRAM, but 4096 truncated a ~10K-token
+    # prompt hard enough to guarantee a broken section. Keep the savings in
+    # num_gpu/num_batch/max_tokens and leave enough window to hold the prompt.
+    fallback_num_ctx: int = 8192
     fallback_num_gpu: int = 16
     fallback_num_batch: int = 16
     fallback_max_tokens: int = 1200

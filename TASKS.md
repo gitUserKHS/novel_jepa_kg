@@ -171,3 +171,7 @@
       validation split from 6 to 16 rows and hit@5 from 0.667 to 0.938.
 - [x] Recalibrate the plausibility threshold against the promoted model over two genres
       (0.69 -> 0.64) after confirming that genre shifts the cosine scale.
+- [x] Size the Ollama context window from a measurement instead of assumption: the prose
+      prompt reaches ~14.6K characters late in a story, so `num_ctx` 8192 was silently
+      truncating the front of the prompt, where the world and character canon live.
+      Raised to 16384 and the recovery fallback to 8192.

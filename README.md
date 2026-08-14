@@ -167,9 +167,37 @@ Embedding model: embeddinggemma:latest
 ```
 
 If Ollama is reachable, the sidebar shows installed models as dropdowns. You can still choose `직접 입력` when you want to type a model name manually.
-The default chat model is `gemma4:e4b`. On the target RTX 4060 8GB setup the app starts with `num_gpu=24`, `num_ctx=8192`, `num_batch=32`, and `keep_alive=60s`.
+The default chat model is `gemma4:e4b`. On the target RTX 4060 8GB setup the app starts with `num_gpu=24`, `num_ctx=16384`, `num_batch=32`, and `keep_alive=60s`.
+
+`num_ctx` was raised from 8192 after measuring the assembled prose prompt: it grows to
+about 14.6K characters by the sixth continuation turn and converges near 15K, since the
+recent-excerpt, story-memory, and consumed-beat budgets are each capped. At roughly
+1.5-2 Korean characters per token that is 8-10K input tokens, and `generation.max_tokens`
+adds 1800 more, so an 8192 window could not hold a late-story section. `prose_prompt()`
+puts `[세계관]` and `[인물]` at the very top, so overflow costs the story canon first while
+the trailing output instructions survive. Enable flash attention and a q8_0 KV cache
+(below) and the doubled window costs roughly what the old f16 8K cache did.
+
+For the same reason `fallback_num_ctx` is 8192 rather than 4096: the recovery path should
+save VRAM through `num_gpu`, `num_batch`, and `num_predict`, not by truncating the canon.
+
+### Ollama server flags for 8GB cards
+
+Flash attention and KV cache quantization are Ollama **server** environment variables, not
+per-request options, so they are set outside this repository and need an Ollama restart:
+
+```powershell
+setx OLLAMA_FLASH_ATTENTION 1
+setx OLLAMA_KV_CACHE_TYPE q8_0
+```
+
+`OLLAMA_KV_CACHE_TYPE` is ignored unless flash attention is on. `gemma4:e4b` uses grouped
+query attention with only 2 KV heads plus sliding-window layers, so its KV cache is a few
+hundred MB rather than gigabytes; q8_0 roughly halves it. The model itself is 9.6GB against
+8GB of VRAM, so it is always partially offloaded and `num_gpu` remains the dominant speed
+knob — raise it a step at a time until the runner stops cleanly loading.
 Use the sidebar `Ollama runtime` expander to check loaded models, approximate GPU residency, VRAM size, and context length. If `model runner has unexpectedly stopped` appears, lower `Ollama GPU layers`, `Ollama context length`, or `Ollama batch size`.
-The `Ollama 500 recovery` expander controls the automatic recovery path for intermittent runner crashes. The conservative fallback uses `num_gpu=16`, `num_ctx=4096`, `num_batch=16`, `num_predict=1200`, and `keep_alive=10s`.
+The `Ollama 500 recovery` expander controls the automatic recovery path for intermittent runner crashes. The conservative fallback uses `num_gpu=16`, `num_ctx=8192`, `num_batch=16`, `num_predict=1200`, and `keep_alive=10s`.
 
 ### 5. Run the full experiment
 
@@ -377,7 +405,7 @@ Two cautions. **Genre shifts the scale**: the fantasy-mystery floor was 0.732 wh
 - Guarded sections still stream immediately in the Generate tab. If a retry is needed, the temporary draft is replaced in place instead of leaving the UI apparently idle or appending duplicate prose.
 - Repetition retries require a high-confidence plot-beat match; adjacent-section vocabulary similarity remains an evaluation metric but does not trigger an expensive rewrite by itself.
 - Run state and evaluation reports track repeated subtitles, repeated narrative beats, adjacent-section similarity, repetition retry count, and retry success rate.
-- The 8K context budget carries only the recent prose excerpt and the most relevant compressed memory/KG slice instead of the full draft.
+- The context budget carries only the recent prose excerpt and the most relevant compressed memory/KG slice instead of the full draft. The per-part character caps are what bound the prompt; `num_ctx` never sizes it, so the window must be set wide enough to hold the assembled result.
 - `reports/runs/creative_longform_memory.jsonl` is updated after every section and can be inspected separately from the prose checkpoint.
 - `reports/runs/creative_longform_ledger.json` stores current states, KG relations, clue status, and hierarchical summaries.
 - `reports/runs/creative_longform_state.json` tracks turn and checkpoint progress so continuation works after restarting Streamlit.
