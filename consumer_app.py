@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import html
 import json
+import math
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -490,6 +492,37 @@ def _worker_state(store: ConsumerStore) -> tuple[str, bool]:
         return "상태 확인 필요", False
 
 
+def _typewriter(job_id: int, live_prose: str) -> None:
+    """Type the in-flight section out character by character.
+
+    The polling fragment only sees the live file once a second, so raw renders
+    arrive as jarring one-second slabs. Animating just the newly arrived delta
+    inside each poll makes the text appear to be typed continuously. The
+    animation budget stays under the poll interval so reruns do not pile up.
+
+    When the revision guard rewrites a section, the live file no longer starts
+    with what was already shown; typing restarts from the top of the rewrite,
+    which is also the honest picture of what happened.
+    """
+    key = f"consumer_typed_{job_id}"
+    shown = str(st.session_state.get(key, ""))
+    if not live_prose.startswith(shown):
+        shown = ""
+    delta = live_prose[len(shown) :]
+    placeholder = st.empty()
+    if delta:
+        steps = min(len(delta), 16)
+        chunk = math.ceil(len(delta) / steps)
+        pause = 0.64 / steps
+        text = shown
+        for offset in range(0, len(delta), chunk):
+            text += delta[offset : offset + chunk]
+            placeholder.markdown(text + " ▌")
+            time.sleep(pause)
+    placeholder.markdown(live_prose + " ▌")
+    st.session_state[key] = live_prose
+
+
 def _render_job(
     job: dict[str, Any],
     sections: list[str],
@@ -518,6 +551,7 @@ def _render_job(
                     st.rerun(scope="fragment")
     with st.chat_message("assistant"):
         if status == JOB_SUCCEEDED:
+            st.session_state.pop(f"consumer_typed_{job_id}", None)
             start = int(job["start_section_count"])
             count = int(job["result_section_count"])
             generated = sections[start : start + count]
@@ -533,10 +567,19 @@ def _render_job(
                 unsafe_allow_html=True,
             )
         elif status == JOB_RUNNING:
+            # Sections this turn already committed stay on screen. Without this,
+            # every section commit cleared the live file and the reader watched
+            # their prose vanish, then a "new" story start from nothing -- the
+            # text was never lost, but the screen said otherwise.
+            start = int(job["start_section_count"])
+            committed = sections[start:]
+            for section in committed:
+                st.markdown(section)
             if live_prose:
-                # The worker appends as it writes, so this grows between polls.
-                st.markdown(live_prose)
+                _typewriter(job_id, live_prose)
                 st.caption("✍️ 집필하는 중이야. 브라우저를 닫아도 작업은 계속돼.")
+            elif committed:
+                st.caption("✍️ 다음 섹션을 준비하고 있어. 브라우저를 닫아도 작업은 계속돼.")
             else:
                 st.info("집필하고 있어. 브라우저를 닫아도 작업은 계속돼.")
         elif status == JOB_FAILED_RECOVERABLE:
