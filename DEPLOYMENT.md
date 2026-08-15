@@ -56,8 +56,9 @@ Windows 방화벽 요청에서는 **개인 네트워크**만 허용한다. 외�
 
 ## 3. JEPA 서비스 모델 준비
 
-현재 연구 체크포인트는 샘플 10개, 검증 1개라 소비자 모델로 승격되지 않는다.
-기존 파일은 삭제하거나 덮어쓰지 않는다.
+현재 활성 모델은 `20260806T111529Z-7262bfe2`(샘플 112, 검증 16)이며 릴리스로
+배포되어 있다. 직접 학습해 승격할 때만 아래 절차가 필요하다. 기존 파일은
+삭제하거나 덮어쓰지 않는다.
 
 1. 관리자 `Dataset`에서 최소 40개, 권장 96개 이상의 유효 샘플을 준비한다.
 2. 관리자 `Service` 탭에서 `Enter maintenance`를 누른다.
@@ -80,14 +81,24 @@ dataset fingerprint·벡터 차원·모델명 일치다. 통과한 버전만 SHA
 서비스가 필요 없다. GitHub Release 자산으로 올리는 방식이 가장 단순하고,
 이미 쓰고 있는 "불변 버전 + SHA-256" 구조와 그대로 맞는다.
 
+새 버전을 승격했으면 릴리스로 올린다. 태그는 버전 id를 그대로 쓴다.
+
 ```bash
 python scripts/share_artifact.py export
+```
+
+```bash
+gh release create model-<version> jepa-model-<version>.zip --title "JEPA 서비스 모델 <version>"
 ```
 
 받는 쪽:
 
 ```bash
-python scripts/share_artifact.py import 20260806T111529Z-7262bfe2.zip --activate
+gh release download model-<version> -p "*.zip"
+```
+
+```bash
+python scripts/share_artifact.py import jepa-model-<version>.zip --activate
 ```
 
 `import`는 설치 전에 매니페스트의 SHA-256으로 모든 파일을 검증한다. 전송 중

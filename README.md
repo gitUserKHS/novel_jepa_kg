@@ -33,10 +33,16 @@ Streamlit GUI button
 ## Installation
 
 ```bash
-python -m venv .venv
+py -3.11 -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+Use Python 3.11 explicitly. The launchers require it, and `faiss-cpu` lags new
+CPython minors, so a newer interpreter fails during `pip install` with a source
+build error rather than a clear message. `requirements-ci.txt` exists only for
+CI, which installs a CPU-only torch first; it derives from `requirements.txt`
+and is not something to install by hand.
 
 Make sure Ollama is running locally and that your selected chat/embedding models are installed. The GUI also includes dry-run mode, which exercises the pipeline without Ollama.
 
@@ -81,6 +87,28 @@ are refused instead of continuing past the resolution.
 The compatibility wrapper `run_server.bat` now opens the same private admin UI
 as `run_admin.bat`. See [DEPLOYMENT.md](DEPLOYMENT.md) for model promotion,
 Windows auto-start, health checks, and CI/CD.
+
+### First run after cloning
+
+A fresh clone has no model and no data. `data/`, `checkpoints/`, and
+`artifacts/versions/` are gitignored, and there is no silent RAG-only fallback,
+so the consumer app will refuse to generate until a version is installed. Get
+one from the releases page:
+
+```bash
+gh release download model-20260806T111529Z-7262bfe2 -p "*.zip"
+```
+
+```bash
+python scripts/share_artifact.py import jepa-model-20260806T111529Z-7262bfe2.zip --activate
+```
+
+The import verifies every file against the manifest's SHA-256 fingerprints
+before installing, so a truncated download fails instead of becoming a model
+that quietly generates nonsense. See
+[DEPLOYMENT.md §3.1](DEPLOYMENT.md) for exporting a version you trained
+yourself. The local LLM is not part of the bundle — pull it from Ollama as
+shown in the Quickstart below.
 
 ### Consumer readiness
 
@@ -134,7 +162,7 @@ run_admin.bat
 Or run from PowerShell:
 
 ```powershell
-cd C:\프로그래밍_프로젝트\novel_jepa_lab
+cd path\to\novel_jepa_lab
 .\run_admin.bat
 ```
 

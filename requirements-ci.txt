@@ -1,11 +1,6 @@
-streamlit>=1.57,<2
-pydantic>=2.8,<3
-pyyaml>=6,<7
-requests>=2.31,<3
-numpy>=1.26,<3
-pandas>=2.2,<4
-faiss-cpu>=1.9,<2
-scikit-learn>=1.5,<2
-tqdm>=4.66,<5
-plotly>=5.24,<7
-python-dotenv>=1,<2
+# CI installs a CPU-only torch from the PyTorch index first, then this file.
+# Deriving from requirements.txt instead of restating it means a dependency
+# added there cannot pass CI while breaking every developer. The torch pin in
+# requirements.txt is already satisfied by the pre-installed CPU build, so pip
+# leaves it alone.
+-r requirements.txt

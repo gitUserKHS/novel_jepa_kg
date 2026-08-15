@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.share_artifact import export_version, import_bundle  # noqa: E402
+from scripts.share_artifact import default_bundle_name, export_version, import_bundle  # noqa: E402
 from src.service.artifacts import ActiveModelUnavailable, load_active_manifest, sha256_file  # noqa: E402
 from src.utils.config import AppConfig  # noqa: E402
 from src.utils.paths import resolve_path  # noqa: E402
@@ -142,6 +142,12 @@ class ShareRoundTripTests(unittest.TestCase):
         versions = resolve_path(self.receiver_config, self.receiver_config.consumer.versions_dir)
         self.assertFalse((versions / VERSION).exists())
         self.assertEqual([p for p in versions.glob(".incoming-*")], [])
+
+    def test_the_default_bundle_name_matches_what_the_docs_import(self) -> None:
+        """README and DEPLOYMENT tell a teammate to import this exact name."""
+        self.assertEqual(
+            default_bundle_name(VERSION), f"jepa-model-{VERSION}.zip"
+        )
 
     def test_reinstalling_over_an_existing_version_is_refused(self) -> None:
         export_version(self.sender_config, VERSION, self.archive)

@@ -35,6 +35,15 @@ from src.utils.paths import resolve_path  # noqa: E402
 MANIFEST_NAME = "manifest.json"
 
 
+def default_bundle_name(version: str) -> str:
+    """Name a bundle the way the published release assets are named.
+
+    A bare `<version>.zip` says nothing about what it holds once it is sitting in
+    a downloads folder next to other files.
+    """
+    return f"jepa-model-{version}.zip"
+
+
 def _config(path: str) -> AppConfig:
     return load_config(Path(path))
 
@@ -172,7 +181,7 @@ def main() -> None:
 
     if args.command == "export":
         version = args.version.strip() or _active_version(config)
-        output = Path(args.output) if args.output else Path(f"{version}.zip")
+        output = Path(args.output) if args.output else Path(default_bundle_name(version))
         export_version(config, version, output)
         return
     import_bundle(config, Path(args.archive), activate=args.activate)

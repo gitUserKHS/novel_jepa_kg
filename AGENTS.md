@@ -44,18 +44,44 @@ Architecture:
 
 ## Commands
 
-Install:
+Install. Use 3.11 explicitly: the launchers require it, and `faiss-cpu` lags new
+CPython minors, so a newer interpreter fails at install time rather than with a
+clear message.
 
 ```bash
-python -m venv .venv
+py -3.11 -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Run GUI:
+Run. Use the launchers, not `streamlit run` directly — `.streamlit/config.toml`
+binds port 8501, which is the consumer port, so running `app.py` by hand puts the
+admin UI where the consumer app belongs.
 
 ```bash
-streamlit run app.py
+.\run_admin.bat
+```
+
+```bash
+.\run_service.bat
+```
+
+Test. This is what CI runs, and there is no pytest in the venv.
+
+```bash
+.venv\Scripts\python.exe -m unittest discover -s tests
+```
+
+```bash
+.venv\Scripts\python.exe scripts/smoke_jepa.py
+```
+
+Get the trained model. A clone has none: `data/`, `checkpoints/`, and
+`artifacts/versions/` are all gitignored, and there is no RAG-only fallback, so
+consumer generation stays disabled until a version is installed.
+
+```bash
+python scripts/share_artifact.py import <bundle>.zip --activate
 ```
 
 Recommended git safety:
