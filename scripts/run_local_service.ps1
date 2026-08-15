@@ -59,10 +59,42 @@ if ($LASTEXITCODE -ne 0) {
     throw "Streamlit is not installed. Run: .venv\Scripts\python.exe -m pip install -r requirements.txt"
 }
 
+# Restarting is the normal case: the previous run is almost always our own
+# Streamlit still holding the port. Stop that one and take the port back. A
+# process that is not this project's Streamlit is left alone and still refuses
+# to start, so we never kill an unrelated server that happens to share a port.
 $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
 if ($listener) {
-    $owners = ($listener | Select-Object -ExpandProperty OwningProcess -Unique) -join ", "
-    throw "Port $Port is already in use by process $owners. Stop that service or choose another port."
+    $owners = $listener | Select-Object -ExpandProperty OwningProcess -Unique
+    # Anchored on a separator so that looking for app.py does not also match
+    # consumer_app.py, which contains it.
+    $AppPattern = '(^|[\\/\s"])' + [regex]::Escape([System.IO.Path]::GetFileName($ResolvedApp))
+    $foreign = @()
+    foreach ($owner in $owners) {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $owner" -ErrorAction SilentlyContinue
+        $isOurs = $process -and $process.Name -eq "python.exe" -and
+            $process.CommandLine -and $process.CommandLine -like "*streamlit*" -and
+            $process.CommandLine -match $AppPattern
+        if ($isOurs) {
+            Write-Host "[Novel JEPA] Stopping the previous $AppPath on port $Port (PID $owner)." -ForegroundColor Yellow
+            Stop-Process -Id $owner -Force -ErrorAction SilentlyContinue
+        }
+        else {
+            $foreign += $owner
+        }
+    }
+    if ($foreign.Count -gt 0) {
+        throw "Port $Port is already in use by process $($foreign -join ', '), which is not this project's app. Stop that service or choose another port."
+    }
+    for ($wait = 0; $wait -lt 20; $wait++) {
+        Start-Sleep -Milliseconds 250
+        if (-not (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)) {
+            break
+        }
+    }
+    if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
+        throw "Port $Port did not free up after stopping the previous app. Try again in a moment."
+    }
 }
 
 $env:PYTHONUTF8 = "1"
