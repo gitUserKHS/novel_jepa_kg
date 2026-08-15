@@ -60,40 +60,47 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Restarting is the normal case: the previous run is almost always our own
-# Streamlit still holding the port. Stop that one and take the port back. A
-# process that is not this project's Streamlit is left alone and still refuses
-# to start, so we never kill an unrelated server that happens to share a port.
-$listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-if ($listener) {
-    $owners = $listener | Select-Object -ExpandProperty OwningProcess -Unique
-    # Anchored on a separator so that looking for app.py does not also match
-    # consumer_app.py, which contains it.
-    $AppPattern = '(^|[\\/\s"])' + [regex]::Escape([System.IO.Path]::GetFileName($ResolvedApp))
-    $foreign = @()
-    foreach ($owner in $owners) {
-        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $owner" -ErrorAction SilentlyContinue
-        $isOurs = $process -and $process.Name -eq "python.exe" -and
-            $process.CommandLine -and $process.CommandLine -like "*streamlit*" -and
-            $process.CommandLine -match $AppPattern
-        if ($isOurs) {
-            Write-Host "[Novel JEPA] Stopping the previous $AppPath on port $Port (PID $owner)." -ForegroundColor Yellow
-            Stop-Process -Id $owner -Force -ErrorAction SilentlyContinue
-        }
-        else {
-            $foreign += $owner
+# Streamlit still holding the port. Stop that one and take the port back, and
+# refuse anything else, so an unrelated server sharing the port is never killed.
+#
+# Deliberately no WMI (Get-NetTCPConnection / Get-CimInstance / tasklist): after
+# a force-kill the WMI process provider can wedge indefinitely, and a launcher
+# that waits on it never starts anything. netstat and Get-Process are native.
+# Ownership comes from a pid file this launcher writes, not from command-line
+# matching, which WMI alone could provide.
+function Get-PortListenerPids {
+    param([int]$ProbePort)
+    $found = @()
+    foreach ($line in (& netstat -ano -p TCP | Select-String "LISTENING")) {
+        $parts = ($line.ToString().Trim() -split "\s+")
+        if ($parts.Count -ge 5 -and $parts[1] -match "[:\]]$ProbePort$") {
+            $found += [int]$parts[-1]
         }
     }
-    if ($foreign.Count -gt 0) {
-        throw "Port $Port is already in use by process $($foreign -join ', '), which is not this project's app. Stop that service or choose another port."
+    return @($found | Sort-Object -Unique)
+}
+
+$PidFile = Join-Path $ProjectRoot (".runtime\web-" + [System.IO.Path]::GetFileName($ResolvedApp) + ".pid")
+$listeners = Get-PortListenerPids -ProbePort $Port
+if ($listeners.Count -gt 0) {
+    $known = $null
+    if (Test-Path -LiteralPath $PidFile) {
+        $known = [int](Get-Content -LiteralPath $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+    }
+    if ($known) {
+        $owner = Get-Process -Id $known -ErrorAction SilentlyContinue
+        if ($owner -and $owner.ProcessName -like "python*") {
+            Write-Host "[Novel JEPA] Stopping the previous $AppPath (PID $known)." -ForegroundColor Yellow
+            & taskkill /PID $known /T /F 2>$null | Out-Null
+        }
     }
     for ($wait = 0; $wait -lt 20; $wait++) {
         Start-Sleep -Milliseconds 250
-        if (-not (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)) {
-            break
-        }
+        $listeners = Get-PortListenerPids -ProbePort $Port
+        if ($listeners.Count -eq 0) { break }
     }
-    if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
-        throw "Port $Port did not free up after stopping the previous app. Try again in a moment."
+    if ($listeners.Count -gt 0) {
+        throw "Port $Port is already in use by process $($listeners -join ', '), which is not this launcher's app. Stop that service or choose another port."
     }
 }
 
@@ -139,9 +146,31 @@ if ($OpenBrowser) {
     Start-Process $LocalUrl
 }
 
-& $Python -m streamlit run $ResolvedApp `
-    --server.headless true `
-    --server.address $BindAddress `
-    --server.port $Port `
-    --server.runOnSave false
-exit $LASTEXITCODE
+# Start-Process instead of direct invocation so the PID can be recorded. The
+# pid file is what lets the next launch identify and stop this instance without
+# consulting WMI. /T on cleanup also takes down the real interpreter the venv
+# shim spawns.
+$Web = Start-Process `
+    -FilePath $Python `
+    -ArgumentList @(
+        "-m", "streamlit", "run", $ResolvedApp,
+        "--server.headless", "true",
+        "--server.address", $BindAddress,
+        "--server.port", "$Port",
+        "--server.runOnSave", "false"
+    ) `
+    -WorkingDirectory $ProjectRoot `
+    -NoNewWindow `
+    -PassThru
+New-Item -ItemType Directory -Force (Split-Path -Parent $PidFile) | Out-Null
+Set-Content -LiteralPath $PidFile -Value $Web.Id -Encoding ascii
+try {
+    Wait-Process -Id $Web.Id -ErrorAction SilentlyContinue
+    exit $(if ($Web.HasExited) { $Web.ExitCode } else { 0 })
+}
+finally {
+    if ($Web -and -not $Web.HasExited) {
+        & taskkill /PID $Web.Id /T /F 2>$null | Out-Null
+    }
+    Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
+}
