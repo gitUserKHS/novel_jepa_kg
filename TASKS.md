@@ -179,6 +179,10 @@
       the writing screen its own back link to the library. Every path deletes rows rather
       than flagging them, and an active turn blocks reset so the worker cannot write into a
       story that was just cleared.
+- [x] Stop the honorific pattern from reading role address as an invented character:
+      아가씨/도련님/선생님 matched `HONORIFIC_RE` and every such section was rewritten by
+      the stability gate for obeying the prompt's own "use role names" instruction. A stem
+      before 씨/님/군/양 now only counts when it resembles a known character's name.
 - [x] Stop trusting the model to delimit its own private record. Match the whole marker
       family, and strip any unmarked or truncated record before prose reaches a reader,
       so `<STORY_MEMORY>` JSON can never appear in the novel.

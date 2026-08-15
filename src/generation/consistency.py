@@ -105,7 +105,17 @@ def check_name_consistency(text: str, characters: str) -> ConsistencyCheck:
 
     known_set = set(known_names)
     found: list[str] = []
-    found.extend(HONORIFIC_RE.findall(text))
+    # A stem before 씨/님/군/양 is only evidence about a character when it is a
+    # known name or resembles one. Ordinary role address also matches the
+    # pattern -- 아가씨, 도련님, 선생님, 공작님 -- and the generation prompt
+    # explicitly asks for role words instead of invented proper nouns, so
+    # flagging them made the stability gate rewrite a section for obeying its
+    # own instructions. In a court-romance genre that was every section.
+    found.extend(
+        candidate
+        for candidate in HONORIFIC_RE.findall(text)
+        if candidate in known_set or _looks_like_name_variant(candidate, known_names)
+    )
     found.extend(candidate for candidate in QUOTED_NAME_RE.findall(text) if _looks_like_name_variant(candidate, known_names))
 
     for token in TOKEN_RE.findall(text):
