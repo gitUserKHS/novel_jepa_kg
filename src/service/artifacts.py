@@ -405,7 +405,15 @@ def load_active_manifest(config: AppConfig, *, verify_files: bool = True) -> dic
         artifact_value = paths.get(key)
         if not artifact_value:
             raise ActiveModelUnavailable(f"Active manifest is missing paths.{key}.")
-        artifact = Path(artifact_value).expanduser().resolve()
+        # A manifest records the absolute path of the machine that built it, so
+        # honouring it verbatim makes an artifact unusable anywhere else -- the
+        # parent check below would reject every shared copy. Take only the file
+        # name and rebind it to this machine's version directory, which also
+        # makes escaping the directory impossible by construction.
+        name = Path(str(artifact_value)).name
+        if name in {"", ".", ".."}:
+            raise ActiveModelUnavailable(f"Active JEPA artifact path is invalid: {key}.")
+        artifact = (version_root / name).resolve()
         if artifact.parent != version_root:
             raise ActiveModelUnavailable(f"Active JEPA artifact escaped its version directory: {key}.")
         if not artifact.exists():

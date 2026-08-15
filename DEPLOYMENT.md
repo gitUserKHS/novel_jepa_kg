@@ -70,6 +70,37 @@ Windows 방화벽 요청에서는 **개인 네트워크**만 허용한다. 외�
 dataset fingerprint·벡터 차원·모델명 일치다. 통과한 버전만 SHA-256과 함께
 `artifacts/active.json`에 원자 기록된다. 실패하면 기존 active 버전이 유지된다.
 
+## 3.1 팀원과 모델·데이터 공유
+
+`data/`, `checkpoints/`, `artifacts/versions/`는 전부 `.gitignore` 대상이다.
+저장소만 클론한 팀원에게는 모델도 데이터도 오지 않는다.
+
+공유 단위는 승격된 버전 하나이며 약 38MB다. 학습된 predictor가 대부분이고,
+데이터셋·임베딩·FAISS 인덱스는 각각 1MB 미만이다. 이 크기에는 모델 호스팅
+서비스가 필요 없다. GitHub Release 자산으로 올리는 방식이 가장 단순하고,
+이미 쓰고 있는 "불변 버전 + SHA-256" 구조와 그대로 맞는다.
+
+```bash
+python scripts/share_artifact.py export
+```
+
+받는 쪽:
+
+```bash
+python scripts/share_artifact.py import 20260806T111529Z-7262bfe2.zip --activate
+```
+
+`import`는 설치 전에 매니페스트의 SHA-256으로 모든 파일을 검증한다. 전송 중
+잘린 파일은 조용히 이상한 문장을 생성하는 모델이 되는 대신 그 자리에서 실패한다.
+검증에 실패하면 임시 디렉터리째 삭제되고 아무것도 설치되지 않는다.
+
+로컬 LLM은 공유 대상이 아니다. 팀원은 Ollama에서 직접 받는다.
+
+```bash
+ollama pull gemma4:e4b
+ollama pull embeddinggemma
+```
+
 ## 4. 작품 저장과 복구
 
 - 메타데이터·큐·지표: `.runtime/consumer.sqlite3` (SQLite WAL)
