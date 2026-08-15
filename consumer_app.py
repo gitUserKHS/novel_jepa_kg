@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from src.service.artifacts import active_model_status
 from src.service.consumer_store import (
@@ -31,6 +32,11 @@ from src.utils.config import AppConfig, load_config
 
 st.set_page_config(page_title="이야기 공방", page_icon="✦", layout="wide")
 
+
+# Carries the server-side session token across a browser reload. The token is
+# never put in the URL: that would leak it into history, shared links, and any
+# screenshot of the address bar.
+_SESSION_COOKIE = "novel_jepa_session"
 
 CREATIVITY_LABELS = {
     "안정": "stable",
@@ -204,13 +210,61 @@ def _clear_account_session() -> None:
             st.session_state.pop(key, None)
 
 
+def _set_browser_cookie(value: str, max_age: int) -> None:
+    """Write the session cookie from inside the component iframe.
+
+    Streamlit can read cookies through st.context but cannot set them, so the
+    write goes through the parent document. The cookie is deliberately not
+    marked Secure: the service is reached over plain HTTP on a LAN, and a
+    Secure cookie would simply never be stored there.
+    """
+    payload = json.dumps(f"{_SESSION_COOKIE}={value}; path=/; max-age={max_age}; SameSite=Lax")
+    components.html(
+        f"""<script>
+        const cookie = {payload};
+        try {{ window.parent.document.cookie = cookie; }}
+        catch (error) {{ document.cookie = cookie; }}
+        </script>""",
+        height=0,
+    )
+
+
+def _sync_session_cookie(token: str, days: int) -> None:
+    # st.context.cookies reflects the request that opened this session, so it
+    # will not show a cookie written later in the same session. Track what has
+    # been written instead of re-emitting the script on every rerun.
+    if st.session_state.get("consumer_cookie_synced") == token:
+        return
+    _set_browser_cookie(token, max(60, int(days) * 86400))
+    st.session_state["consumer_cookie_synced"] = token
+
+
+def _forget_session_cookie() -> None:
+    _set_browser_cookie("", 0)
+    st.session_state.pop("consumer_cookie_synced", None)
+
+
 def _current_user(store: ConsumerStore) -> dict[str, Any] | None:
     token = str(st.session_state.get("consumer_session_token", ""))
+    if not token:
+        # A browser reload starts a new Streamlit session with empty state, so
+        # the cookie is what carries the login across a refresh.
+        try:
+            stored = st.context.cookies.get(_SESSION_COOKIE, "")
+        except Exception:  # noqa: BLE001 - an unavailable context must not block login.
+            stored = ""
+        # Only a real string is a token. Outside a browser the context can hand
+        # back a stand-in object, and str() would turn that into a truthy value
+        # that gets stored and then fails authentication.
+        token = stored if isinstance(stored, str) else ""
+        if token:
+            st.session_state["consumer_session_token"] = token
     if not token:
         return None
     user = store.authenticate_user_session(token)
     if user is None:
         _clear_account_session()
+        _forget_session_cookie()
     return user
 
 
@@ -302,6 +356,7 @@ def _logout(store: ConsumerStore) -> None:
     if token:
         store.revoke_user_session(token)
     _clear_account_session()
+    st.session_state["consumer_logout_pending"] = True
     st.rerun()
 
 
@@ -810,10 +865,18 @@ def _story_management(
 def main() -> None:
     _styles()
     config, store = _load_runtime()
+    if st.session_state.pop("consumer_logout_pending", False):
+        # Runs on the rerun after logout, when the page is rendered again and
+        # the script can actually reach the browser.
+        _forget_session_cookie()
     user = _current_user(store)
     if user is None:
         _auth_entry(config, store)
         return
+    _sync_session_cookie(
+        str(st.session_state.get("consumer_session_token", "")),
+        config.consumer.auth_session_days,
+    )
 
     story_id = str(st.session_state.get("consumer_story_id", ""))
     story = store.get_owned_story(str(user["id"]), story_id) if story_id else None
