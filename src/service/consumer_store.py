@@ -19,7 +19,12 @@ from src.service.security import (
     verify_password,
     verify_session_secret,
 )
-from src.service.story_workspace import StoryWorkspace
+from src.memory.story_rag import (
+    load_story_memories,
+    write_story_ledger,
+    write_story_memories,
+)
+from src.service.story_workspace import StoryWorkspace, read_draft, split_sections
 from src.utils.config import AppConfig
 from src.utils.paths import resolve_path
 
@@ -1061,18 +1066,96 @@ class ConsumerStore:
             )
         StoryWorkspace.for_story(self.config, story_id).reset()
 
-    def delete_owned_job(self, owner_id: str, story_id: str, job_id: int) -> None:
-        """Remove one finished turn from the conversation log.
+    def _drop_sections(self, story_id: str, start: int, count: int) -> tuple[int, int]:
+        """Remove `count` sections starting at `start` and rewrite what derives from them.
 
-        This deletes the chat record only. Prose the turn produced already lives
-        in the manuscript, and pulling a section back out would break the memory,
-        ledger, and outline that later sections were written against.
+        Returns the manuscript's new (character count, section count). The
+        memory ledger and hierarchical summaries are rebuilt from the surviving
+        memories rather than edited, so nothing keeps referring to prose that is
+        no longer in the draft.
+        """
+        workspace = StoryWorkspace.for_story(self.config, story_id)
+        sections = split_sections(read_draft(workspace.draft))
+        if count > 0 and 0 <= start < len(sections):
+            remaining = sections[:start] + sections[start + count :]
+        else:
+            remaining = sections
+        text = "\n\n".join(remaining).strip()
+        if text:
+            workspace.draft.parent.mkdir(parents=True, exist_ok=True)
+            workspace.draft.write_text(text, encoding="utf-8")
+        else:
+            workspace.draft.unlink(missing_ok=True)
+
+        memories = load_story_memories(workspace.memory)
+        if count > 0:
+            removed = {start + offset + 1 for offset in range(count)}
+            memories = [m for m in memories if m.section_index not in removed]
+        for position, memory in enumerate(memories, start=1):
+            memory.section_index = position
+        if memories:
+            write_story_memories(workspace.memory, memories)
+            write_story_ledger(
+                workspace.ledger,
+                memories,
+                group_size=self.config.generation.story_summary_group_size,
+            )
+        else:
+            workspace.memory.unlink(missing_ok=True)
+            workspace.ledger.unlink(missing_ok=True)
+
+        self._sync_run_state(workspace, len(text), len(remaining), len(memories))
+        return len(text), len(remaining)
+
+    def _sync_run_state(
+        self,
+        workspace: StoryWorkspace,
+        total_chars: int,
+        section_count: int,
+        memory_count: int,
+    ) -> None:
+        """Point the resume checkpoint at the manuscript that actually exists."""
+        if not workspace.state.exists():
+            return
+        try:
+            state = json.loads(workspace.state.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return
+        if section_count <= 0:
+            workspace.state.unlink(missing_ok=True)
+            return
+        state.update(
+            {
+                "total_chars": total_chars,
+                "section_count": section_count,
+                "memory_count": memory_count,
+                # The ending may have been in the prose just removed, so the
+                # story is open again until a generator writes a new one.
+                "novel_completed": False,
+            }
+        )
+        state["turns_completed"] = max(0, int(state.get("turns_completed", 0) or 0) - 1)
+        try:
+            workspace.state.write_text(
+                json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError:
+            pass
+
+    def delete_owned_job(self, owner_id: str, story_id: str, job_id: int) -> None:
+        """Delete one finished turn along with the prose it wrote.
+
+        Removing the chat bubble without the prose would leave the manuscript
+        and the progress counters describing a turn the reader just deleted, so
+        the sections, their memories, the derived ledger, the resume checkpoint,
+        and the story's progress all move together.
         """
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
-                SELECT jobs.status FROM jobs
+                SELECT jobs.status, jobs.start_section_count, jobs.result_section_count
+                FROM jobs
                 JOIN stories ON stories.id = jobs.story_id
                 WHERE jobs.id = ? AND jobs.story_id = ?
                   AND stories.owner_id = ? AND stories.deleted_at IS NULL
@@ -1083,10 +1166,28 @@ class ConsumerStore:
                 raise AuthorizationError("이 계정에서 삭제할 수 없는 대화야.")
             if str(row["status"]) in OUTSTANDING_JOB_STATUSES:
                 raise ConsumerStoreError("집필 중이거나 대기 중인 요청은 지울 수 없어.")
+            start = int(row["start_section_count"] or 0)
+            count = int(row["result_section_count"] or 0)
             connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+            if count > 0:
+                # Later turns start further back now that these sections are gone.
+                connection.execute(
+                    """
+                    UPDATE jobs SET start_section_count = MAX(0, start_section_count - ?)
+                    WHERE story_id = ? AND id > ?
+                    """,
+                    (count, story_id, job_id),
+                )
+        total_chars, section_count = self._drop_sections(story_id, start, count)
+        self.sync_story_progress(story_id, total_chars, section_count)
+        self._reopen_story(story_id)
 
     def clear_owned_job_history(self, owner_id: str, story_id: str) -> int:
-        """Delete every finished turn from the log, keeping active ones."""
+        """Delete every finished turn and the prose those turns wrote.
+
+        Turns still queued or running are left alone, so this is not the same as
+        a full reset: work in flight survives and keeps its place.
+        """
         placeholders = ",".join("?" for _ in OUTSTANDING_JOB_STATUSES)
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1096,8 +1197,35 @@ class ConsumerStore:
             ).fetchone()
             if owned is None:
                 raise AuthorizationError("이 계정에서 삭제할 수 없는 작품이야.")
+            removed_sections = connection.execute(
+                f"""
+                SELECT COALESCE(SUM(result_section_count), 0) AS total FROM jobs
+                WHERE story_id = ? AND status NOT IN ({placeholders})
+                """,
+                (story_id, *OUTSTANDING_JOB_STATUSES),
+            ).fetchone()
             cursor = connection.execute(
                 f"DELETE FROM jobs WHERE story_id = ? AND status NOT IN ({placeholders})",
                 (story_id, *OUTSTANDING_JOB_STATUSES),
             )
-        return int(cursor.rowcount or 0)
+            removed_jobs = int(cursor.rowcount or 0)
+            if removed_jobs:
+                connection.execute(
+                    "UPDATE jobs SET start_section_count = 0 WHERE story_id = ?",
+                    (story_id,),
+                )
+        if removed_jobs:
+            total_chars, section_count = self._drop_sections(
+                story_id, 0, int(removed_sections["total"] or 0)
+            )
+            self.sync_story_progress(story_id, total_chars, section_count)
+            self._reopen_story(story_id)
+        return removed_jobs
+
+    def _reopen_story(self, story_id: str) -> None:
+        """Clear a completion flag whose ending may have just been deleted."""
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE stories SET completed_at = NULL, updated_at = ? WHERE id = ?",
+                (iso_time(), story_id),
+            )

@@ -453,7 +453,7 @@ def _render_job(
             if delete_column.button(
                 "✕",
                 key=f"delete_job_{job_id}",
-                help="이 대화만 지워. 원고는 그대로 남아.",
+                help="이 턴과 이 턴이 쓴 원고를 함께 지워.",
             ):
                 try:
                     store.delete_owned_job(user_id, story_id, job_id)
@@ -642,7 +642,7 @@ def _story_live(config: AppConfig, store: ConsumerStore, user_id: str, story_id:
             if clear_column.button(
                 f"대화 전체 삭제 ({len(clearable)})",
                 key="clear_job_history",
-                help="끝난 대화 기록을 모두 지워. 원고는 그대로 남아.",
+                help="끝난 턴과 그 턴들이 쓴 원고를 모두 지워. 집필 중인 턴은 남아.",
                 width="stretch",
             ):
                 try:

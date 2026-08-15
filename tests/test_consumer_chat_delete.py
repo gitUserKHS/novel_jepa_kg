@@ -44,7 +44,13 @@ class ChatDeletionTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def _finished_job(self) -> int:
+    def _finished_job(
+        self,
+        *,
+        start_sections: int = 0,
+        sections: int = 1,
+        completed: bool = False,
+    ) -> int:
         job = self.store.enqueue_job(
             str(self.owner["id"]),
             str(self.story["id"]),
@@ -54,13 +60,15 @@ class ChatDeletionTests(unittest.TestCase):
         )
         job_id = int(job["id"])
         self.store.claim_next_job("worker-1", "v1")
+        self.store.set_job_start_section_count(job_id, start_sections)
         self.store.complete_job(
             job_id,
             result_chars=1800,
-            result_section_count=1,
+            result_section_count=sections,
             total_chars=1800,
-            total_section_count=1,
+            total_section_count=start_sections + sections,
             metrics={},
+            novel_completed=completed,
         )
         return job_id
 
@@ -77,14 +85,80 @@ class ChatDeletionTests(unittest.TestCase):
 
         self.assertNotIn(job_id, self._owner_job_ids())
 
-    def test_deleting_a_turn_keeps_the_story_and_its_progress(self) -> None:
-        job_id = self._finished_job()
+    def test_deleting_a_turn_removes_its_prose_and_progress(self) -> None:
+        workspace = self._workspace()
+        workspace.draft.write_text(
+            "### 1장\n\n첫 번째 턴의 본문이다.\n\n### 2장\n\n두 번째 턴의 본문이다.",
+            encoding="utf-8",
+        )
+        second = self._finished_job(start_sections=1, sections=1)
+
+        self.store.delete_owned_job(str(self.owner["id"]), str(self.story["id"]), second)
+
+        draft = workspace.draft.read_text(encoding="utf-8")
+        self.assertIn("첫 번째 턴", draft)
+        self.assertNotIn("두 번째 턴", draft)
+        story = self.store.get_owned_story(str(self.owner["id"]), str(self.story["id"]))
+        self.assertEqual(int(story["section_count"]), 1)
+        self.assertEqual(int(story["current_chars"]), len(draft))
+
+    def test_deleting_the_only_turn_empties_the_manuscript(self) -> None:
+        workspace = self._workspace()
+        workspace.draft.write_text("### 1장\n\n유일한 본문이다.", encoding="utf-8")
+        job_id = self._finished_job(start_sections=0, sections=1)
 
         self.store.delete_owned_job(str(self.owner["id"]), str(self.story["id"]), job_id)
 
         story = self.store.get_owned_story(str(self.owner["id"]), str(self.story["id"]))
-        self.assertIsNotNone(story)
-        self.assertEqual(int(story["current_chars"]), 1800)
+        self.assertEqual(int(story["current_chars"]), 0)
+        self.assertEqual(int(story["section_count"]), 0)
+        self.assertFalse(workspace.draft.exists())
+
+    def test_deleting_a_turn_renumbers_the_memories_that_remain(self) -> None:
+        from src.memory.story_rag import StoryMemory, load_story_memories, write_story_memories
+
+        workspace = self._workspace()
+        workspace.draft.write_text("### 1장\n\n하나.\n\n### 2장\n\n둘.", encoding="utf-8")
+        write_story_memories(
+            workspace.memory,
+            [
+                StoryMemory(section_index=1, summary="첫 섹션"),
+                StoryMemory(section_index=2, summary="둘째 섹션"),
+            ],
+        )
+        first = self._finished_job(start_sections=0, sections=1)
+
+        self.store.delete_owned_job(str(self.owner["id"]), str(self.story["id"]), first)
+
+        memories = load_story_memories(workspace.memory)
+        self.assertEqual([m.summary for m in memories], ["둘째 섹션"])
+        self.assertEqual([m.section_index for m in memories], [1])
+
+    def test_deleting_a_turn_shifts_later_turns_back(self) -> None:
+        workspace = self._workspace()
+        workspace.draft.write_text("### 1장\n\n하나.\n\n### 2장\n\n둘.", encoding="utf-8")
+        first = self._finished_job(start_sections=0, sections=1)
+        second = self._finished_job(start_sections=1, sections=1)
+
+        self.store.delete_owned_job(str(self.owner["id"]), str(self.story["id"]), first)
+
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT start_section_count FROM jobs WHERE id = ?", (second,)
+            ).fetchone()
+        self.assertEqual(int(row["start_section_count"]), 0)
+
+    def test_deleting_a_turn_reopens_a_completed_story(self) -> None:
+        workspace = self._workspace()
+        workspace.draft.write_text("### 결말\n\n끝났다.", encoding="utf-8")
+        job_id = self._finished_job(start_sections=0, sections=1, completed=True)
+        before = self.store.get_owned_story(str(self.owner["id"]), str(self.story["id"]))
+        self.assertIsNotNone(before["completed_at"])
+
+        self.store.delete_owned_job(str(self.owner["id"]), str(self.story["id"]), job_id)
+
+        story = self.store.get_owned_story(str(self.owner["id"]), str(self.story["id"]))
+        self.assertIsNone(story["completed_at"])
 
     def test_another_account_cannot_delete_a_turn(self) -> None:
         job_id = self._finished_job()
@@ -124,6 +198,19 @@ class ChatDeletionTests(unittest.TestCase):
             self.store.delete_owned_job(
                 str(self.owner["id"]), str(self.story["id"]), int(job["id"])
             )
+
+    def test_clearing_history_also_empties_the_manuscript(self) -> None:
+        workspace = self._workspace()
+        workspace.draft.write_text("### 1장\n\n하나.\n\n### 2장\n\n둘.", encoding="utf-8")
+        self._finished_job(start_sections=0, sections=1)
+        self._finished_job(start_sections=1, sections=1)
+
+        self.store.clear_owned_job_history(str(self.owner["id"]), str(self.story["id"]))
+
+        story = self.store.get_owned_story(str(self.owner["id"]), str(self.story["id"]))
+        self.assertEqual(int(story["current_chars"]), 0)
+        self.assertEqual(int(story["section_count"]), 0)
+        self.assertFalse(workspace.draft.exists())
 
     def test_clearing_history_removes_finished_turns_only(self) -> None:
         first = self._finished_job()
