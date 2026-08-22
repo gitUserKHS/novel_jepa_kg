@@ -7,8 +7,8 @@ RTX 4060 8GB 에서 실측으로 확정한 경로를 그대로 쓴다 (2026-08-2
 - 단일 GPU 이므로 생성은 직렬화(락). 스트리밍 중 클라이언트가 끊으면 생성을 멈춘다.
 
 환경변수:
-  NOVEL_QWEN_MODEL_DIR   모델 디렉터리 (기본: 랩의 applied/models/qwen35-4b)
-  NOVEL_QWEN_ADAPTERS    "이름=경로;이름=경로" (기본: cute=랩의 applied/adapters/cute)
+  NOVEL_QWEN_MODEL_DIR   모델 디렉터리 (기본: C:/llm_files/qwen35-4b)
+  NOVEL_QWEN_ADAPTERS    "이름=경로;이름=경로" (기본: cute=C:/llm_files/adapters/cute)
   NOVEL_QWEN_HOST / NOVEL_QWEN_PORT  (기본 127.0.0.1 / 8765)
 실행: run_model_server.bat  (transformers 5.15·bitsandbytes·peft 가 있는 venv 필요)
 """
@@ -46,7 +46,7 @@ from graph_decode import GraphDecoder  # noqa: E402
 from samplers import DRYLogitsProcessor  # noqa: E402
 from transformers import LogitsProcessorList, StoppingCriteria, StoppingCriteriaList, TextIteratorStreamer  # noqa: E402
 
-DEFAULT_ADAPTERS = "cute=C:/연구_프로젝트/ai_아키텍처/applied/adapters/cute"
+DEFAULT_ADAPTERS = "cute=C:/llm_files/adapters/cute"
 MAX_CONTEXT = 110_000  # 실측 한계 120K 에 여유 (디코드 재할당 스톨 회피)
 # 그래프 디코드 상한. KV 버퍼 32 KiB/tok: 32768=1 GiB, 65536=2 GiB. 초과 문맥은 eager 폴백.
 MAX_BUCKET = int(os.environ.get("NOVEL_QWEN_MAX_BUCKET", "32768"))

@@ -21,8 +21,8 @@ RTX 4060 8GB 한 장에서 모델 서버·생성 워커·웹을 모두 띄운다
 1. 모델 서버 환경. 프로젝트 venv 와 **별도**다 (`requirements-model-server.txt`).
    기본값은 랩 환경 `C:\연구_프로젝트\ai_아키텍처\.venv` 를 쓰며, 다른 환경은
    `NOVEL_QWEN_PYTHON` 으로 지정한다. 모델 가중치는 `NOVEL_QWEN_MODEL_DIR`
-   (기본: 랩의 `applied/models/qwen35-4b`), 말투 어댑터는 `NOVEL_QWEN_ADAPTERS`
-   (`이름=경로;...`, 기본: `cute=랩의 applied/adapters/cute`).
+   (기본: `C:\llm_files\qwen35-4b`), 말투 어댑터는 `NOVEL_QWEN_ADAPTERS`
+   (`이름=경로;...`, 기본: `cute=C:\llm_files\adapters\cute`).
 
    **처음 받은 팀원은** 모델이 없으므로 먼저 내려받는다 (베이스 12GB + 어댑터 81MB,
    어댑터는 팀 비공개 저장소라 초대가 필요하다). 자세한 절차는 `DEPLOYMENT.md` §1.1.

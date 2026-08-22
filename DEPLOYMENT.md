@@ -28,7 +28,7 @@
 2. 모델 서버 환경 (`requirements-model-server.txt`: torch 2.13+cu126, transformers 5.15,
    bitsandbytes, peft, fastapi, uvicorn). 기본값은 `C:\연구_프로젝트\ai_아키텍처\.venv` 이고
    `NOVEL_QWEN_PYTHON` 으로 바꿀 수 있다. 가중치·어댑터 위치는 `NOVEL_QWEN_MODEL_DIR`,
-   `NOVEL_QWEN_ADAPTERS` (기본: 같은 랩 디렉터리). Ollama 는 관리자 연구 UI 에만 필요하다.
+   `NOVEL_QWEN_ADAPTERS` (기본: `C:\llm_files\qwen35-4b`, `C:\llm_files\adapters\cute`). Ollama 는 관리자 연구 UI 에만 필요하다.
 
 ## 1.1 모델 가중치와 어댑터 받기 (팀원)
 

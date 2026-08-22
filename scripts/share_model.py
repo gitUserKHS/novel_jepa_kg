@@ -20,8 +20,7 @@ from pathlib import Path
 
 os.environ.pop("HF_HUB_OFFLINE", None)
 
-DEFAULT_SOURCE = Path(os.environ.get("NOVEL_QWEN_ADAPTER_SRC",
-                                     r"C:\연구_프로젝트\ai_아키텍처\applied\adapters"))
+DEFAULT_SOURCE = Path(os.environ.get("NOVEL_QWEN_ADAPTER_SRC", r"C:\llm_files\adapters"))
 REPOS = {"cute": "qwen3.5-4b-ko-cute", "tone": "qwen3.5-4b-ko-tone"}
 # 어댑터 디렉터리에서 이것만 올린다 (체크포인트·옵티마이저 상태는 제외).
 ALLOW = {"adapter_model.safetensors", "adapter_config.json", "README.md", "train_args.json"}
