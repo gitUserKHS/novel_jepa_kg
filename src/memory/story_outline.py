@@ -54,6 +54,7 @@ def create_story_outline(
 - 각 beat는 사건을 하나만 전진시키고 이전 beat의 결과를 이어받음
 - 인물표에 없는 새 고유명사 인물은 만들지 않음
 - 단서의 setup과 payoff를 분리하고, 같은 반전이나 경고를 새 사실처럼 반복하지 않음
+- 각 문자열 값은 40자 이내로 짧게 (premise, ending_intent 는 60자 이내)
 
 JSON 객체 하나만 출력하세요. 마크다운 코드 블록은 쓰지 마세요.
 {{
@@ -76,7 +77,7 @@ JSON 객체 하나만 출력하세요. 마크다운 코드 블록은 쓰지 마�
             prompt,
             system="당신은 장편 소설의 인과관계와 복선을 설계하는 한국어 스토리 에디터입니다.",
             temperature=0.25,
-            max_tokens=1100,
+            max_tokens=1400,
         )
         outline = StoryOutline.model_validate(_json_object(raw))
         if len(outline.beats) < 4:
@@ -182,7 +183,59 @@ def _json_object(text: str) -> dict:
     end = cleaned.rfind("}")
     if start < 0 or end < start:
         raise ValueError("outline response did not contain a JSON object")
-    payload = json.loads(cleaned[start : end + 1])
+    try:
+        payload = json.loads(cleaned[start : end + 1])
+    except json.JSONDecodeError:
+        payload = _salvage_truncated_outline(cleaned[start:])
     if not isinstance(payload, dict):
         raise ValueError("outline JSON must be an object")
     return payload
+
+
+def _salvage_truncated_outline(text: str) -> dict:
+    """토큰 상한에 잘린 outline JSON 에서 완결된 beat 까지만 살린다.
+
+    작은 로컬 모델은 beat 하나를 쓰다 말고 끊기는 일이 잦다. `"beats": [` 뒤의
+    완결된 `{...}` 객체들만 모아 다시 닫으면 앞부분의 premise/ending_intent 와
+    함께 유효한 outline 이 된다.
+    """
+    beats_at = text.find('"beats"')
+    if beats_at < 0:
+        raise ValueError("outline JSON has no beats array")
+    head = text[:beats_at]
+    body = text[text.find("[", beats_at) + 1 :]
+    objects: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for char in body:
+        if char == "{":
+            depth += 1
+        if depth > 0:
+            current.append(char)
+        if char == "}":
+            depth -= 1
+            if depth == 0 and current:
+                objects.append("".join(current))
+                current = []
+        if char == "]" and depth == 0:
+            break
+    if not objects:
+        raise ValueError("outline JSON has no complete beat")
+    premise = ""
+    ending = ""
+    import re as _re
+
+    for key, store in (("premise", "premise"), ("ending_intent", "ending")):
+        match = _re.search(r'"%s"\s*:\s*"((?:[^"\\]|\\.)*)"' % key, head)
+        if match:
+            if store == "premise":
+                premise = match.group(1)
+            else:
+                ending = match.group(1)
+    beats = []
+    for item in objects:
+        try:
+            beats.append(json.loads(item))
+        except json.JSONDecodeError:
+            continue
+    return {"premise": premise, "ending_intent": ending, "beats": beats}

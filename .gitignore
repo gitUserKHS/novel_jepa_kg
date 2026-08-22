@@ -33,3 +33,4 @@ artifacts/active.json
 !reports/runs/.gitkeep
 !artifacts/candidates/.gitkeep
 !artifacts/versions/.gitkeep
+model_server/qwen_stack/data/

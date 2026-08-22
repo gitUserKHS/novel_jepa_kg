@@ -6,28 +6,29 @@
 포함하지 않는다.
 
 ```text
-소비자 브라우저 -> consumer_app.py :8501 -> SQLite FIFO queue
-                                            -> 단일 GPU worker
-                                            -> Ollama 127.0.0.1:11434
-관리자 브라우저 -> app.py :8502 (127.0.0.1 전용)
+소비자 브라우저 -> consumer_app.py :8501 -+- 일반 채팅 -> 모델 서버 127.0.0.1:8765 (직접 스트리밍)
+                                         +- 장편 소설 -> SQLite FIFO queue -> 단일 GPU worker -> 모델 서버
+관리자 브라우저 -> app.py :8502 (127.0.0.1 전용, 레거시 JEPA 연구 UI, Ollama 필요)
 ```
 
-Ollama의 `11434`와 관리자 `8502`는 외부에 공개하지 않는다. 소비자에게는
+모델 서버 `8765`, Ollama `11434`, 관리자 `8502`는 외부에 공개하지 않는다. 소비자에게는
 `8501`만 열고, 공유기 포트 포워딩은 사용하지 않는다.
 
 ## 1. 최초 설치
 
-Python 3.11과 Ollama를 설치한 뒤 프로젝트 루트 PowerShell에서 실행한다.
+두 개의 Python 환경이 필요하다.
 
-```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-gpu.txt
-ollama pull gemma4:e4b
-ollama pull embeddinggemma
-```
+1. 프로젝트 venv (웹·워커), Python 3.11 권장:
 
-Python 3.14보다 3.11을 권장한다. PyTorch, FAISS, Streamlit 조합이 더 안정적이다.
-소비자 모델은 `gemma4:e4b`, 임베딩 모델은 `embeddinggemma:latest`로 고정된다.
+   ```powershell
+   py -3.11 -m venv .venv
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+   ```
+
+2. 모델 서버 환경 (`requirements-model-server.txt`: torch 2.13+cu126, transformers 5.15,
+   bitsandbytes, peft, fastapi, uvicorn). 기본값은 `C:\연구_프로젝트\ai_아키텍처\.venv` 이고
+   `NOVEL_QWEN_PYTHON` 으로 바꿀 수 있다. 가중치·어댑터 위치는 `NOVEL_QWEN_MODEL_DIR`,
+   `NOVEL_QWEN_ADAPTERS` (기본: 같은 랩 디렉터리). Ollama 는 관리자 연구 UI 에만 필요하다.
 
 ## 2. 관리자와 소비자 실행
 
@@ -38,13 +39,16 @@ Python 3.14보다 3.11을 권장한다. PyTorch, FAISS, Streamlit 조합이 더 
 # http://127.0.0.1:8502
 ```
 
-`run_server.bat`도 호환성을 위해 같은 관리자 앱을 연다. 소비자 웹과 worker는
-다음 명령으로 함께 실행한다.
+`run_server.bat`도 호환성을 위해 같은 관리자 앱을 연다. 소비자 웹과 worker, 모델 서버는
+다음 명령으로 함께 실행한다 (모델 서버는 이미 떠 있으면 재사용).
 
 ```powershell
 .\run_service.bat
 # http://호스트-PC-IP:8501
 ```
+
+모델 서버만 따로 띄우거나 상태를 보려면 `.\run_model_server.bat`. 로그는
+`.runtime\model_server.out.log`, `.runtime\model_server.err.log`.
 
 소비자는 `8501` 주소에서 직접 회원가입하고 로그인한다. 비밀번호는 사용자별
 scrypt 해시로 저장되고, 로그인 세션의 비밀값도 원문으로 저장되지 않는다.
@@ -145,8 +149,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\uninstall_local_service.ps1
 
 ## 6. 상태 확인
 
-consumer 웹, worker heartbeat, Ollama의 두 모델, active JEPA 파일 fingerprint를
-한 번에 검사한다.
+consumer 웹, 모델 서버, worker heartbeat 를 한 번에 검사한다 (Ollama·JEPA 검사는
+`--check-ollama`, `--check-active-jepa` 로만).
 
 ```powershell
 .\.venv\Scripts\python.exe .\scripts\health_check.py
@@ -165,7 +169,13 @@ maintenance 제어와 queue 상태 확인:
 
 | 변수 | 기본값 | 용도 |
 |---|---|---|
-| `NOVEL_JEPA_OLLAMA_BASE_URL` | `http://localhost:11434` | 로컬 Ollama 주소 |
+| `NOVEL_LLM_BASE_URL` | `http://127.0.0.1:8765` | 로컬 Qwen 모델 서버 주소 |
+| `NOVEL_LLM_CHAT_ADAPTER` | (없음) | 일반 채팅 기본 말투 어댑터 (`cute`) |
+| `NOVEL_LLM_DRY_RUN` | `false` | 모델 서버 없이 고정 응답 (테스트) |
+| `NOVEL_QWEN_PYTHON` | 랩 venv | 모델 서버를 돌릴 python.exe |
+| `NOVEL_QWEN_MODEL_DIR` | 랩 모델 디렉터리 | Qwen3.5-4B 가중치 |
+| `NOVEL_QWEN_ADAPTERS` | `cute=랩 어댑터` | `이름=경로;...` |
+| `NOVEL_JEPA_OLLAMA_BASE_URL` | `http://localhost:11434` | 레거시 관리자 UI 용 Ollama 주소 |
 | `NOVEL_JEPA_CONSUMER_BIND_HOST` | `0.0.0.0` | 소비자 바인드 주소 |
 | `NOVEL_JEPA_CONSUMER_PORT` | `8501` | 소비자 포트 |
 | `NOVEL_JEPA_CONSUMER_DB` | `.runtime/consumer.sqlite3` | 서비스 DB |

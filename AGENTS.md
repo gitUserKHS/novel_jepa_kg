@@ -1,41 +1,29 @@
 # AGENTS.md
 
-## Project Goal
+## Project Goal (2026-08-23 부터)
 
-This project is a Streamlit web GUI for a JEPA-inspired latent planner combined with a local LLM for Korean novel generation.
-
-The system should:
-1. Generate synthetic narrative transition data using a local LLM.
-2. Validate and filter generated JSONL data.
-3. Embed scene summaries.
-4. Train a small predictor model in embedding space.
-5. Use the predictor as a latent next-scene planner.
-6. Generate novel prose using a local LLM.
-7. Compare LLM-only, RAG, and JEPA-planner generation modes.
-
-## Core Idea
-
-Do not fine-tune the local LLM. Train only a small PyTorch predictor that maps current scene embeddings to next scene embeddings.
-
-Architecture:
+로컬 Qwen3.5-4B(4bit) 모델 서버 위에서 돌아가는 한국어 장편 소설 서비스 + 일반 채팅.
+소비자 경로는 JEPA/임베딩/RAG 인덱스를 쓰지 않는다 (레거시 연구 도구는 `app.py` 에 남아 있다).
 
 ```text
-사용자가 웹 GUI에서 버튼 클릭
-→ Gemma/Ollama가 합성 서사 데이터 생성
-→ JSONL 검증 및 필터링
-→ 장면 요약 임베딩 생성
-→ JEPA-inspired latent predictor 학습
-→ 예측 벡터로 유사 장면 검색
-→ Local LLM이 다음 장면/소설 본문 생성
-→ LLM-only / RAG / JEPA-planner 비교 평가
+consumer_app.py (Streamlit :8501)
+  ├─ 일반 채팅: src/llm/local_client.py → model_server/server.py (:8765) 로 SSE 스트리밍
+  └─ 장편 소설: 기획 대화(작품 카드 JSON) → ConsumerStore 큐 → src/service/worker.py
+                → src/generation/longform.py (이야기 지도·스토리 메모리·게이트) → 모델 서버
 ```
+
+핵심 설계 근거는 랩 실측(`C:\연구_프로젝트\ai_아키텍처\applied\README.md`): 직전 장 전문을 문맥에
+두면 복사 루프, 반복 페널티는 언어 이탈, 말투 LoRA 는 서술 단축. 생성기는 이 셋을 피하도록 짜였다.
 
 ## Constraints
 
 - Target environment: Windows, RTX 4060 8GB VRAM, 32GB RAM.
 - Keep implementation simple and robust.
-- Prefer CPU FAISS first.
-- Use local Ollama APIs for LLM chat and embeddings.
+- LLM 호출은 `src/service/runtime.make_llm_client` 를 통해서만 (로컬 서버 기본, Ollama 는 레거시).
+- 모델 서버 코드(`model_server/`)는 랩 환경(torch 2.13, transformers 5.15, bitsandbytes)에서 돈다 —
+  프로젝트 venv 에 그 의존성을 넣지 않는다.
+- 디코드는 CUDA 그래프(`graph_decode.py`)가 기본. 그래프 캡처/재생은 반드시 서버의 단일 GPU
+  스레드에서만 — 다른 스레드에서 캡처하면 프로세스가 죽는다 (08-23 실측).
 - Use Korean prompts and Korean output examples.
 - Save all intermediate artifacts to data/, checkpoints/, and reports/.
 - Every pipeline stage must be restartable.
@@ -59,11 +47,15 @@ binds port 8501, which is the consumer port, so running `app.py` by hand puts th
 admin UI where the consumer app belongs.
 
 ```bash
-.\run_admin.bat
+.\run_service.bat        # 모델 서버(자동 기동) + 워커 + 소비자 웹
 ```
 
 ```bash
-.\run_service.bat
+.\run_model_server.bat   # 모델 서버만
+```
+
+```bash
+.\run_admin.bat          # 레거시 연구 UI (Ollama 필요)
 ```
 
 Test. This is what CI runs, and there is no pytest in the venv.
@@ -76,13 +68,8 @@ Test. This is what CI runs, and there is no pytest in the venv.
 .venv\Scripts\python.exe scripts/smoke_jepa.py
 ```
 
-Get the trained model. A clone has none: `data/`, `checkpoints/`, and
-`artifacts/versions/` are all gitignored, and there is no RAG-only fallback, so
-consumer generation stays disabled until a version is installed.
-
-```bash
-python scripts/share_artifact.py import <bundle>.zip --activate
-```
+모델 가중치는 레포에 없다. `NOVEL_QWEN_MODEL_DIR`/`NOVEL_QWEN_ADAPTERS` 로 위치를 준다
+(기본: 랩 디렉터리). JEPA 산출물 설치(`scripts/share_artifact.py`)는 레거시 관리자 UI 에만 필요하다.
 
 Recommended git safety:
 

@@ -104,7 +104,10 @@ def configure_story_run(
     run_config.generation.story_ledger_path = str(workspace.ledger)
     run_config.generation.story_outline_path = str(workspace.outline)
 
-    paths = active_manifest.get("paths", {})
+    paths = active_manifest.get("paths") or {}
+    if not paths:
+        # 로컬 Qwen 백엔드: JEPA 산출물 없이 동작한다.
+        return run_config, workspace
     required = {
         "dataset": "data.filtered_path",
         "checkpoint": "training.checkpoint_path",

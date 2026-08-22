@@ -1,0 +1,15 @@
+# Environment for model_server/server.py (NOT the project venv).
+# Validated 2026-08-23 on Windows 11 / RTX 4060 8GB / Python 3.14:
+#   torch 2.13.0+cu126, transformers 5.15.1, bitsandbytes 0.50.1, peft 0.20.0,
+#   accelerate 1.14.0, hqq 0.2.8 (optional), fastapi 0.141, uvicorn 0.52
+# The launcher defaults to C:\연구_프로젝트\ai_아키텍처\.venv; point NOVEL_QWEN_PYTHON
+# at any interpreter that satisfies this file.
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.13.0+cu126
+transformers>=5.15,<6
+bitsandbytes>=0.50,<1
+peft>=0.20,<1
+accelerate>=1.14,<2
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+pydantic>=2.8,<3

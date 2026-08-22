@@ -44,6 +44,33 @@ class OllamaConfig(BaseModel):
     fallback_keep_alive: str = "10s"
 
 
+class LLMConfig(BaseModel):
+    """생성 백엔드. 기본은 로컬 Qwen3.5-4B 모델 서버(model_server/server.py)."""
+
+    backend: str = "local"  # "local" | "ollama"
+    base_url: str = "http://127.0.0.1:8765"
+    dry_run: bool = False  # 테스트/CI: 모델 서버 없이 고정 응답
+    timeout_sec: int = 900
+    # 일반 채팅 기본 말투 어댑터 ("" = 기본 모델). 소설 생성은 항상 기본 모델을 쓴다:
+    # 말투 LoRA 는 서술 분량을 짧게 만든다 (08-23 실측: 1,561자 → 886자).
+    chat_adapter: str = ""
+    adapter_scale: float = 0.6
+    korean_filter: bool = True
+    chat_temperature: float = 0.7
+    chat_max_tokens: int = 1024
+    novel_temperature: float = 0.75
+    novel_top_p: float = 0.9
+    novel_top_k: int = 20
+    novel_repetition_penalty: float = 1.05
+    novel_max_tokens: int = 1500
+    # DRY(구절 반복 억제) — 0 이면 꺼짐. min_p 는 0 이면 top_p 사용. 값은 bench_prose_settings 로 결정.
+    novel_dry_multiplier: float = 0.8
+    novel_dry_base: float = 1.75
+    novel_dry_allowed_length: int = 2
+    novel_min_p: float = 0.0
+    memory_max_tokens: int = 500
+
+
 class DataConfig(BaseModel):
     synthetic_path: str = "data/synthetic/generated.jsonl"
     filtered_path: str = "data/filtered/filtered.jsonl"
@@ -126,7 +153,7 @@ class GenerationConfig(BaseModel):
     hallucination_temperature_span: float = 0.8
     enable_consistency_repair: bool = False
     enable_story_outline: bool = True
-    outline_beat_count: int = 12
+    outline_beat_count: int = 8
     enable_stability_retry: bool = True
     stability_min_section_ratio: float = 0.55
     enable_jepa_coherence_gate: bool = True
@@ -238,6 +265,7 @@ class ConsumerConfig(BaseModel):
 class AppConfig(BaseModel):
     project: ProjectConfig = Field(default_factory=ProjectConfig)
     ollama: OllamaConfig = Field(default_factory=OllamaConfig)
+    llm: LLMConfig = Field(default_factory=LLMConfig)
     data: DataConfig = Field(default_factory=DataConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
@@ -272,6 +300,10 @@ def apply_environment_overrides(config: AppConfig) -> AppConfig:
     config.ollama.chat_model = _first_env("NOVEL_JEPA_CHAT_MODEL", "OLLAMA_CHAT_MODEL") or config.ollama.chat_model
     config.ollama.embed_model = _first_env("NOVEL_JEPA_EMBED_MODEL", "OLLAMA_EMBED_MODEL") or config.ollama.embed_model
     config.output_root = _first_env("NOVEL_JEPA_OUTPUT_ROOT") or config.output_root
+    config.llm.backend = _first_env("NOVEL_LLM_BACKEND") or config.llm.backend
+    config.llm.base_url = _first_env("NOVEL_LLM_BASE_URL", "NOVEL_QWEN_BASE_URL") or config.llm.base_url
+    config.llm.chat_adapter = _first_env("NOVEL_LLM_CHAT_ADAPTER") or config.llm.chat_adapter
+    config.llm.dry_run = _env_bool(_first_env("NOVEL_LLM_DRY_RUN"), config.llm.dry_run)
     config.service.name = _first_env("NOVEL_JEPA_SERVICE_NAME") or config.service.name
     config.service.bind_host = _first_env("NOVEL_JEPA_BIND_HOST") or config.service.bind_host
     port = _first_env("NOVEL_JEPA_PORT")

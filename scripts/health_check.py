@@ -64,6 +64,15 @@ def check_worker(config_path: str, max_age_sec: float) -> dict[str, Any]:
     return json.loads(state["value"])
 
 
+def check_model_server(base_url: str, timeout: float) -> str:
+    response = requests.get(f"{base_url.rstrip('/')}/health", timeout=timeout)
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("status") != "ok":
+        raise RuntimeError(f"Model server is not ready: {payload}")
+    return str(payload.get("model", "local"))
+
+
 def check_active_jepa(config_path: str) -> str:
     status = active_model_status(load_config(config_path), verify_files=True)
     if not status["ready"]:
@@ -82,9 +91,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--attempts", type=int, default=20)
     parser.add_argument("--delay", type=float, default=2.0)
     parser.add_argument("--timeout", type=float, default=5.0)
-    parser.add_argument("--skip-ollama", action="store_true")
+    parser.add_argument("--model-server-url", default="http://127.0.0.1:8765")
+    parser.add_argument("--skip-model-server", action="store_true")
+    parser.add_argument("--skip-ollama", action="store_true", default=True,
+                        help="Ollama is the legacy research backend; checked only with --check-ollama")
+    parser.add_argument("--check-ollama", dest="skip_ollama", action="store_false")
     parser.add_argument("--skip-worker", action="store_true")
-    parser.add_argument("--skip-active-jepa", action="store_true")
+    parser.add_argument("--skip-active-jepa", action="store_true", default=True,
+                        help="JEPA artifacts are legacy; checked only with --check-active-jepa")
+    parser.add_argument("--check-active-jepa", dest="skip_active_jepa", action="store_false")
     return parser.parse_args()
 
 
@@ -97,6 +112,13 @@ def main() -> int:
             args.delay,
             lambda: check_streamlit(args.app_url, args.timeout),
         )
+        if not args.skip_model_server:
+            _retry(
+                "Model server health check",
+                args.attempts,
+                args.delay,
+                lambda: check_model_server(args.model_server_url, args.timeout),
+            )
         if not args.skip_ollama:
             _retry(
                 "Ollama health check",
@@ -125,7 +147,9 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 - command-line probes report one clear error.
         print(f"[FAIL] {exc}", file=sys.stderr)
         return 1
-    print(f"[OK] Novel JEPA service is healthy at {args.app_url}")
+    print(f"[OK] Novel service is healthy at {args.app_url}")
+    if not args.skip_model_server:
+        print(f"[OK] Model server is ready at {args.model_server_url}")
     if not args.skip_ollama:
         print(f"[OK] Ollama models are available: {args.model}, {args.embedding_model}")
     if not args.skip_worker:

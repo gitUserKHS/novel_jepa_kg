@@ -20,7 +20,9 @@ from src.evaluation.metrics import (
 )
 from src.generation.consistency import check_name_consistency
 from src.generation.hallucination import generate_with_controlled_hallucination
+from src.generation.longform import generate_longform
 from src.generation.stability import assess_section_stability
+from src.llm.local_client import LocalLLMClient, LocalLLMError
 from src.llm.ollama_client import OllamaClient
 from src.memory.story_rag import (
     StoryMemory,
@@ -31,7 +33,7 @@ from src.memory.story_rag import (
 from src.service.artifacts import ActiveModelUnavailable, load_active_manifest
 from src.service.consumer_store import CREATIVITY_LEVELS, MAINTENANCE_ACTIVE, ConsumerStore
 from src.service.job_lock import ServiceBusyError, acquire_lock_file, acquire_project_job
-from src.service.runtime import make_ollama_client
+from src.service.runtime import make_llm_client
 from src.service.story_workspace import (
     LiveProseWriter,
     StoryWorkspace,
@@ -46,8 +48,20 @@ from src.utils.paths import resolve_path
 
 logger = logging.getLogger(__name__)
 Generator = Callable[..., str | dict[str, Any]]
-ClientFactory = Callable[[AppConfig], OllamaClient]
+ClientFactory = Callable[[AppConfig], OllamaClient | LocalLLMClient]
 ManifestLoader = Callable[[AppConfig], dict[str, Any]]
+
+
+def local_model_manifest(config: AppConfig) -> dict[str, Any]:
+    """로컬 Qwen 서버가 준비됐으면 그 정체를 manifest 로 돌려준다 (JEPA 산출물 불필요)."""
+    if config.llm.backend == "ollama":
+        return load_active_manifest(config, verify_files=True)
+    client = make_llm_client(config)
+    status = client.status()
+    if not status["ready"]:
+        raise ActiveModelUnavailable(status["reason"])
+    health = status["health"] or {}
+    return {"version": f"{health.get('model', 'local')}@{config.llm.base_url}", "paths": {}, "health": health}
 
 
 def _public_error(exc: Exception) -> str:
@@ -179,17 +193,17 @@ class ConsumerWorker:
         store: ConsumerStore | None = None,
         worker_id: str | None = None,
         client_factory: ClientFactory | None = None,
-        generator: Generator = generate_with_controlled_hallucination,
+        generator: Generator | None = None,
         manifest_loader: ManifestLoader | None = None,
     ) -> None:
         self.config = config
         self.store = store or ConsumerStore(config)
         self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
-        self.client_factory = client_factory or (lambda value: make_ollama_client(value))
+        self.client_factory = client_factory or (lambda value: make_llm_client(value))
+        if generator is None:
+            generator = generate_longform if config.llm.backend != "ollama" else generate_with_controlled_hallucination
         self.generator = generator
-        self.manifest_loader = manifest_loader or (
-            lambda value: load_active_manifest(value, verify_files=True)
-        )
+        self.manifest_loader = manifest_loader or local_model_manifest
 
     def process_one(self) -> bool:
         self.store.recover_stale_jobs()
@@ -201,7 +215,7 @@ class ConsumerWorker:
             return False
         try:
             manifest = self.manifest_loader(self.config)
-        except ActiveModelUnavailable as exc:
+        except (ActiveModelUnavailable, LocalLLMError) as exc:
             self.store.heartbeat_worker(self.worker_id, "model_unavailable")
             logger.warning("Consumer worker waiting for active model: %s", exc)
             return False

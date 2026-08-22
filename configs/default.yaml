@@ -3,6 +3,26 @@ project:
   language: "ko"
   seed: 42
 
+llm:
+  backend: "local"            # local = model_server/server.py (Qwen3.5-4B 4bit) | ollama = 연구용 레거시
+  base_url: "http://127.0.0.1:8765"
+  timeout_sec: 900
+  chat_adapter: ""            # 일반 채팅 기본 말투: "" 기본 모델 | "cute" 밝고 귀여운 말투
+  adapter_scale: 0.6
+  korean_filter: true
+  chat_temperature: 0.7
+  chat_max_tokens: 1024
+  novel_temperature: 0.75
+  novel_top_p: 0.9
+  novel_top_k: 20
+  novel_repetition_penalty: 1.05
+  novel_max_tokens: 1500
+  novel_dry_multiplier: 0.8   # 08-23 bench: rep12 3.7->1.3, distinct3 0.77->0.87. 구절 반복 억제(DRY). scripts/bench_prose_settings.py 로 결정
+  novel_dry_base: 1.75
+  novel_dry_allowed_length: 2
+  novel_min_p: 0.0
+  memory_max_tokens: 500
+
 ollama:
   base_url: "http://localhost:11434"
   chat_model: "gemma4:e4b"
@@ -103,7 +123,7 @@ generation:
   hallucination_temperature_span: 0.8
   enable_consistency_repair: false
   enable_story_outline: true
-  outline_beat_count: 12
+  outline_beat_count: 8
   enable_stability_retry: true
   stability_min_section_ratio: 0.55
   enable_jepa_coherence_gate: true

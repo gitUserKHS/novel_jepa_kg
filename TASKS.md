@@ -193,3 +193,21 @@
       prompt reaches ~14.6K characters late in a story, so `num_ctx` 8192 was silently
       truncating the front of the prompt, where the world and character canon live.
       Raised to 16384 and the recovery fallback to 8192.
+
+## Phase 8 - 자체 모델 서버 + ChatGPT 식 두 모드 (2026-08-23)
+
+- [x] `model_server/`: Qwen3.5-4B 4bit 모델 서버 (OpenAI 호환 SSE, GQA-split 어텐션, 110K 문맥,
+      한국어 토큰 필터 normal/strict, LoRA 어댑터 + 배율, 단일 GPU 직렬화, 끊김 시 생성 중단).
+- [x] `src/llm/local_client.py`: OllamaClient 호환 표면 + 스트리밍 제너레이터 + dry-run.
+- [x] `llm:` 설정 섹션과 `runtime.make_llm_client`; 워커·헬스체크·런처를 로컬 백엔드로 전환.
+- [x] 소비자 경로에서 JEPA 산출물 게이트 제거 (`configure_story_run` 은 paths 없는 manifest 허용).
+- [x] `src/generation/longform.py`: 이야기 지도 → 장별 과제 → 생성 → 게이트(1회 재생성) →
+      별도 메모리 호출 → 원자 저장. 잘린 아웃라인/메모리 JSON 복구.
+- [x] `consumer_app.py` 재작성: 사이드바 모드(일반 채팅 / 장편 소설), 계정별 대화 저장(`ChatStore`),
+      말투 선택, 자유 입력 기획 대화 → 작품 카드 → 집필 시작, 기존 집필 화면 유지.
+- [x] 테스트: 클라이언트(SSE/dry-run), 생성기(가짜 LLM), 채팅 저장소, 새 UI AppTest 시나리오.
+- [x] 디코드 속도: CUDA 그래프 디코드(정적 버퍼 캐시, 단일 GPU 스레드)로 10 → 30~48 tok/s.
+      3,000자 턴 451초 → 113~153초. 버킷 기본 32K(NOVEL_QWEN_MAX_BUCKET, 20K ctx 실측
+      37 tok/s; 65536 도 실측 OK) — 초과 문맥은 eager 폴백, CUDA 오류 시 자동 강등.
+- [x] 연재 품질: DRY 샘플러(rep12 3.7→1.3, distinct3 0.77→0.87, 기본 0.8/1.75/2) +
+      메모리 JSON 간결 스키마·잘린 JSON 복구·한국어 필터 적용.

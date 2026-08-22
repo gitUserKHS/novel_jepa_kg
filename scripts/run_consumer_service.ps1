@@ -63,6 +63,11 @@ if (Test-Path -LiteralPath $WorkerLock) {
     }
 }
 
+# The generation worker needs the local Qwen model server; start it first (no-op
+# when one is already healthy on the port). It keeps running after this launcher
+# exits so the next start is instant.
+& (Join-Path $PSScriptRoot "run_model_server.ps1") -Port 8765 -Hidden
+
 $Worker = Start-Process `
     -FilePath $Python `
     -ArgumentList @("-m", "src.service.worker") `
