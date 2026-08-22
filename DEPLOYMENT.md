@@ -30,6 +30,42 @@
    `NOVEL_QWEN_PYTHON` 으로 바꿀 수 있다. 가중치·어댑터 위치는 `NOVEL_QWEN_MODEL_DIR`,
    `NOVEL_QWEN_ADAPTERS` (기본: 같은 랩 디렉터리). Ollama 는 관리자 연구 UI 에만 필요하다.
 
+## 1.1 모델 가중치와 어댑터 받기 (팀원)
+
+레포에는 모델이 들어 있지 않다. 베이스 가중치는 12GB, 말투 어댑터는 각 81MB다.
+베이스는 Qwen 공식 저장소에서, 어댑터는 팀 비공개 저장소에서 받는다.
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install huggingface_hub
+hf auth login
+.\.venv\Scripts\python.exe .\scripts\setup_model.py --namespace <팀-네임스페이스>
+```
+
+어댑터 저장소는 **비공개**다. 팀 관리자에게 초대를 받아야 `setup_model.py` 가 받아온다
+(권한이 없으면 그 자리에서 실패하고 이유를 출력한다). 베이스만 먼저 받으려면
+`--skip-adapters`, 베이스가 이미 있으면 `--skip-base` 를 쓴다.
+
+끝나면 스크립트가 `.env` 에 넣을 값을 출력한다.
+
+```text
+NOVEL_QWEN_MODEL_DIR=<설치경로>\qwen35-4b
+NOVEL_QWEN_ADAPTERS=cute=<설치경로>\adapters\cute;tone=<설치경로>\adapters\tone
+NOVEL_QWEN_PYTHON=<모델서버 venv>\Scripts\python.exe
+```
+
+확인은 `.\run_model_server.bat` 후 `python scripts\health_check.py`.
+
+올리는 쪽(어댑터를 새로 학습했을 때)은 `scripts/share_model.py` 를 쓴다.
+
+```powershell
+hf auth login
+python scripts\share_model.py --namespace <팀-네임스페이스> --private --dry-run
+python scripts\share_model.py --namespace <팀-네임스페이스> --private
+```
+
+어댑터 가중치·모델 카드·`train_args.json` 과 학습 데이터(`data/*.jsonl`)를 올린다.
+베이스 가중치는 올리지 않는다 — Qwen 공식 저장소(Apache-2.0)에서 받으면 된다.
+
 ## 2. 관리자와 소비자 실행
 
 관리자·학습 UI는 호스트 PC에서만 연다.
@@ -75,7 +111,10 @@ Windows 방화벽 요청에서는 **개인 네트워크**만 허용한다. 외�
 dataset fingerprint·벡터 차원·모델명 일치다. 통과한 버전만 SHA-256과 함께
 `artifacts/active.json`에 원자 기록된다. 실패하면 기존 active 버전이 유지된다.
 
-## 3.1 팀원과 모델·데이터 공유
+## 3.1 팀원과 모델·데이터 공유 (레거시 JEPA 산출물)
+
+아래는 **관리자 연구 UI 의 JEPA predictor** 공유 절차다. 소비자 서비스가 쓰는
+Qwen 가중치·말투 어댑터는 §1.1 을 보라.
 
 `data/`, `checkpoints/`, `artifacts/versions/`는 전부 `.gitignore` 대상이다.
 저장소만 클론한 팀원에게는 모델도 데이터도 오지 않는다.

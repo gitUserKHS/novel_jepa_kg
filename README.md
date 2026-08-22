@@ -23,6 +23,14 @@ RTX 4060 8GB 한 장에서 모델 서버·생성 워커·웹을 모두 띄운다
    `NOVEL_QWEN_PYTHON` 으로 지정한다. 모델 가중치는 `NOVEL_QWEN_MODEL_DIR`
    (기본: 랩의 `applied/models/qwen35-4b`), 말투 어댑터는 `NOVEL_QWEN_ADAPTERS`
    (`이름=경로;...`, 기본: `cute=랩의 applied/adapters/cute`).
+
+   **처음 받은 팀원은** 모델이 없으므로 먼저 내려받는다 (베이스 12GB + 어댑터 81MB,
+   어댑터는 팀 비공개 저장소라 초대가 필요하다). 자세한 절차는 `DEPLOYMENT.md` §1.1.
+
+   ```powershell
+   hf auth login
+   .\.venv\Scripts\python.exe .\scripts\setup_model.py --namespace <팀-네임스페이스>
+   ```
 2. 프로젝트 venv (웹·워커):
 
    ```powershell
