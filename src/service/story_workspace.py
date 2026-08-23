@@ -29,6 +29,10 @@ class StoryWorkspace:
     # process, so a stream callback cannot reach the browser directly; this file
     # is the handoff the consumer UI polls.
     live: Path
+    # Why the live prose just vanished: the gate's reason, the discarded draft,
+    # the trim count, the kept-draft decision. Display only -- the generator
+    # never reads it, so a discarded draft cannot leak back into the prompt.
+    note: Path
 
     @classmethod
     def for_story(
@@ -49,6 +53,7 @@ class StoryWorkspace:
             ledger=root / "ledger.json",
             outline=root / "outline.json",
             live=root / "live.txt",
+            note=root / "live_note.json",
         )
 
     def delete(self) -> None:
@@ -63,7 +68,7 @@ class StoryWorkspace:
         together: keeping a stale memory, ledger, or outline beside an empty
         draft would make the next section continue a story that no longer exists.
         """
-        for path in (self.draft, self.state, self.memory, self.ledger, self.outline, self.live):
+        for path in (self.draft, self.state, self.memory, self.ledger, self.outline, self.live, self.note):
             try:
                 path.unlink(missing_ok=True)
             except OSError:
@@ -150,6 +155,34 @@ def clear_live_prose(workspace: StoryWorkspace) -> None:
         pass
 
 
+def read_live_note(workspace: StoryWorkspace) -> dict[str, Any] | None:
+    """The note beside the live prose: {"kind": retry|trim|decision, "text": ..., "discarded": ...}."""
+    try:
+        if not workspace.note.exists():
+            return None
+        payload = json.loads(workspace.note.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) and payload.get("kind") else None
+
+
+def write_live_note(workspace: StoryWorkspace, kind: str, text: str, discarded: str = "") -> None:
+    try:
+        ensure_parent(workspace.note)
+        workspace.note.write_text(
+            json.dumps({"kind": kind, "text": text, "discarded": discarded}, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def clear_live_note(workspace: StoryWorkspace) -> None:
+    try:
+        workspace.note.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 class LiveProseWriter:
     """Stream the in-flight section to the workspace live file.
 
@@ -172,20 +205,32 @@ class LiveProseWriter:
         self.flush_chars = max(1, flush_chars)
         self._pending: list[str] = []
         self._pending_chars = 0
+        self._streamed: list[str] = []  # everything shown for the current attempt, for the discarded-draft note
 
     def __call__(self, chunk: str) -> None:
         self.feed(chunk)
 
     def begin_section(self, separator: str = "") -> None:
-        self.reset()
+        # A new section: the previous section's note has had its moment.
+        clear_live_note(self.workspace)
+        self._clear_prose()
 
     def restart_section(self, reason: str = "") -> None:
-        # The rewrite replaces the draft in place; showing both would duplicate it.
-        self.reset()
+        # The rewrite replaces the draft in place. Keep the discarded draft in
+        # the note so the reader sees *why* the prose vanished instead of a
+        # blank that looks like a new chapter starting.
+        self.flush()
+        write_live_note(self.workspace, "retry", reason, "".join(self._streamed))
+        self._clear_prose()
+
+    def note_section(self, kind: str, text: str, discarded: str = "") -> None:
+        self.flush()
+        write_live_note(self.workspace, kind, text, discarded)
 
     def commit_section(self) -> None:
-        # The section is in draft.md now, and the UI renders that.
-        self.reset()
+        # The section is in draft.md now, and the UI renders that. The note
+        # (trim / decision) stays until the next section begins.
+        self._clear_prose()
 
     def abort_section(self) -> None:
         self.reset()
@@ -194,6 +239,7 @@ class LiveProseWriter:
         if not chunk:
             return
         self._pending.append(chunk)
+        self._streamed.append(chunk)
         self._pending_chars += len(chunk)
         if self._pending_chars >= self.flush_chars:
             self.flush()
@@ -213,8 +259,14 @@ class LiveProseWriter:
             pass
 
     def reset(self) -> None:
+        """Job start / abort: nothing of the previous attempt should remain."""
+        self._clear_prose()
+        clear_live_note(self.workspace)
+
+    def _clear_prose(self) -> None:
         self._pending.clear()
         self._pending_chars = 0
+        self._streamed.clear()
         clear_live_prose(self.workspace)
 
 

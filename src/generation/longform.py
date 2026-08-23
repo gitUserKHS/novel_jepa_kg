@@ -82,8 +82,11 @@ def _has_stream_control(callback: Callable[[str], None] | None) -> bool:
 
 
 def _stream(callback: Callable[[str], None] | None, method: str, *args: Any) -> None:
+    """스트림 제어 호출. note_section 처럼 선택적인 메서드는 콜백에 없으면 건너뛴다."""
     if callback is not None and _has_stream_control(callback):
-        getattr(callback, method)(*args)
+        handler = getattr(callback, method, None)
+        if callable(handler):
+            handler(*args)
 
 
 # ---- 텍스트 유틸 ---------------------------------------------------------------------------
@@ -147,6 +150,54 @@ def _normalize_section(raw: str, index: int) -> str:
         return ""
     title = heading_title or label_title or f"장면 {index}"
     return f"### {title}\n\n{body_text}"
+
+
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？…])\s+")
+REPEAT_KEY_CHARS = 12  # 이보다 짧은 문장("응.", "그래.")은 정당하게 되풀이될 수 있어 세지 않는다
+
+
+def trim_repetitions(section: str) -> tuple[str, int]:
+    """되풀이된 문단·문장을 첫 등장만 남기고 걷어낸다. (정리된 장, 걷어낸 개수).
+
+    4B 모델의 반복 루프는 대개 같은 문장이나 문단을 그대로 다시 쓰는 형태라, 장 전체를 다시 생성하기
+    전에 기계적으로 걷어내면 전개를 지킨 채 통과시킬 수 있다. 문장 안에 같은 구절이 박힌 경우는 못 잡는다 —
+    그때는 게이트가 그대로 남아 재생성으로 간다.
+    """
+    title = _section_title(section, 0)
+    body = _section_body(section)
+    removed = 0
+    seen_paragraphs: set[str] = set()
+    seen_sentences: set[str] = set()
+    paragraphs: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", body):
+        if not paragraph.strip():
+            continue
+        paragraph_key = "".join(paragraph.split())
+        if paragraph_key in seen_paragraphs:
+            removed += 1
+            continue
+        seen_paragraphs.add(paragraph_key)
+        lines: list[str] = []
+        for line in paragraph.splitlines():
+            kept: list[str] = []
+            for sentence in SENTENCE_SPLIT_RE.split(line.strip()):
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
+                key = "".join(sentence.split())
+                if len(key) >= REPEAT_KEY_CHARS and key in seen_sentences:
+                    removed += 1
+                    continue
+                seen_sentences.add(key)
+                kept.append(sentence)
+            if kept:
+                lines.append(" ".join(kept))
+        if lines:
+            paragraphs.append("\n".join(lines))
+    cleaned = "\n\n".join(paragraphs).strip()
+    if not cleaned:
+        return "", removed
+    return f"### {title}\n\n{cleaned}", removed
 
 
 def _trim_to_last_sentence(body: str) -> str:
@@ -542,6 +593,7 @@ def generate_longform(
     turns_completed = int(run_state.get("turns_completed", 0) or 0)
     current_turn = turns_completed + 1
     counters = {
+        "repetition_trim_count": int(run_state.get("repetition_trim_count", 0) or 0),
         "repetition_retry_count": int(run_state.get("repetition_retry_count", 0) or 0),
         "retry_success_count": int(run_state.get("retry_success_count", 0) or 0),
         "stability_retry_count": int(run_state.get("stability_retry_count", 0) or 0),
@@ -549,6 +601,7 @@ def generate_longform(
     }
     start_counters = dict(counters)
     retry_reasons = [str(item) for item in (run_state.get("retry_reasons", []) or [])]
+    turn_reason_start = len(retry_reasons)
     stability_scores: list[float] = []
     memory_retrievals = 0
     turn_sections: list[str] = []
@@ -619,35 +672,53 @@ def generate_longform(
                 client, config, _section_prompt(**prompt_kwargs), temperature, max_tokens, section_index,
                 stream_callback, seed=None,
             )
-            check = assess_section(
-                candidate, previous_body=previous_body, characters=characters, prior_titles=titles,
-                minimum_chars=minimum_chars, consumed_beats=consumed, memory=None, genre=genre,
-            )
-            if check.hard:  # 연한 문제만으로는 재생성하지 않는다 (재생성 = 장 하나 분량의 시간)
+            gate_kwargs = dict(previous_body=previous_body, characters=characters, prior_titles=titles,
+                               minimum_chars=minimum_chars, consumed_beats=consumed, memory=None, genre=genre)
+            check = assess_section(candidate, **gate_kwargs)
+            if check.hard and all(issue.startswith("같은 구절") for issue in check.hard):
+                # 반복 루프만 문제면 되풀이된 문장을 걷어내고 다시 검사한다 — 전개를 지키고 재생성 시간을 아낀다.
+                trimmed, removed = trim_repetitions(candidate)
+                if trimmed and removed:
+                    trimmed_check = assess_section(trimmed, **gate_kwargs)
+                    if not trimmed_check.hard:
+                        counters["repetition_trim_count"] += 1
+                        retry_reasons.append(f"{section_index}장: 반복 문장 {removed}개를 걷어냄 (다시 쓰지 않음)")
+                        _emit(trace_callback, "반복 정리", "done", {"section": section_index, "removed": removed})
+                        _stream(stream_callback, "note_section", "trim",
+                                f"반복된 문장 {removed}개를 걷어내고 이어가.", "")
+                        candidate, check = trimmed, trimmed_check
+            if check.hard and config.generation.enable_stability_retry:
+                # 연한 문제만으로는 재생성하지 않는다 (재생성 = 장 하나 분량의 시간).
+                # 재생성 프롬프트는 첫 시도 전에 만든 prompt_kwargs 와 문제 목록만 쓴다 — 버려진 초안의 본문은
+                # 어디에도 들어가지 않는다 (tests/test_longform_retry_isolation.py 가 고정).
                 counters["stability_retry_count"] += 1
                 if any("되풀이" in item or "반복" in item for item in check.hard):
                     counters["repetition_retry_count"] += 1
                 retry_reasons.extend(f"{section_index}장: {reason}" for reason in check.issues)
+                first_issues = "; ".join(check.hard)
                 _emit(trace_callback, "장 재생성", "running", {"section": section_index, "reasons": check.issues})
-                _stream(stream_callback, "restart_section", "이 장을 한 번 더 다듬는 중이야...")
+                _stream(stream_callback, "restart_section", first_issues)
                 retry = _generate_section(
                     client, config,
                     _section_prompt(**prompt_kwargs, revision_notes=check.issues),
                     min(1.1, temperature + 0.1), max_tokens, section_index, stream_callback, seed=section_index * 7919,
                 )
-                retry_check = assess_section(
-                    retry, previous_body=previous_body, characters=characters, prior_titles=titles,
-                    minimum_chars=minimum_chars, consumed_beats=consumed, memory=None, genre=genre,
-                )
+                retry_check = assess_section(retry, **gate_kwargs)
                 better = bool(retry) and (
                     (len(retry_check.hard), len(retry_check.issues)) < (len(check.hard), len(check.issues))
                 )
                 if better:
+                    discarded = candidate
                     candidate, check = retry, retry_check
                     if not retry_check.hard:
                         counters["stability_retry_success_count"] += 1
                         if counters["repetition_retry_count"] > start_counters["repetition_retry_count"]:
                             counters["retry_success_count"] += 1
+                    decision = f"다시 쓴 판을 채택했어. (처음 초안의 문제: {first_issues})"
+                else:
+                    discarded = retry
+                    decision = "다시 쓴 판이 더 낫지 않아 처음 초안을 그대로 채택했어."
+                _stream(stream_callback, "note_section", "decision", decision, discarded)
                 _emit(trace_callback, "장 재생성", "done", {"section": section_index, "used": better, "remaining": check.issues})
             if not candidate:
                 raise RuntimeError("모델이 빈 장을 돌려줬어.")
@@ -706,6 +777,8 @@ def generate_longform(
         "target_novel_chars": overall_target,
         "completed_sections": len(sections),
         "novel_completed": ending_written,
+        "turn_repetition_trims": counters["repetition_trim_count"] - start_counters["repetition_trim_count"],
+        "turn_retry_reasons": retry_reasons[turn_reason_start:],
         "turn_repetition_retries": counters["repetition_retry_count"] - start_counters["repetition_retry_count"],
         "turn_retry_successes": counters["retry_success_count"] - start_counters["retry_success_count"],
         "turn_stability_retries": counters["stability_retry_count"] - start_counters["stability_retry_count"],
