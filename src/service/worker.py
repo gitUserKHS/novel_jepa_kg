@@ -34,6 +34,7 @@ from src.service.artifacts import ActiveModelUnavailable, load_active_manifest
 from src.service.consumer_store import CREATIVITY_LEVELS, MAINTENANCE_ACTIVE, ConsumerStore
 from src.service.job_lock import ServiceBusyError, acquire_lock_file, acquire_project_job
 from src.service.runtime import make_llm_client
+from src.service.story_sheets import character_sheet, style_guide, world_sheet
 from src.service.story_workspace import (
     LiveProseWriter,
     StoryWorkspace,
@@ -67,26 +68,6 @@ def local_model_manifest(config: AppConfig) -> dict[str, Any]:
 def _public_error(exc: Exception) -> str:
     detail = " ".join(str(exc).split())[:700]
     return f"생성 중 오류가 발생했어. {detail}" if detail else "생성 중 오류가 발생했어."
-
-
-def _character_sheet(story: dict[str, Any]) -> str:
-    explicit = str(story.get("characters", "")).strip()
-    protagonist = str(story.get("protagonist", "")).strip()
-    if explicit:
-        return f"{protagonist}\n{explicit}" if protagonist and protagonist not in explicit else explicit
-    if ":" in protagonist or "：" in protagonist:
-        return protagonist
-    return f"{protagonist}: 작품의 주인공"
-
-
-def _world_sheet(story: dict[str, Any]) -> str:
-    return "\n".join(
-        [
-            f"장르: {story['genre']}",
-            f"핵심 소재: {story['premise']}",
-            f"세계관: {story['world']}",
-        ]
-    )
 
 
 def _section_metrics(
@@ -246,8 +227,11 @@ class ConsumerWorker:
         before_chars, before_sections = draft_progress(workspace)
         self.store.sync_story_progress(story_id, before_chars, before_sections)
         self.store.set_job_start_section_count(job_id, before_sections)
-        characters = _character_sheet(story)
-        world = _world_sheet(story)
+        characters = character_sheet(story)
+        world = world_sheet(story)
+        # 집필 지침은 Qwen 생성기만 받는다. 레거시(ollama) 생성기에는 그 인자가 없다.
+        guide = style_guide(story)
+        generator_extra = {"style_guide": guide} if guide and self.generator is generate_longform else {}
         previous_sections = split_sections(read_draft(workspace.draft))
         previous_scene = (
             previous_sections[-1]
@@ -292,6 +276,7 @@ class ConsumerWorker:
                     continue_existing=before_sections > 0,
                     turn_target_chars=turn_chars,
                     continuation_instruction=str(job["instruction"]),
+                    **generator_extra,
                 )
             if not isinstance(result, dict):
                 raise RuntimeError("Long-form generator did not return generation details.")

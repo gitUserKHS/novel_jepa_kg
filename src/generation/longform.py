@@ -276,6 +276,7 @@ def _section_prompt(
     completion_rule: str,
     instruction: str,
     revision_notes: list[str] | None = None,
+    style_guide: str = "",
 ) -> str:
     parts = [
         "[작품 설정]", world.strip(),
@@ -290,6 +291,8 @@ def _section_prompt(
         f"- 분량: 약 {target_chars:,}자 (공백 포함). 대화와 묘사를 섞고, 구체적인 행동·장소 변화·상태 변화를 하나 이상 넣는다.",
         f"- 마무리 규칙: {completion_rule}",
         f"- 사용자 요청: {instruction.strip() or '기존의 미해결 압력과 인물의 목표를 따라간다.'}",
+        "[집필 지침 — 작가가 정한 문체·시점·금기, 아래 작성 규칙과 함께 지킨다]" if style_guide.strip() else None,
+        style_guide.strip() or None,
         "[작성 규칙]",
         "- 첫 줄은 '### 소제목' 한 줄. 그 뒤는 본문 문단만 쓴다 (목록·해설·제목 반복·메모 금지).",
         "- 직전 장면을 요약하거나 되풀이하지 않고 바로 새 사건을 진행한다.",
@@ -482,6 +485,7 @@ def generate_longform(
     continue_existing: bool = False,
     turn_target_chars: int | None = None,
     continuation_instruction: str = "",
+    style_guide: str = "",
 ) -> str | dict[str, Any]:
     del scene_preset  # 레거시 인터페이스 호환
     draft_path = resolve_path(config, config.generation.longform_checkpoint_path)
@@ -601,7 +605,7 @@ def generate_longform(
             world=world, characters=characters, outline_text=outline_text, memory_context=memory_context,
             consumed_context=consumed_context, tail=tail, section_index=section_index, section_role=section_role,
             function_name=function_name, function_rule=function_rule, target_chars=section_target,
-            completion_rule=completion_rule, instruction=continuation_instruction,
+            completion_rule=completion_rule, instruction=continuation_instruction, style_guide=style_guide,
         )
         _emit(trace_callback, "장 생성", "running", {
             "section": section_index, "turn": current_turn, "turn_section": generated + 1,

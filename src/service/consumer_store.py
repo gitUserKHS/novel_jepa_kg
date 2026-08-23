@@ -92,6 +92,13 @@ def _public_story(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+STYLE_GUIDE_CHARS = 2000
+
+
+def _clean_style_guide(value: str | None) -> str:
+    return str(value or "").replace("\r", "")[:STYLE_GUIDE_CHARS].strip()
+
+
 def _normalize_username(username: str) -> str:
     return username.strip().casefold()
 
@@ -159,6 +166,7 @@ class ConsumerStore:
                     world TEXT NOT NULL,
                     protagonist TEXT NOT NULL,
                     characters TEXT NOT NULL DEFAULT '',
+                    style_guide TEXT NOT NULL DEFAULT '',
                     target_chars INTEGER NOT NULL,
                     current_chars INTEGER NOT NULL DEFAULT 0,
                     section_count INTEGER NOT NULL DEFAULT 0,
@@ -225,6 +233,9 @@ class ConsumerStore:
             }
             if "owner_id" not in story_columns:
                 connection.execute("ALTER TABLE stories ADD COLUMN owner_id TEXT")
+            if "style_guide" not in story_columns:
+                # 사용자가 직접 적는 집필 지침(문체·시점·금기). 매 장 프롬프트의 작품 설정에 붙는다.
+                connection.execute("ALTER TABLE stories ADD COLUMN style_guide TEXT NOT NULL DEFAULT ''")
             if "completed_at" not in story_columns:
                 connection.execute("ALTER TABLE stories ADD COLUMN completed_at TEXT")
                 # Legacy stories finished under the old char-count rule stay closed.
@@ -393,6 +404,7 @@ class ConsumerStore:
         characters: str = "",
         target_chars: int | None = None,
         research_consent: bool = False,
+        style_guide: str = "",
     ) -> dict[str, Any]:
         if self.get_user(owner_id) is None:
             raise AuthorizationError("로그인이 필요한 작업이야.")
@@ -403,6 +415,7 @@ class ConsumerStore:
             "world": world.strip(),
             "protagonist": protagonist.strip(),
             "characters": characters.strip(),
+            "style_guide": _clean_style_guide(style_guide),
         }
         if any(not fields[name] for name in ("title", "genre", "premise", "world", "protagonist")):
             raise ValueError("제목, 장르, 소재, 세계관, 주인공을 모두 입력해줘.")
@@ -426,8 +439,8 @@ class ConsumerStore:
                     """
                     INSERT INTO stories(
                         id, owner_id, key_salt, key_hash, title, genre, premise, world, protagonist,
-                        characters, target_chars, research_consent, created_at, updated_at, expires_at
-                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        characters, style_guide, target_chars, research_consent, created_at, updated_at, expires_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         story_id,
@@ -440,6 +453,7 @@ class ConsumerStore:
                         fields["world"],
                         fields["protagonist"],
                         fields["characters"],
+                        fields["style_guide"],
                         actual_target,
                         int(research_consent),
                         iso_time(now),
@@ -944,6 +958,7 @@ class ConsumerStore:
         characters: str,
         target_chars: int,
         floor_chars: int = 0,
+        style_guide: str = "",
     ) -> dict[str, Any]:
         fields = {
             "title": title.strip(),
@@ -952,6 +967,7 @@ class ConsumerStore:
             "world": world.strip(),
             "protagonist": protagonist.strip(),
             "characters": characters.strip(),
+            "style_guide": _clean_style_guide(style_guide),
         }
         if any(not fields[name] for name in ("title", "genre", "premise", "world", "protagonist")):
             raise ValueError("제목, 장르, 소재, 세계관, 주인공을 모두 입력해줘.")
@@ -984,6 +1000,7 @@ class ConsumerStore:
         characters: str = "",
         target_chars: int,
         research_consent: bool,
+        style_guide: str = "",
     ) -> dict[str, Any]:
         """Edit the settings a story was created with.
 
@@ -1004,6 +1021,7 @@ class ConsumerStore:
             characters=characters,
             target_chars=target_chars,
             floor_chars=int(story["current_chars"]),
+            style_guide=style_guide,
         )
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1011,7 +1029,7 @@ class ConsumerStore:
                 """
                 UPDATE stories
                 SET title = ?, genre = ?, premise = ?, world = ?, protagonist = ?,
-                    characters = ?, target_chars = ?, research_consent = ?, updated_at = ?
+                    characters = ?, style_guide = ?, target_chars = ?, research_consent = ?, updated_at = ?
                 WHERE id = ? AND owner_id = ? AND deleted_at IS NULL
                 """,
                 (
@@ -1021,6 +1039,7 @@ class ConsumerStore:
                     fields["world"],
                     fields["protagonist"],
                     fields["characters"],
+                    fields["style_guide"],
                     fields["target_chars"],
                     1 if research_consent else 0,
                     iso_time(),
@@ -1032,6 +1051,25 @@ class ConsumerStore:
         if updated is None:
             raise AuthorizationError("이 계정에서 수정할 수 없는 작품이야.")
         return updated
+
+    def get_editable_story(self, owner_id: str, story_id: str) -> dict[str, Any]:
+        """원고를 고쳐도 되는 작품. 남의 작품이면 AuthorizationError, 집필 중이면 StoryBusyError.
+
+        워커가 장을 쓰는 동안 draft·memory 를 바꾸면 서로의 저장을 덮어쓰므로, 대기·실행 중인
+        요청이 있으면 거부한다.
+        """
+        story = self.get_owned_story(owner_id, story_id)
+        if story is None:
+            raise AuthorizationError("이 계정에서 수정할 수 없는 작품이야.")
+        if self.owned_outstanding_job(owner_id, story_id) is not None:
+            raise StoryBusyError("집필 중이거나 대기 중인 요청이 있어. 끝난 뒤에 원고를 고칠 수 있어.")
+        return story
+
+    def sync_story_files(self, story_id: str, total_chars: int, section_count: int, memory_count: int) -> None:
+        """원고 파일을 바깥에서 고친 뒤 진행 지표와 이어쓰기 체크포인트를 실제 파일에 맞춘다."""
+        workspace = StoryWorkspace.for_story(self.config, story_id)
+        self._sync_run_state(workspace, total_chars, section_count, memory_count, turn_removed=False)
+        self.sync_story_progress(story_id, total_chars, section_count)
 
     def reset_owned_story(self, owner_id: str, story_id: str) -> None:
         """Throw away the manuscript but keep the story and its settings.
@@ -1113,8 +1151,16 @@ class ConsumerStore:
         total_chars: int,
         section_count: int,
         memory_count: int,
+        *,
+        turn_removed: bool = True,
     ) -> None:
-        """Point the resume checkpoint at the manuscript that actually exists."""
+        """Point the resume checkpoint at the manuscript that actually exists.
+
+        turn_removed: a finished turn was deleted, so one fewer turn is complete
+        and the ending may have been in the prose just removed (the story is
+        open again until a generator writes a new one). An in-place edit keeps
+        both — the turn count and the completion flag describe the same story.
+        """
         if not workspace.state.exists():
             return
         try:
@@ -1124,17 +1170,10 @@ class ConsumerStore:
         if section_count <= 0:
             workspace.state.unlink(missing_ok=True)
             return
-        state.update(
-            {
-                "total_chars": total_chars,
-                "section_count": section_count,
-                "memory_count": memory_count,
-                # The ending may have been in the prose just removed, so the
-                # story is open again until a generator writes a new one.
-                "novel_completed": False,
-            }
-        )
-        state["turns_completed"] = max(0, int(state.get("turns_completed", 0) or 0) - 1)
+        state.update({"total_chars": total_chars, "section_count": section_count, "memory_count": memory_count})
+        if turn_removed:
+            state["novel_completed"] = False
+            state["turns_completed"] = max(0, int(state.get("turns_completed", 0) or 0) - 1)
         try:
             workspace.state.write_text(
                 json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
