@@ -509,11 +509,65 @@ def _scenario_consumer_edit_section() -> None:
         assert memories[1].facts == ["좌표는 심층 구역을 가리켰다", "문은 잠겨 있었다"]
         assert any("메모리를 저장했어" in toast.value for toast in app.toast)
 
-        # 집필 요청이 들어가면 패널은 잠긴다.
-        store.enqueue_job(owner, sid, instruction="다음 장면.", requested_chars=2000, creativity_profile="balanced")
+        # 자동 이어쓰기: 켜면 기다리는 턴이 없을 때 첫 자동 턴이 바로 들어가고, 끄면 그 턴은 남는다.
+        from src.service.consumer_store import JOB_ORIGIN_AUTO
+
+        _button(app, "🤖 자동 이어쓰기 켜기").click()
         app.run()
+        assert len(app.exception) == 0, app.exception
+        assert store.get_owned_story(owner, sid)["auto_continue"] is True
+        running = store.owned_outstanding_job(owner, sid)
+        assert running is not None and running["origin"] == JOB_ORIGIN_AUTO, running
+        assert any("자동 이어쓰기 켜짐" in item.value for item in app.markdown)
+        assert any("🤖 AI 가 다음 전개를 정해 이어 써." in item.value for item in app.markdown), "the auto turn shows as a bubble"
+        _button(app, "자동 이어쓰기 끄기").click()
+        app.run()
+        assert store.get_owned_story(owner, sid)["auto_continue"] is False
+        assert store.owned_outstanding_job(owner, sid)["id"] == running["id"], "switching off keeps the queued turn"
+        assert _button(app, "🤖 다음 한 턴만 AI 에게").disabled, "one turn is already outstanding"
+
+        # 집필 요청이 들어가 있으면 패널은 잠긴다.
         assert any("끝난 뒤에 고칠 수 있어" in item.value for item in app.warning), [w.value for w in app.warning]
         assert _button(app, "💾 저장하고 메모리 갱신").disabled
+
+        # 게이트가 장을 다시 쓰는 동안: 사유와 버려진 초안이 화면에 남는다 (사라진 것처럼 보이지 않게).
+        from src.service.story_workspace import LiveProseWriter
+
+        store.claim_next_job("worker-1", "v1")
+        store.set_job_start_section_count(int(running["id"]), 2)
+        writer = LiveProseWriter(workspace, flush_chars=1)
+        writer.begin_section()
+        writer.feed("### 3장 첫 초안" + chr(10) * 2 + "같은 문장이 계속 돌았다. 같은 문장이 계속 돌았다.")
+        writer.restart_section("같은 구절이 6회 반복됨")
+        writer.feed("### 3장 다시 쓴 판" + chr(10) * 2 + "서윤은 문을 열었다.")
+        writer.flush()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        assert any("같은 구절이 6회 반복됨 — 이 장을 다시 쓰는 중이야" in item.value for item in app.warning), [w.value for w in app.warning]
+        assert any(item.label == "버려진 초안 보기 (저장되지 않음)" for item in app.expander)
+        assert any("같은 문장이 계속 돌았다" in item.value for item in app.markdown)
+        assert any("서윤은 문을 열었다" in item.value for item in app.markdown), "the rewrite streams beneath the note"
+
+        # 끝난 턴에는 기록된 사유가 남고, 자동 턴은 🤖 로 표시된다 (워커가 정한 지시로 바뀐 뒤에도).
+        writer.commit_section()
+        store.set_job_instruction(int(running["id"]), "민재가 서윤을 막아서게 해줘.")
+        store.complete_job(int(running["id"]), result_chars=20, result_section_count=1, total_chars=80,
+                           total_section_count=3, metrics={"retry_notes": ["3장: 같은 구절이 6회 반복됨", "3장: 반복 문장 4개를 걷어냄 (다시 쓰지 않음)"]},
+                           novel_completed=False)
+        store.heartbeat_worker("worker-1", "idle")  # 워커가 살아 있어야 새 턴 버튼이 열린다
+        app.run()
+        captions = [item.value for item in app.caption]
+        assert any("🔁 3장: 같은 구절이 6회 반복됨" in value for value in captions), captions
+        assert any("✂️ 3장: 반복 문장 4개를 걷어냄" in value for value in captions), captions
+        assert any(item.value == "🤖 민재가 서윤을 막아서게 해줘." for item in app.markdown), [m.value for m in app.markdown][-12:]
+        # 기다리는 턴이 없으니 '한 턴만' 이 열리고, 누르면 자동 턴이 들어간다.
+        assert not _button(app, "🤖 다음 한 턴만 AI 에게").disabled
+        _button(app, "🤖 다음 한 턴만 AI 에게").click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        queued = store.owned_outstanding_job(owner, sid)
+        assert queued is not None and queued["origin"] == JOB_ORIGIN_AUTO and queued["instruction"] == "🤖 AI 가 다음 전개를 정해 이어 써."
+        assert store.get_owned_story(owner, sid)["auto_continue"] is False, "one-off turn does not switch the chain on"
 
 
 SCENARIOS = {

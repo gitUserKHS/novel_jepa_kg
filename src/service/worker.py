@@ -31,7 +31,18 @@ from src.memory.story_rag import (
     split_story_memory,
 )
 from src.service.artifacts import ActiveModelUnavailable, load_active_manifest
-from src.service.consumer_store import CREATIVITY_LEVELS, MAINTENANCE_ACTIVE, ConsumerStore
+from src.service.auto_continue import (
+    AUTO_FALLBACK_DIRECTION,
+    AUTO_PLACEHOLDER,
+    propose_next_direction,
+)
+from src.service.consumer_store import (
+    CREATIVITY_LEVELS,
+    JOB_ORIGIN_AUTO,
+    MAINTENANCE_ACTIVE,
+    ConsumerStore,
+    ConsumerStoreError,
+)
 from src.service.job_lock import ServiceBusyError, acquire_lock_file, acquire_project_job
 from src.service.runtime import make_llm_client
 from src.service.story_sheets import character_sheet, style_guide, world_sheet
@@ -227,6 +238,13 @@ class ConsumerWorker:
         before_chars, before_sections = draft_progress(workspace)
         self.store.sync_story_progress(story_id, before_chars, before_sections)
         self.store.set_job_start_section_count(job_id, before_sections)
+        if str(job.get("origin") or "") == JOB_ORIGIN_AUTO:
+            # 자동 턴: 사람이 적은 지시가 없으니 이야기 지도와 요약 메모리를 보고 다음 전개를 정한다.
+            # 정한 문장을 작업에 남겨 말풍선에 보이게 한다 — 무엇을 시켰는지 언제든 읽을 수 있어야 한다.
+            direction = propose_next_direction(self.client_factory(self.config), self.config, story, workspace)
+            job["instruction"] = direction or AUTO_FALLBACK_DIRECTION
+            self.store.set_job_instruction(job_id, str(job["instruction"]))
+            logger.info("Auto turn for story %s: %s", story_id, job["instruction"])
         characters = character_sheet(story)
         world = world_sheet(story)
         # 집필 지침은 Qwen 생성기만 받는다. 레거시(ollama) 생성기에는 그 인자가 없다.
@@ -309,6 +327,9 @@ class ConsumerWorker:
                 "jepa_retrieval_score": float(planner.get("retrieval_mean_score", 0.0)),
                 "story_memory_retrievals": int(planner.get("story_memory_retrievals", 0)),
                 "repetition_retries": int(planner.get("turn_repetition_retries", 0)),
+                "repetition_trims": int(planner.get("turn_repetition_trims", 0)),
+                # 이 턴에서 게이트가 한 일 (걷어냄 / 다시 씀) — 끝난 턴 아래에 그대로 보여 준다.
+                "retry_notes": [str(item) for item in planner.get("turn_retry_reasons", [])][-12:],
                 "stability_retries": int(planner.get("turn_stability_retries", 0)),
                 "stability_retry_successes": int(
                     planner.get("turn_stability_retry_successes", 0)
@@ -343,10 +364,36 @@ class ConsumerWorker:
                 recoverable=after_section_count > before_sections,
             )
             self.store.heartbeat_worker(self.worker_id, "idle")
+            return
+        # 끝난 턴 바깥에서 잇는다: 여기서 무엇이 잘못돼도 방금 끝난 턴이 실패로 바뀌면 안 된다.
+        try:
+            self._maybe_continue(story_id, job, bool(job_metrics["novel_completed"]))
+        except Exception:  # noqa: BLE001
+            logger.exception("Auto continue for story %s failed", story_id)
         finally:
             # Committed sections live in draft.md; leaving the live tail behind
             # would double them in the reader's view.
             live.reset()
+
+    def _maybe_continue(self, story_id: str, job: dict[str, Any], novel_completed: bool) -> None:
+        """자동 이어쓰기가 켜진 작품이면 같은 설정으로 다음 턴을 넣는다. 완결·상한·점검이면 멈춘다."""
+        story = self.store.get_story(story_id)
+        if story is None or not story.get("auto_continue") or novel_completed or story.get("completed_at"):
+            return
+        limit = max(1, int(self.config.consumer.auto_continue_max_turns))
+        streak = self.store.consecutive_auto_jobs(story_id)
+        if streak >= limit:
+            logger.info("Auto continue for story %s stopped after %d turns (limit %d)", story_id, streak, limit)
+            self.store.set_auto_continue(str(story["owner_id"]), story_id, False)
+            return
+        try:
+            self.store.enqueue_job(
+                str(story["owner_id"]), story_id, instruction=AUTO_PLACEHOLDER,
+                creativity_profile=str(job["creativity_profile"]), requested_chars=int(job["requested_chars"]),
+                origin=JOB_ORIGIN_AUTO,
+            )
+        except (ConsumerStoreError, ValueError) as exc:
+            logger.warning("Auto continue for story %s could not enqueue: %s", story_id, exc)
 
     def run_forever(self) -> None:
         logger.info("Consumer worker %s started", self.worker_id)

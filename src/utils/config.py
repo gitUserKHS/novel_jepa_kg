@@ -233,6 +233,8 @@ class ConsumerConfig(BaseModel):
     worker_lock_path: str = ".runtime/consumer.worker.lock"
     worker_heartbeat_sec: float = 5.0
     stale_job_sec: int = 90
+    # 자동 이어쓰기: 사람이 다음 전개를 적지 않아도 워커가 연달아 넣는 턴의 상한 (폭주 방지).
+    auto_continue_max_turns: int = 20
     allowed_turn_chars: list[int] = Field(default_factory=lambda: [2000, 3000, 5000])
     default_turn_chars: int = 3000
     min_target_chars: int = 10000

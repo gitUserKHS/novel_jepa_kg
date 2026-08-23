@@ -213,6 +213,15 @@
 - [x] 원고 편집 (2026-08-23): `src/service/story_editor.py` — 장 단위 직접 수정 / AI 퇴고 스트림(기본 모델,
       strict 한국어 필터) / 요약 메모리 재추출·직접 편집. 저장 시 draft·memory·ledger·state.json·DB 진행 지표를
       함께 갱신, 집필 중이면 거부(`get_editable_story`). UI: `✏️ 원고 수정` 패널(폴링 fragment 바깥) + 장별 `✏️`.
+- [x] 자동 이어쓰기 (2026-08-24): `stories.auto_continue` + `jobs.origin('user'|'auto')`. 워커가 턴을 마치면
+      `_maybe_continue` 가 같은 설정으로 자동 턴을 넣고, 자동 턴을 집을 때 `auto_continue.propose_next_direction`
+      (이야기 지도의 다음 beat + 계층 요약 + 미해결 단서 → 지시 한두 문장) 으로 지시를 채워 말풍선에 남긴다.
+      완결·`auto_continue_max_turns`(기본 20)·점검이면 멈춤. UI: 켜기/끄기 + `다음 한 턴만 AI 에게`.
+- [x] 게이트 재생성 투명화 (2026-08-24): 실측 사례 "4장: 같은 구절이 6회 반복됨" — 재생성 때 실시간 본문이
+      설명 없이 지워져 "장이 날아간" 것으로 보였다. 반복만 문제면 `trim_repetitions` 로 걷어내고 채택(재생성
+      없음), 재생성 시 사유·버려진 초안·채택 결정을 `live_note.json` 으로 화면에 전달(`LiveProseWriter.note_section`),
+      끝난 턴엔 `metrics_json.retry_notes`. 버려진 초안 격리는 `test_longform_retry_isolation.py` 가 고정.
+      `enable_stability_retry` 가 이제 Qwen 생성기에도 적용된다.
 - [x] AI 퇴고 품질 실측 (2026-08-23, Qwen3.5-4B, 7월 원고 2천 자 장): 라벨만 주면 복사(유사도 0.99), "짧게
       끊어라" 는 토막·반토막, "분량 유지" 는 다시 복사, 대화 늘리기는 반복 루프. 해법: 요청 유형 3모드(최소/문체/
       부분) + 문체 모드는 `plan_edits`(바꿀 곳 JSON, 잘린 JSON 복구, 1회 재시도) → 계획 반영 재작성 + 분량 범위

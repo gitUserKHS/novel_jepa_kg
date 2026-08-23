@@ -35,6 +35,9 @@ JOB_SUCCEEDED = "succeeded"
 JOB_FAILED = "failed"
 JOB_FAILED_RECOVERABLE = "failed_recoverable"
 OUTSTANDING_JOB_STATUSES = (JOB_QUEUED, JOB_RUNNING)
+JOB_ORIGIN_USER = "user"
+JOB_ORIGIN_AUTO = "auto"
+JOB_ORIGINS = (JOB_ORIGIN_USER, JOB_ORIGIN_AUTO)
 CREATIVITY_LEVELS = {"stable": 0.20, "balanced": 0.35, "bold": 0.50}
 MAINTENANCE_OFF = "0"
 MAINTENANCE_ACTIVE = "1"
@@ -89,6 +92,7 @@ def _public_story(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     value.pop("key_salt", None)
     value.pop("key_hash", None)
     value["research_consent"] = bool(value["research_consent"])
+    value["auto_continue"] = bool(value.get("auto_continue", 0))
     return value
 
 
@@ -167,6 +171,7 @@ class ConsumerStore:
                     protagonist TEXT NOT NULL,
                     characters TEXT NOT NULL DEFAULT '',
                     style_guide TEXT NOT NULL DEFAULT '',
+                    auto_continue INTEGER NOT NULL DEFAULT 0,
                     target_chars INTEGER NOT NULL,
                     current_chars INTEGER NOT NULL DEFAULT 0,
                     section_count INTEGER NOT NULL DEFAULT 0,
@@ -191,6 +196,7 @@ class ConsumerStore:
                     result_section_count INTEGER NOT NULL DEFAULT 0,
                     result_chars INTEGER NOT NULL DEFAULT 0,
                     metrics_json TEXT NOT NULL DEFAULT '{}',
+                    origin TEXT NOT NULL DEFAULT 'user',
                     worker_id TEXT,
                     created_at TEXT NOT NULL,
                     started_at TEXT,
@@ -236,6 +242,13 @@ class ConsumerStore:
             if "style_guide" not in story_columns:
                 # 사용자가 직접 적는 집필 지침(문체·시점·금기). 매 장 프롬프트의 작품 설정에 붙는다.
                 connection.execute("ALTER TABLE stories ADD COLUMN style_guide TEXT NOT NULL DEFAULT ''")
+            if "auto_continue" not in story_columns:
+                # 자동 이어쓰기: 켜 두면 턴이 끝날 때마다 워커가 다음 턴을 스스로 넣는다.
+                connection.execute("ALTER TABLE stories ADD COLUMN auto_continue INTEGER NOT NULL DEFAULT 0")
+            job_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(jobs)").fetchall()}
+            if "origin" not in job_columns:
+                # 누가 넣은 턴인가: 'user' | 'auto'. 자동 턴은 말풍선에 🤖 로 표시되고 연속 상한에 세인다.
+                connection.execute("ALTER TABLE jobs ADD COLUMN origin TEXT NOT NULL DEFAULT 'user'")
             if "completed_at" not in story_columns:
                 connection.execute("ALTER TABLE stories ADD COLUMN completed_at TEXT")
                 # Legacy stories finished under the old char-count rule stay closed.
@@ -505,12 +518,15 @@ class ConsumerStore:
         instruction: str,
         creativity_profile: str,
         requested_chars: int,
+        origin: str = JOB_ORIGIN_USER,
     ) -> dict[str, Any]:
         clean_instruction = instruction.strip()
         if not clean_instruction:
             raise ValueError("다음 전개 지시를 입력해줘.")
         if creativity_profile not in CREATIVITY_LEVELS:
             raise ValueError("지원하지 않는 창의성 단계야.")
+        if origin not in JOB_ORIGINS:
+            raise ValueError("지원하지 않는 요청 출처야.")
         if requested_chars not in self.config.consumer.allowed_turn_chars:
             raise ValueError("한 턴 분량은 2,000자, 3,000자, 5,000자 중에서 골라줘.")
 
@@ -534,8 +550,8 @@ class ConsumerStore:
                     """
                     INSERT INTO jobs(
                         story_id, instruction, creativity_profile, requested_chars, status,
-                        start_section_count, created_at
-                    ) VALUES(?, ?, ?, ?, 'queued', ?, ?)
+                        start_section_count, origin, created_at
+                    ) VALUES(?, ?, ?, ?, 'queued', ?, ?, ?)
                     """,
                     (
                         story_id,
@@ -543,6 +559,7 @@ class ConsumerStore:
                         creativity_profile,
                         requested_chars,
                         int(story["section_count"]),
+                        origin,
                         now,
                     ),
                 )
@@ -586,6 +603,43 @@ class ConsumerStore:
             )
             claimed = connection.execute("SELECT * FROM jobs WHERE id = ?", (int(row["id"]),)).fetchone()
         return _row_dict(claimed)
+
+    def set_job_instruction(self, job_id: int, instruction: str) -> None:
+        """자동 턴의 자리표시 문구를 워커가 정한 실제 전개 지시로 바꾼다."""
+        clean = " ".join(str(instruction or "").split())
+        if not clean:
+            return
+        with self.connect() as connection:
+            connection.execute("UPDATE jobs SET instruction = ? WHERE id = ?", (clean, job_id))
+
+    def consecutive_auto_jobs(self, story_id: str) -> int:
+        """가장 최근 턴부터 거슬러, 사람이 넣은 턴을 만날 때까지 이어진 자동 턴의 수."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT origin FROM jobs WHERE story_id = ? ORDER BY id DESC LIMIT 200", (story_id,)
+            ).fetchall()
+        count = 0
+        for row in rows:
+            if str(row["origin"]) != JOB_ORIGIN_AUTO:
+                break
+            count += 1
+        return count
+
+    def set_auto_continue(self, owner_id: str, story_id: str, enabled: bool) -> dict[str, Any]:
+        """자동 이어쓰기 켜기/끄기. 끄면 지금 돌고 있는 턴은 끝까지 쓰고 거기서 멈춘다."""
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE stories SET auto_continue = ?, updated_at = ?
+                WHERE id = ? AND owner_id = ? AND deleted_at IS NULL
+                """,
+                (1 if enabled else 0, iso_time(), story_id, owner_id),
+            )
+        if not cursor.rowcount:
+            raise AuthorizationError("이 계정에서 바꿀 수 없는 작품이야.")
+        story = self.get_owned_story(owner_id, story_id)
+        assert story is not None
+        return story
 
     def get_job(self, job_id: int) -> dict[str, Any] | None:
         with self.connect() as connection:

@@ -18,6 +18,7 @@ from typing import Any
 
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit.errors import StreamlitAPIException
 
 from src.llm.local_client import LocalLLMError
 from src.service.chat_store import TITLE_CHARS, ChatStore, ChatStoreError, export_chat_markdown
@@ -26,11 +27,13 @@ from src.service.consumer_store import (
     JOB_FAILED_RECOVERABLE,
     JOB_QUEUED,
     JOB_RUNNING,
+    JOB_ORIGIN_AUTO,
     JOB_SUCCEEDED,
     AccountExistsError,
     ConsumerStore,
     ConsumerStoreError,
 )
+from src.service.auto_continue import AUTO_PLACEHOLDER
 from src.service.runtime import make_llm_client
 from src.service.story_editor import (
     QUICK_REWRITES,
@@ -58,6 +61,7 @@ from src.service.story_workspace import (
     StoryWorkspace,
     build_continuation_bundle,
     read_draft,
+    read_live_note,
     read_live_prose,
     split_sections,
 )
@@ -185,6 +189,8 @@ def _styles() -> None:
         .outline-label { color: var(--jade-dark); font-size: 0.76rem; font-weight: 750; }
         .outline-text { color: var(--ink); font-size: 0.93rem; margin-top: 0.15rem; }
         .queue-note { border-left: 4px solid var(--coral); padding: 0.3rem 0.8rem; color: var(--ink); }
+        .discarded-draft { color: var(--muted); white-space: pre-wrap; font-size: 0.92rem; line-height: 1.6; }
+        .auto-note { border-left: 3px solid var(--jade); background: #eef3ef; padding: 0.5rem 0.8rem; font-size: 0.9rem; }
         .card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem 1.2rem; }
         .card-item b { color: var(--jade-dark); font-size: 0.8rem; letter-spacing: 0.04em; }
         .card-item div { white-space: pre-wrap; font-size: 0.93rem; }
@@ -957,13 +963,45 @@ def _typewriter(job_id: int, live_prose: str) -> None:
     st.session_state[key] = live_prose
 
 
+def _job_retry_notes(job: dict[str, Any]) -> list[str]:
+    """끝난 턴에서 게이트가 한 일 — 워커가 metrics_json.retry_notes 에 남긴다."""
+    try:
+        metrics = json.loads(str(job.get("metrics_json") or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        return []
+    notes = metrics.get("retry_notes") if isinstance(metrics, dict) else None
+    return [str(item) for item in notes][:12] if isinstance(notes, list) else []
+
+
+def _render_live_note(note: dict[str, Any] | None) -> None:
+    """실시간 본문이 왜 사라졌는지: 게이트 사유, 버려진 초안, 걷어낸 문장 수, 채택 결정."""
+    if not note:
+        return
+    kind = str(note.get("kind") or "")
+    text = str(note.get("text") or "").strip()
+    discarded = str(note.get("discarded") or "").strip()
+    if kind == "retry":
+        st.warning(f"🔁 {text} — 이 장을 다시 쓰는 중이야. 아래 초안은 저장되지 않고, 다시 쓸 때 참고하지도 않아.")
+    elif kind == "trim":
+        st.caption(f"✂️ {text}")
+    elif kind == "decision":
+        st.caption(f"🔁 {text}")
+    if discarded:
+        with st.expander("버려진 초안 보기 (저장되지 않음)"):
+            st.markdown(f'<div class="discarded-draft">{html.escape(discarded)}</div>', unsafe_allow_html=True)
+
+
 def _render_job(job: dict[str, Any], sections: list[str], store: ConsumerStore, user_id: str,
-                story_id: str = "", live_prose: str = "") -> None:
+                story_id: str = "", live_prose: str = "", note: dict[str, Any] | None = None) -> None:
     status = str(job["status"])
     job_id = int(job["id"])
     with st.chat_message("user"):
         instruction_column, delete_column = st.columns([9, 1], vertical_alignment="top")
-        instruction_column.markdown(str(job["instruction"]))
+        auto_turn = str(job.get("origin") or "") == JOB_ORIGIN_AUTO
+        instruction = str(job["instruction"])
+        if auto_turn and not instruction.startswith("🤖"):
+            instruction = "🤖 " + instruction  # AI 가 정한 전개 — 사람이 적은 턴과 구분
+        instruction_column.markdown(instruction)
         if story_id and status not in (JOB_QUEUED, JOB_RUNNING):
             if delete_column.button("✕", key=f"delete_job_{job_id}", type="tertiary", help="이 턴과 이 턴이 쓴 원고를 함께 지워."):
                 try:
@@ -971,7 +1009,7 @@ def _render_job(job: dict[str, Any], sections: list[str], store: ConsumerStore, 
                 except ConsumerStoreError as exc:
                     st.error(str(exc))
                 else:
-                    st.rerun(scope="fragment")
+                    _rerun_live()
     with st.chat_message("assistant"):
         if status == JOB_SUCCEEDED:
             st.session_state.pop(f"consumer_typed_{job_id}", None)
@@ -989,6 +1027,8 @@ def _render_job(job: dict[str, Any], sections: list[str], store: ConsumerStore, 
                         st.rerun()
             else:
                 st.caption("이 턴의 원고는 전체 원고 파일에 저장되어 있어.")
+            for line in _job_retry_notes(job):
+                st.caption(("✂️ " if "걷어냄" in line else "🔁 ") + line)
         elif status == JOB_QUEUED:
             position = store.queue_position(user_id, job_id)
             st.markdown(f'<div class="queue-note">대기 순번 {position or "-"}번 · 요청을 안전하게 보관했어.</div>',
@@ -998,6 +1038,7 @@ def _render_job(job: dict[str, Any], sections: list[str], store: ConsumerStore, 
             committed = sections[start:]
             for section in committed:
                 st.markdown(section)
+            _render_live_note(note)
             if live_prose:
                 _typewriter(job_id, live_prose)
                 st.caption("✍️ 집필하는 중이야. 브라우저를 닫아도 작업은 계속돼.")
@@ -1061,6 +1102,66 @@ def _settings_form(config: AppConfig, store: ConsumerStore, user_id: str, story:
             st.rerun()
 
 
+def _rerun_live() -> None:
+    """집필 화면(fragment) 안에서의 새로고침. 브라우저에서는 fragment 만 다시 돌고, AppTest 처럼 전체 실행 중이면
+    scope="fragment" 가 거부되므로 전체 새로고침으로 물러난다."""
+    try:
+        st.rerun(scope="fragment")
+    except StreamlitAPIException:
+        st.rerun()
+
+
+def _enqueue_auto_turn(store: ConsumerStore, user_id: str, story_id: str, creativity: str, turn_chars: int) -> bool:
+    """AI 가 전개를 정하는 턴 하나를 큐에 넣는다. 지시는 워커가 집을 때 채운다."""
+    try:
+        store.enqueue_job(user_id, story_id, instruction=AUTO_PLACEHOLDER, creativity_profile=creativity,
+                          requested_chars=turn_chars, origin=JOB_ORIGIN_AUTO)
+    except (ValueError, ConsumerStoreError) as exc:
+        st.error(str(exc))
+        return False
+    return True
+
+
+def _auto_controls(config: AppConfig, store: ConsumerStore, user_id: str, story: dict[str, Any], *,
+                   outstanding: dict[str, Any] | None, completed: bool, blocked: str, creativity: str,
+                   turn_chars: int) -> None:
+    """자동 이어쓰기: 켜 두면 워커가 턴이 끝날 때마다 AI 가 정한 전개로 다음 턴을 넣는다 (완결까지)."""
+    story_id = str(story["id"])
+    auto_on = bool(story.get("auto_continue"))
+    limit = int(config.consumer.auto_continue_max_turns)
+    left, right = st.columns([1.4, 1], vertical_alignment="center")
+    if auto_on:
+        left.markdown(
+            '<div class="auto-note">🤖 <b>자동 이어쓰기 켜짐</b> — 턴이 끝나면 AI 가 다음 전개를 정해 바로 이어 써. '
+            f'완결되거나 연속 {limit}턴이 되면 멈춰. 직접 전개를 적어 끼어들어도 돼.</div>',
+            unsafe_allow_html=True,
+        )
+        if right.button("자동 이어쓰기 끄기", key="auto_off", width="stretch",
+                        help="지금 쓰는 턴은 끝까지 쓰고 거기서 멈춰."):
+            try:
+                store.set_auto_continue(user_id, story_id, False)
+            except ConsumerStoreError as exc:
+                st.error(str(exc))
+            else:
+                _rerun_live()
+        return
+    if left.button("🤖 자동 이어쓰기 켜기", key="auto_on", width="stretch", disabled=completed or store.is_maintenance(),
+                   help="사람이 다음 전개를 적지 않아도 AI 가 정해서 완결까지 이어 써. 언제든 끌 수 있어."):
+        try:
+            store.set_auto_continue(user_id, story_id, True)
+        except ConsumerStoreError as exc:
+            st.error(str(exc))
+        else:
+            # 기다리는 턴이 없으면 바로 첫 자동 턴을 넣는다 — 켰는데 아무 일도 안 일어나면 안 되니까.
+            if outstanding is None:
+                _enqueue_auto_turn(store, user_id, story_id, creativity, turn_chars)
+            _rerun_live()
+    if right.button("🤖 다음 한 턴만 AI 에게", key="auto_once", width="stretch", disabled=bool(blocked),
+                    help="이번 턴의 전개만 AI 가 정한다. 그 뒤는 다시 네가."):
+        if _enqueue_auto_turn(store, user_id, story_id, creativity, turn_chars):
+            _rerun_live()
+
+
 @st.fragment(run_every=1.0)
 def _story_live(config: AppConfig, store: ConsumerStore, client: Any, user_id: str, story_id: str) -> None:
     story = store.get_owned_story(user_id, story_id)
@@ -1071,6 +1172,7 @@ def _story_live(config: AppConfig, store: ConsumerStore, client: Any, user_id: s
     draft = read_draft(workspace.draft)
     sections = split_sections(draft)
     live_prose = read_live_prose(workspace)
+    live_note = read_live_note(workspace)
     jobs = list(reversed(store.list_owned_jobs(user_id, story_id)))
     outstanding = store.owned_outstanding_job(user_id, story_id)
     queue = store.queue_stats()
@@ -1108,9 +1210,9 @@ def _story_live(config: AppConfig, store: ConsumerStore, client: Any, user_id: s
                 except ConsumerStoreError as exc:
                     st.error(str(exc))
                 else:
-                    st.rerun(scope="fragment")
+                    _rerun_live()
         for job in jobs:
-            _render_job(job, sections, store, user_id, story_id=story_id, live_prose=live_prose)
+            _render_job(job, sections, store, user_id, story_id=story_id, live_prose=live_prose, note=live_note)
     else:
         with st.chat_message("assistant"):
             st.markdown("첫 장면에서 일어날 사건이나 원하는 분위기를 말해줘.")
@@ -1141,6 +1243,10 @@ def _story_live(config: AppConfig, store: ConsumerStore, client: Any, user_id: s
     elif len(draft) >= int(story["target_chars"]):
         st.caption("목표 분량에 도달했어. 다음 요청에서 결말 장면까지 완성할게.")
 
+    _auto_controls(config, store, user_id, story, outstanding=outstanding, completed=completed,
+                   blocked=blocked_reason, creativity=CREATIVITY_LABELS.get(str(creativity_label), "balanced"),
+                   turn_chars=int(turn_chars))
+
     prompt = st.chat_input("다음 전개를 말해줘 (예: 박 노인이 20년 전 일을 털어놓게 해줘)",
                            disabled=bool(blocked_reason), key="consumer_chat_input")
     if prompt:
@@ -1148,7 +1254,7 @@ def _story_live(config: AppConfig, store: ConsumerStore, client: Any, user_id: s
             store.enqueue_job(user_id, story_id, instruction=prompt,
                               creativity_profile=CREATIVITY_LABELS.get(str(creativity_label), "balanced"),
                               requested_chars=int(turn_chars))
-            st.rerun(scope="fragment")
+            _rerun_live()
         except (ValueError, ConsumerStoreError) as exc:
             st.error(str(exc))
 
@@ -1176,7 +1282,7 @@ def _story_live(config: AppConfig, store: ConsumerStore, client: Any, user_id: s
                 except ConsumerStoreError as exc:
                     st.error(str(exc))
                 else:
-                    st.rerun(scope="fragment")
+                    _rerun_live()
         with delete_column:
             st.markdown("**작품 삭제**")
             st.caption("작품과 원고를 데이터베이스에서 완전히 지우고 목록에서 없애.")
