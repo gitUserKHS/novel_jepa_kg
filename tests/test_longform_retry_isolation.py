@@ -166,6 +166,19 @@ class RetryIsolationTests(unittest.TestCase):
         self.assertNotIn("restart", [event[0] for event in recorder.events])
         self.assertEqual(client.memory_prompts[0].count(LOOP), 1, "memory is extracted from the trimmed prose")
 
+    def test_loop_that_hit_the_token_cap_is_trimmed_and_its_tail_closed(self) -> None:
+        # 반복 + 마지막 문장 미완: 루프가 토큰 상한까지 돈 전형적인 모양. 걷어낸 뒤 마지막 완결 문장까지 되돌린다.
+        looped = _prose("cap", chars=1500) + "\n\n" + " ".join([LOOP] * 9) + " 그리고 문장이 끊겨"
+        client = ScriptedClient([looped])
+        recorder = Recorder()
+        result = self._run(client, recorder)
+        self.assertEqual(len(client.prose_prompts), 1, "no rewrite")
+        self.assertEqual(result["planner"]["turn_repetition_trims"], 1)
+        draft = self._draft()
+        self.assertEqual(draft.count(LOOP), 1)
+        self.assertNotIn("문장이 끊겨", draft, "the unfinished tail is dropped")
+        self.assertIn("끝으로 cap 하린은", draft)
+
     def test_trim_that_leaves_too_little_falls_back_to_a_rewrite(self) -> None:
         mostly_loop = "### 장면 loop\n\n" + " ".join([LOOP] * 40) + " 하린은 등대를 올려다보았다."
         client = ScriptedClient([mostly_loop, _prose(KEPT_MARK)])

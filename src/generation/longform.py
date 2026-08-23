@@ -154,6 +154,7 @@ def _normalize_section(raw: str, index: int) -> str:
 
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？…])\s+")
 REPEAT_KEY_CHARS = 12  # 이보다 짧은 문장("응.", "그래.")은 정당하게 되풀이될 수 있어 세지 않는다
+TRIMMABLE_ISSUES = ("같은 구절", "마지막 문장")  # 걷어내기로 풀 수 있는 심각 문제
 
 
 def trim_repetitions(section: str) -> tuple[str, int]:
@@ -675,10 +676,15 @@ def generate_longform(
             gate_kwargs = dict(previous_body=previous_body, characters=characters, prior_titles=titles,
                                minimum_chars=minimum_chars, consumed_beats=consumed, memory=None, genre=genre)
             check = assess_section(candidate, **gate_kwargs)
-            if check.hard and all(issue.startswith("같은 구절") for issue in check.hard):
+            if check.hard and all(issue.startswith(TRIMMABLE_ISSUES) for issue in check.hard) and any(
+                issue.startswith("같은 구절") for issue in check.hard
+            ):
                 # 반복 루프만 문제면 되풀이된 문장을 걷어내고 다시 검사한다 — 전개를 지키고 재생성 시간을 아낀다.
+                # 루프가 토큰 상한까지 돌면 마지막 문장이 끊기기 마련이라(08-24 실측: "66회 반복 + 미완"), 그 조합도
+                # 걷어낸 뒤 마지막 완결 문장까지 되돌려 본다.
                 trimmed, removed = trim_repetitions(candidate)
                 if trimmed and removed:
+                    trimmed = "### " + _section_title(trimmed, section_index) + "\n\n" + _trim_to_last_sentence(_section_body(trimmed))
                     trimmed_check = assess_section(trimmed, **gate_kwargs)
                     if not trimmed_check.hard:
                         counters["repetition_trim_count"] += 1

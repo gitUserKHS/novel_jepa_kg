@@ -241,7 +241,10 @@ class ConsumerWorker:
         if str(job.get("origin") or "") == JOB_ORIGIN_AUTO:
             # 자동 턴: 사람이 적은 지시가 없으니 이야기 지도와 요약 메모리를 보고 다음 전개를 정한다.
             # 정한 문장을 작업에 남겨 말풍선에 보이게 한다 — 무엇을 시켰는지 언제든 읽을 수 있어야 한다.
-            direction = propose_next_direction(self.client_factory(self.config), self.config, story, workspace)
+            previous = [str(item["instruction"]) for item in reversed(self.store.list_jobs(story_id, limit=8))
+                        if int(item["id"]) != job_id]
+            direction = propose_next_direction(self.client_factory(self.config), self.config, story, workspace,
+                                               previous_directions=previous)
             job["instruction"] = direction or AUTO_FALLBACK_DIRECTION
             self.store.set_job_instruction(job_id, str(job["instruction"]))
             logger.info("Auto turn for story %s: %s", story_id, job["instruction"])

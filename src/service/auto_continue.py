@@ -29,8 +29,13 @@ DIRECTION_SYSTEM_PROMPT = (
 MAX_DIRECTION_CHARS = 200
 
 
-def propose_next_direction(client: Any, config: AppConfig, story: dict[str, Any], workspace: StoryWorkspace) -> str:
-    """다음 턴의 전개 지시 한두 문장. 모델이 없거나 실패하면 빈 문자열 (호출자가 AUTO_FALLBACK_DIRECTION 을 쓴다)."""
+def propose_next_direction(client: Any, config: AppConfig, story: dict[str, Any], workspace: StoryWorkspace,
+                           previous_directions: list[str] | None = None) -> str:
+    """다음 턴의 전개 지시 한두 문장. 모델이 없거나 실패하면 빈 문자열 (호출자가 AUTO_FALLBACK_DIRECTION 을 쓴다).
+
+    previous_directions: 앞서 (사람이든 AI 든) 시킨 전개들. 08-24 실측: 이게 없으면 4B 가 직전 지시와 같은 소재를
+    다시 고르고("비밀이 담긴 그림" 연타) 본문이 직전 장을 되풀이한다.
+    """
     sections = split_sections(read_draft(workspace.draft))
     memories = load_story_memories(workspace.memory)
     outline = load_story_outline(workspace.outline)
@@ -52,17 +57,21 @@ def propose_next_direction(client: Any, config: AppConfig, story: dict[str, Any]
     else:
         context, open_clues = "(아직 쓴 장이 없다 — 첫 장면이다)", "(없음)"
     remaining = max(0, overall_target - len("\n\n".join(sections)))
-    prompt = "\n".join([
+    asked = [" ".join(str(item).split()) for item in (previous_directions or []) if str(item).strip()]
+    asked = [item for item in asked if not item.startswith("🤖 AI 가")][-6:]
+    prompt = "\n".join(part for part in [
         "[작품 설정]", world_sheet(story),
         "[인물 — 이 이름들만 쓴다]", character_sheet(story),
         f"[이야기 지도 — {next_index}장이 맡을 단계]", beat_text.strip(),
         "[지금까지의 줄거리와 현재 상태]", context.strip(),
         f"[직전 장의 미해결 단서] {open_clues}",
+        ("[이미 시킨 전개 — 같은 소재·같은 사건을 다시 고르지 않는다]" + "\n" + "\n".join(f"- {item}" for item in asked))
+        if asked else None,
         f"[남은 분량] 약 {remaining:,}자 (0에 가까우면 결말로 수렴한다)",
         f"{next_index}장에서 일어날 사건을 한두 문장으로 정한다. 작가가 편집자에게 지시하듯 '누가 무엇을 하게 한다' 로 "
         "구체적으로 쓴다 (예: 박 노인이 20년 전 일을 털어놓게 해줘). 지나간 사건을 되풀이하지 않고 이야기 지도의 "
         "단계를 한 걸음 옮긴다. 새 인물·새 설정을 만들지 않는다. 한국어로 지시 문장만 출력한다 (제목·해설·따옴표 없이).",
-    ])
+    ] if part is not None)
     try:
         raw = client.chat(prompt, system=DIRECTION_SYSTEM_PROMPT, temperature=0.7, max_tokens=160, korean_filter=True)
     except Exception as exc:  # noqa: BLE001 - 전개 제안은 보조 단계, 실패하면 기본 지시로 이어 쓴다

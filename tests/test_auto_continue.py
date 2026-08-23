@@ -164,7 +164,30 @@ class AutoContinueTests(unittest.TestCase):
         self.assertIn("심층 구역 좌표", prompt)
         self.assertIn("서윤이 장치를 켰다", prompt)
         self.assertIn("남은 분량", prompt)
+        self.assertNotIn("이미 시킨 전개", prompt, "nothing asked before -> no block")
         self.assertEqual(propose_next_direction(PlannerClient(fail=True), self.config, self.store.get_story(self.sid), workspace), "")
+
+    def test_previous_directions_are_listed_so_the_planner_does_not_repeat_them(self) -> None:
+        workspace = StoryWorkspace.for_story(self.config, self.sid, create=True)
+        planner = PlannerClient("선아가 유리의 작업실을 찾아가게 해줘.")
+        propose_next_direction(planner, self.config, self.store.get_story(self.sid), workspace,
+                               previous_directions=["첫 만남을 그려줘", AUTO_PLACEHOLDER, "유리가 비밀을 털어놓게 해줘.", "  "])
+        prompt = planner.prompts[0]
+        self.assertIn("[이미 시킨 전개 — 같은 소재·같은 사건을 다시 고르지 않는다]", prompt)
+        self.assertIn("- 첫 만남을 그려줘", prompt)
+        self.assertIn("- 유리가 비밀을 털어놓게 해줘.", prompt)
+        self.assertNotIn(AUTO_PLACEHOLDER, prompt, "placeholders and blanks are not 'asked' directions")
+
+    def test_worker_passes_earlier_turns_to_the_planner(self) -> None:
+        planner = PlannerClient()
+        worker = self._worker(planner)
+        self.store.enqueue_job(self.uid, self.sid, instruction="유리가 비밀을 털어놓게 해줘.", creativity_profile="balanced",
+                               requested_chars=2000)
+        self.assertTrue(worker.process_one())
+        self.store.enqueue_job(self.uid, self.sid, instruction=AUTO_PLACEHOLDER, creativity_profile="balanced",
+                               requested_chars=2000, origin=JOB_ORIGIN_AUTO)
+        self.assertTrue(worker.process_one())
+        self.assertIn("- 유리가 비밀을 털어놓게 해줘.", planner.prompts[-1])
 
     def test_clean_direction(self) -> None:
         self.assertEqual(clean_direction("```\n박 노인이 털어놓게 해줘.\n```"), "박 노인이 털어놓게 해줘.")
