@@ -25,7 +25,8 @@ class ChatStoreError(RuntimeError):
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    # 마이크로초까지: 같은 초 안에서 만든 대화를 '맨 위로 올리기' 가 확정적으로 동작하도록.
+    return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
 class ChatStore:
@@ -95,16 +96,47 @@ class ChatStore:
             ).fetchone()
         return dict(row) if row else None
 
-    def list_chats(self, owner_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    def list_chats(self, owner_id: str, *, limit: int = 200, query: str = "") -> list[dict[str, Any]]:
+        """최근 순 대화 목록. query 가 있으면 제목이나 메시지 본문에 그 말이 들어간 대화만."""
+        needle = " ".join(query.split())
+        params: list[Any] = [owner_id]
+        where = "c.owner_id = ?"
+        if needle:
+            pattern = "%" + needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            where += (
+                " AND (c.title LIKE ? ESCAPE '\\' OR EXISTS ("
+                "SELECT 1 FROM chat_messages m WHERE m.chat_id = c.id AND m.content LIKE ? ESCAPE '\\'))"
+            )
+            params.extend([pattern, pattern])
+        params.append(int(limit))
         with self.connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT c.*, (SELECT COUNT(*) FROM chat_messages m WHERE m.chat_id = c.id) AS message_count
-                FROM chats c WHERE c.owner_id = ? ORDER BY c.updated_at DESC LIMIT ?
+                FROM chats c WHERE {where} ORDER BY c.updated_at DESC, c.rowid DESC LIMIT ?
                 """,
-                (owner_id, int(limit)),
+                params,
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def find_empty_chat(self, owner_id: str) -> dict[str, Any] | None:
+        """메시지가 하나도 없는 가장 최근 대화. '새 대화' 를 눌렀을 때 빈 대화를 쌓지 않으려고 쓴다."""
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT c.* FROM chats c
+                WHERE c.owner_id = ? AND NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.chat_id = c.id)
+                ORDER BY c.updated_at DESC, c.rowid DESC LIMIT 1
+                """,
+                (owner_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def touch_chat(self, owner_id: str, chat_id: str) -> None:
+        """목록 맨 위로 올린다 (updated_at 갱신)."""
+        self._require(owner_id, chat_id)
+        with self.connect() as connection:
+            connection.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (_now(), chat_id))
 
     def rename_chat(self, owner_id: str, chat_id: str, title: str) -> None:
         self._require(owner_id, chat_id)
@@ -123,6 +155,12 @@ class ChatStore:
         self._require(owner_id, chat_id)
         with self.connect() as connection:
             connection.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+
+    def delete_all_chats(self, owner_id: str) -> int:
+        """계정의 대화를 전부 지우고 지운 개수를 돌려준다."""
+        with self.connect() as connection:
+            cursor = connection.execute("DELETE FROM chats WHERE owner_id = ?", (owner_id,))
+        return int(cursor.rowcount or 0)
 
     # ---- messages -------------------------------------------------------------------------
     def list_messages(self, owner_id: str, chat_id: str) -> list[dict[str, Any]]:
@@ -155,6 +193,19 @@ class ChatStore:
             message_id = int(cursor.lastrowid)
         return {"id": message_id, "role": role, "content": text, "created_at": now}
 
+    def delete_messages_from(self, owner_id: str, chat_id: str, message_id: int) -> int:
+        """그 메시지와 그 뒤의 메시지를 모두 지우고 지운 개수를 돌려준다.
+
+        '답변 다시 생성' (마지막 답변만 해당) 과 '메시지 고쳐서 다시 보내기' (그 질문부터 뒤를 버림) 가 쓴다.
+        """
+        self._require(owner_id, chat_id)
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM chat_messages WHERE chat_id = ? AND id >= ?", (chat_id, int(message_id))
+            )
+            connection.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (_now(), chat_id))
+        return int(cursor.rowcount or 0)
+
     def delete_message_pair(self, owner_id: str, chat_id: str, message_id: int) -> None:
         """사용자 메시지와 그 바로 다음 답변을 함께 지운다."""
         self._require(owner_id, chat_id)
@@ -173,7 +224,14 @@ class ChatStore:
                 if nxt is not None and nxt["role"] == "assistant":
                     ids.append(int(nxt["id"]))
             connection.executemany("DELETE FROM chat_messages WHERE id = ?", [(i,) for i in ids])
-            connection.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (_now(), chat_id))
+            remaining = connection.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE chat_id = ?", (chat_id,)
+            ).fetchone()[0]
+            if int(remaining or 0) == 0:
+                # 빈 대화는 '새 대화' 로 돌아간다 — 다음 첫 질문이 제목이 되고, 새 대화 재사용 대상이 된다.
+                connection.execute("UPDATE chats SET updated_at = ?, title = '새 대화' WHERE id = ?", (_now(), chat_id))
+            else:
+                connection.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (_now(), chat_id))
 
     def clear_messages(self, owner_id: str, chat_id: str) -> None:
         self._require(owner_id, chat_id)
@@ -186,3 +244,21 @@ class ChatStore:
         if chat is None:
             raise ChatStoreError("이 계정에서 열 수 없는 대화야.")
         return chat
+
+
+def export_chat_markdown(chat: dict[str, Any], messages: list[dict[str, Any]]) -> str:
+    """대화를 내려받기용 마크다운으로 만든다."""
+    lines = [f"# {chat.get('title', '대화')}", ""]
+    created = str(chat.get("created_at", ""))[:10]
+    if created:
+        lines.append(f"_{created} · 메시지 {len(messages)}개_")
+        lines.append("")
+    for message in messages:
+        speaker = "나" if message.get("role") == "user" else "AI"
+        lines.append(f"**{speaker}**")
+        lines.append("")
+        lines.append(str(message.get("content", "")).rstrip())
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"

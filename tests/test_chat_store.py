@@ -53,6 +53,11 @@ class ChatStoreTests(unittest.TestCase):
         self.store.delete_message_pair(self.user["id"], chat["id"], int(first["id"]))
         remaining = self.store.list_messages(self.user["id"], chat["id"])
         self.assertEqual([m["content"] for m in remaining], ["둘째 질문"])
+        self.assertEqual(self.store.get_chat(self.user["id"], chat["id"])["title"], "말투 실험", "non-empty chat keeps its title")
+        self.store.delete_message_pair(self.user["id"], chat["id"], int(remaining[0]["id"]))
+        self.assertEqual(self.store.get_chat(self.user["id"], chat["id"])["title"], "새 대화",
+                         "an emptied chat goes back to the default title so the next question names it")
+        self.assertEqual(self.store.find_empty_chat(self.user["id"])["id"], chat["id"])
         self.store.clear_messages(self.user["id"], chat["id"])
         self.assertEqual(self.store.list_messages(self.user["id"], chat["id"]), [])
         self.store.delete_chat(self.user["id"], chat["id"])
