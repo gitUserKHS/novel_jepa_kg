@@ -1,11 +1,13 @@
 """이야기 공방 — 소비자 앱 (ChatGPT 식 두 모드: 일반 채팅 / 장편 소설).
 
 - 일반 채팅: 로컬 Qwen 모델 서버에 직접 스트리밍. 대화는 계정별로 저장(ChatStore).
+  사이드바 목록(날짜 묶음·검색), 이름 바꾸기·내보내기·비우기·삭제, 턴 삭제·고쳐 보내기·답변 다시 생성.
 - 장편 소설: 자유로운 말로 기획 대화 → 작품 카드 확정 → 장 단위 연재(큐 + 워커).
 """
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import math
@@ -18,7 +20,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from src.llm.local_client import LocalLLMError
-from src.service.chat_store import ChatStore, ChatStoreError
+from src.service.chat_store import TITLE_CHARS, ChatStore, ChatStoreError, export_chat_markdown
 from src.service.consumer_store import (
     JOB_FAILED,
     JOB_FAILED_RECOVERABLE,
@@ -30,6 +32,28 @@ from src.service.consumer_store import (
     ConsumerStoreError,
 )
 from src.service.runtime import make_llm_client
+from src.service.story_editor import (
+    QUICK_REWRITES,
+    StoryEditError,
+    length_bounds,
+    list_sections,
+    normalize_edit,
+    plan_edits,
+    refresh_section_memory,
+    replace_section,
+    retry_note_for,
+    section_memory,
+    stream_rewrite,
+    update_section_memory,
+)
+from src.service.template_store import (
+    FIELD_LIMITS,
+    TEMPLATE_FIELDS,
+    TEMPLATE_NAME_CHARS,
+    StoryTemplateStore,
+    TemplateStoreError,
+    template_from_story,
+)
 from src.service.story_workspace import (
     StoryWorkspace,
     build_continuation_bundle,
@@ -39,6 +63,7 @@ from src.service.story_workspace import (
 )
 from src.memory.story_outline import load_story_outline
 from src.utils.config import AppConfig, load_config
+from src.utils.timefmt import date_group, local_now, relative_time
 
 
 st.set_page_config(page_title="이야기 공방", page_icon="✦", layout="wide", initial_sidebar_state="expanded")
@@ -55,6 +80,12 @@ STATUS_LABELS = {
     JOB_FAILED_RECOVERABLE: "복구 가능",
 }
 TONE_OPTIONS = {"기본 말투": "", "밝고 귀여운 말투": "cute"}
+SEARCH_THRESHOLD = 5  # 목록이 이만큼 쌓이면 검색창을 보인다
+CHAT_SUGGESTIONS = (
+    "오늘 저녁 메뉴 하나만 골라줘",
+    "정중한 거절 이메일 문장을 다듬어줘",
+    "일주일 동안 할 수 있는 가벼운 운동 계획 짜줘",
+)
 CHAT_SYSTEM_PROMPT = (
     "당신은 친절하고 정확한 한국어 AI 어시스턴트다. 질문에는 간결하고 자연스러운 한국어로 답하고, "
     "모르는 것은 모른다고 말한다. 코드나 목록이 필요할 때만 마크다운을 쓴다."
@@ -71,6 +102,18 @@ PLANNER_SYSTEM_PROMPT = (
     '"protagonist": "...", "characters": "...", "target_chars": 30000}}'
 )
 CARD_FIELDS = ("title", "genre", "premise", "world", "protagonist", "characters", "target_chars")
+# 직접 작성 양식: (항목, 라벨, 위젯, 도움말). 글자 한도는 template_store.FIELD_LIMITS 하나를 쓴다.
+MANUAL_FIELDS = (
+    ("title", "제목", "input", ""),
+    ("genre", "장르", "input", ""),
+    ("premise", "핵심 소재", "area", "두세 문장. 무엇이 걸려 있고 무엇이 바뀌는가."),
+    ("world", "세계관", "area", "시대·장소·규칙. 매 장 프롬프트에 그대로 들어가."),
+    ("protagonist", "주인공", "area", "'이름: 한 줄 소개' 형태."),
+    ("characters", "주요 인물 (선택)", "area", "'이름: 역할과 목표' 를 줄바꿈으로. 여기 없는 이름은 모델이 만들지 않아."),
+    ("style_guide", "집필 지침 (선택)", "area", "문체·시점·금기·분위기. 예: 1인칭, 짧은 문장, 욕설 금지, 매 장 끝에 여운."),
+)
+CHAT_EDITABLE_TURNS = 5  # 고쳐 보내기 팝오버는 최근 질문 몇 개에만 (메시지마다 text_area 를 그리면 긴 대화가 무거워진다)
+REQUIRED_MANUAL = ("title", "genre", "premise", "world", "protagonist")
 CARD_LABELS = {
     "title": "제목", "genre": "장르", "premise": "핵심 소재", "world": "세계관",
     "protagonist": "주인공", "characters": "주요 인물", "target_chars": "목표 분량",
@@ -85,26 +128,52 @@ def _styles() -> None:
         <style>
         :root {
             --ink: #202624; --muted: #68716d; --line: #d9dfdb; --jade: #0b7569;
-            --jade-dark: #07594f; --coral: #c65c4b; --paper: #f7f8f5; --white: #ffffff;
+            --jade-dark: #07594f; --coral: #c65c4b; --paper: #f7f8f5; --white: #ffffff; --tint: #e4ece7;
         }
         .stApp { background: var(--paper); color: var(--ink); }
-        /* 헤더는 남긴다: 사이드바(모드 전환)를 접었다 펴는 버튼이 여기에 있다. */
-        [data-testid="stHeader"] { background: transparent; }
-        [data-testid="stToolbar"], [data-testid="stDecoration"], #MainMenu, footer { display: none !important; }
+        /* 헤더와 툴바는 남긴다: 접힌 사이드바를 펴는 » 버튼(stExpandSidebarButton)이 툴바 안에 있다.
+           좁은 창(768px 이하)에서는 본문을 누르면 사이드바가 접히므로 이 버튼이 없으면 다시 열 수 없다.
+           숨기는 건 배포 버튼·⋮ 메뉴(stToolbarActions)뿐. */
+        [data-testid="stHeader"], [data-testid="stToolbar"] { background: transparent; }
+        [data-testid="stToolbarActions"], [data-testid="stAppDeployButton"], [data-testid="stMainMenu"],
+        [data-testid="stStatusWidget"], [data-testid="stDecoration"], #MainMenu, footer { display: none !important; }
+        [data-testid="stExpandSidebarButton"], [data-testid="stExpandSidebarButton"] * { color: var(--jade) !important; }
         .block-container { max-width: 1100px; padding-top: 1.6rem; padding-bottom: 5rem; }
         h1, h2, h3 { letter-spacing: 0; color: var(--ink); }
         .stApp h1 { font-size: 1.8rem; line-height: 1.25; margin-bottom: 0.3rem; }
         [data-testid="stForm"], [data-testid="stVerticalBlockBorderWrapper"] {
             border-color: var(--line) !important; border-radius: 10px !important; background: var(--white);
         }
-        .stButton button, .stDownloadButton button, [data-testid="stFormSubmitButton"] button {
-            border-radius: 8px !important; min-height: 2.4rem;
-        }
+        .stButton button, .stDownloadButton button, [data-testid="stFormSubmitButton"] button,
+        [data-testid="stPopoverButton"] { border-radius: 8px !important; min-height: 2.4rem; }
+        /* 본문의 팝오버(⋯ · 🗑 · ✏️)는 메뉴 화살표 없이 아이콘만 */
+        .stMain [data-testid="stPopoverButton"] [data-testid="stIconMaterial"] { display: none; }
         .stButton button[kind="primary"], [data-testid="stFormSubmitButton"] button[kind="primary"] {
             background: var(--jade) !important; border-color: var(--jade) !important; color: #fff !important;
         }
         [data-testid="stChatMessage"] { border-bottom: 1px solid var(--line); border-radius: 0; padding: 0.9rem 0.2rem; }
+        /* 메시지 옆 도구(고치기·지우기·다시 생성)는 평소엔 옅게, 마우스를 올리면 또렷하게 */
+        [data-testid="stChatMessage"] .stButton button[kind="tertiary"],
+        [data-testid="stChatMessage"] [data-testid="stPopoverButton"] {
+            color: var(--muted); min-height: 1.9rem; padding: 0 0.45rem; opacity: 0.45; border: none;
+            background: transparent;
+        }
+        [data-testid="stChatMessage"]:hover .stButton button[kind="tertiary"],
+        [data-testid="stChatMessage"]:hover [data-testid="stPopoverButton"] { opacity: 1; }
         [data-testid="stSidebar"] .stButton button { justify-content: flex-start; text-align: left; }
+        /* 사이드바 목록: 한 줄 말줄임, 촘촘한 간격, 열려 있는 항목만 옅은 배경 */
+        .st-key-sidebar_list .stButton button { min-height: 2.1rem; padding: 0.2rem 0.6rem; }
+        .st-key-sidebar_list .stButton button [data-testid="stMarkdownContainer"] { min-width: 0; overflow: hidden; }
+        .st-key-sidebar_list .stButton button [data-testid="stMarkdownContainer"] p {
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.92rem;
+        }
+        .st-key-sidebar_list .stButton button[kind="tertiary"] { color: var(--ink); }
+        .st-key-sidebar_list .stButton button[kind="tertiary"]:hover { background: var(--tint); color: var(--ink); }
+        .st-key-sidebar_list .stButton button[kind="secondary"] {
+            background: var(--tint); border-color: transparent; color: var(--jade-dark); font-weight: 650;
+        }
+        .list-group { color: var(--muted); font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em;
+                      margin: 0.7rem 0 0.1rem 0.4rem; }
         .story-kicker { color: var(--jade); font-size: 0.74rem; font-weight: 750; letter-spacing: 0.08em; margin-bottom: 0.3rem; }
         .story-meta { color: var(--muted); font-size: 0.9rem; }
         .settings-block { border-left: 2px solid var(--line); padding: 0.2rem 0 0.2rem 0.8rem; margin: 0 0 0.8rem;
@@ -122,6 +191,8 @@ def _styles() -> None:
         @media (max-width: 640px) {
             .block-container { padding: 1rem 0.7rem 5rem; }
             .card-grid { grid-template-columns: 1fr; }
+            [data-testid="stChatMessage"] .stButton button[kind="tertiary"],
+            [data-testid="stChatMessage"] [data-testid="stPopoverButton"] { opacity: 0.8; }
         }
         </style>
         """,
@@ -129,11 +200,25 @@ def _styles() -> None:
     )
 
 
+_MARKDOWN_SPECIALS = re.compile(r"([\\`*_~\[\]<>#|$])")
+
+
+def _md_label(text: str) -> str:
+    """버튼 라벨은 마크다운으로 그려지므로 사용자가 적은 제목의 기호를 글자 그대로 보이게 한다."""
+    return _MARKDOWN_SPECIALS.sub(r"\\\1", " ".join(str(text).split())) or "(제목 없음)"
+
+
+def _file_stem(text: str) -> str:
+    return re.sub(r'[\\/:*?"<>|\r\n]+', "_", str(text)).strip() or "대화"
+
+
 # ---- 런타임 / 세션 ---------------------------------------------------------------------------
 
-def _load_runtime() -> tuple[AppConfig, ConsumerStore, ChatStore, Any]:
+@st.cache_resource(show_spinner=False)
+def _load_runtime() -> tuple[AppConfig, ConsumerStore, ChatStore, StoryTemplateStore, Any]:
+    """설정·저장소·클라이언트는 프로세스에 하나면 된다 (저장소는 호출마다 연결을 새로 연다)."""
     config = load_config("configs/default.yaml")
-    return config, ConsumerStore(config), ChatStore(config), make_llm_client(config)
+    return config, ConsumerStore(config), ChatStore(config), StoryTemplateStore(config), make_llm_client(config)
 
 
 def _model_status(client: Any) -> dict[str, Any]:
@@ -147,14 +232,33 @@ def _model_status(client: Any) -> dict[str, Any]:
     return status
 
 
+def _flash(message: str) -> None:
+    """다음 실행에서 토스트로 보여줄 한 줄. st.rerun() 직전에 st.toast 를 부르면 사라지므로 세션에 맡긴다."""
+    st.session_state["consumer_flash"] = message
+
+
+def _show_flash() -> None:
+    message = str(st.session_state.pop("consumer_flash", "") or "")
+    if message:
+        st.toast(message)
+
+
 def _clear_story_session() -> None:
     for key in ("consumer_story_id", "consumer_last_job_status", "delete_story_confirmation"):
         st.session_state.pop(key, None)
+    _clear_editor_session()
+
+
+def _clear_editor_session() -> None:
+    """원고 수정 패널의 상태는 작품마다 따로. 다른 작품으로 옮길 때 열려 있던 장·제안이 따라오지 않게."""
+    for key in tuple(st.session_state.keys()):
+        if str(key).startswith(("consumer_edit_", "edit_")):
+            st.session_state.pop(key, None)
 
 
 def _clear_account_session() -> None:
     for key in tuple(st.session_state.keys()):
-        if str(key).startswith(("consumer_", "plan_", "chat_")) or key == "delete_story_confirmation":
+        if str(key).startswith(("consumer_", "plan_", "chat_", "story_", "tpl_", "edit_")) or key == "delete_story_confirmation":
             st.session_state.pop(key, None)
 
 
@@ -259,7 +363,7 @@ def _logout(store: ConsumerStore) -> None:
     st.rerun()
 
 
-# ---- 사이드바 ---------------------------------------------------------------------------------
+# ---- 모드 전환 / 사이드바 ----------------------------------------------------------------------
 
 def _mode_bar(client: Any) -> str:
     """본문 상단의 모드 전환. 사이드바는 화면 폭에 따라 접히므로 여기에 둔다."""
@@ -271,18 +375,17 @@ def _mode_bar(client: Any) -> str:
         status = _model_status(client)
         if status["ready"]:
             health = status.get("health") or {}
-            st.caption(f"모델 준비됨 · {health.get('model', 'local')} · VRAM {health.get('vram_gib', '?')} GiB")
+            st.caption(f"🟢 모델 준비됨 · {health.get('model', 'local')} · VRAM {health.get('vram_gib', '?')} GiB")
         else:
-            st.caption("모델 서버 연결 안 됨 — run_model_server.bat 을 실행해줘.")
+            st.caption("🔴 모델 서버 연결 안 됨 — run_model_server.bat 을 실행해줘.")
     return str(mode or MODE_CHAT)
 
 
 def _sidebar(config: AppConfig, store: ConsumerStore, chats: ChatStore, user: dict[str, Any], mode: str) -> None:
     with st.sidebar:
         st.markdown('<div class="story-kicker">STORY STUDIO</div>', unsafe_allow_html=True)
-        st.caption("대화 목록" if mode == MODE_CHAT else "작품 목록")
         if mode == MODE_CHAT:
-            _sidebar_chats(chats, user)
+            _sidebar_chats(config, chats, user)
         else:
             _sidebar_stories(store, user)
         st.divider()
@@ -292,20 +395,56 @@ def _sidebar(config: AppConfig, store: ConsumerStore, chats: ChatStore, user: di
             _logout(store)
 
 
-def _sidebar_chats(chats: ChatStore, user: dict[str, Any]) -> None:
+def _open_new_chat(config: AppConfig, chats: ChatStore, user_id: str) -> None:
+    """빈 대화가 이미 있으면 그걸 맨 위로 올려 연다 — '새 대화' 를 연타해도 빈 방이 쌓이지 않게."""
+    chat = chats.find_empty_chat(user_id)
+    if chat is None:
+        chat = chats.create_chat(user_id, adapter=config.llm.chat_adapter)
+    else:
+        chats.touch_chat(user_id, chat["id"])
+    st.session_state["chat_id"] = chat["id"]
+    if "chat_search" in st.session_state:
+        st.session_state["chat_search"] = ""  # pop 은 백엔드만 비우고 브라우저 입력칸엔 옛 검색어가 남는다
+
+
+def _sidebar_chats(config: AppConfig, chats: ChatStore, user: dict[str, Any]) -> None:
+    user_id = str(user["id"])
     if st.button("➕ 새 대화", width="stretch", key="chat_new", type="primary"):
-        chat = chats.create_chat(str(user["id"]))
-        st.session_state["chat_id"] = chat["id"]
+        _open_new_chat(config, chats, user_id)
         st.rerun()
-    rows = chats.list_chats(str(user["id"]))
+    everything = chats.list_chats(user_id)
+    query = ""
+    if len(everything) >= SEARCH_THRESHOLD:
+        query = str(st.text_input("대화 검색", key="chat_search", placeholder="🔍 제목이나 내용으로 찾기",
+                                  label_visibility="collapsed") or "").strip()
+    rows = chats.list_chats(user_id, query=query) if query else everything
     active = str(st.session_state.get("chat_id", ""))
-    if not rows:
-        st.caption("아직 대화가 없어. 새 대화를 시작해봐.")
-    for row in rows:
-        label = ("▸ " if row["id"] == active else "") + str(row["title"])
-        if st.button(label, key=f"chat_open_{row['id']}", width="stretch"):
-            st.session_state["chat_id"] = row["id"]
-            st.rerun()
+    now = local_now()
+    with st.container(key="sidebar_list", gap=None):
+        if not rows:
+            st.caption("찾는 대화가 없어." if query else "아직 대화가 없어. 새 대화를 시작해봐.")
+        elif query:
+            st.caption(f"{len(rows)}개 찾음")
+        current_group = ""
+        for row in rows:
+            group = date_group(row["updated_at"], now=now)
+            if group != current_group and not query:
+                st.markdown(f'<div class="list-group">{group}</div>', unsafe_allow_html=True)
+                current_group = group
+            is_active = row["id"] == active
+            meta = f"메시지 {int(row['message_count'])}개 · {relative_time(row['updated_at'], now=now)}"
+            if st.button(_md_label(row["title"]), key=f"chat_open_{row['id']}", width="stretch",
+                         type="secondary" if is_active else "tertiary", help=f"{row['title']}\n\n{meta}"):
+                st.session_state["chat_id"] = row["id"]
+                st.rerun()
+    if everything:
+        with st.popover("🗑 대화 정리", width="stretch", help="모든 대화를 한 번에 지워"):
+            st.caption(f"대화 {len(everything)}개를 모두 지워. 되돌릴 수 없어.")
+            if st.button(f"모든 대화 삭제 ({len(everything)}개)", key="chat_delete_all", type="primary", width="stretch"):
+                removed = chats.delete_all_chats(user_id)
+                st.session_state.pop("chat_id", None)
+                _flash(f"대화 {removed}개를 지웠어.")
+                st.rerun()
 
 
 def _sidebar_stories(store: ConsumerStore, user: dict[str, Any]) -> None:
@@ -315,17 +454,30 @@ def _sidebar_stories(store: ConsumerStore, user: dict[str, Any]) -> None:
         st.session_state["plan_card"] = {}
         st.rerun()
     stories = store.list_owned_stories(str(user["id"]))
+    query = ""
+    if len(stories) >= SEARCH_THRESHOLD:
+        query = str(st.text_input("작품 검색", key="story_search", placeholder="🔍 제목이나 장르로 찾기",
+                                  label_visibility="collapsed") or "").strip().casefold()
+        if query:
+            stories = [s for s in stories if query in str(s["title"]).casefold() or query in str(s["genre"]).casefold()]
     active = str(st.session_state.get("consumer_story_id", ""))
-    if not stories:
-        st.caption("아직 작품이 없어. 새 작품 기획에서 편하게 말해봐.")
-    for story in stories:
-        completed = bool(story.get("completed_at"))
-        progress = 100.0 if completed else min(100.0, int(story["current_chars"]) / max(1, int(story["target_chars"])) * 100)
-        marker = "▸ " if story["id"] == active else ""
-        label = f"{marker}{story['title']}  ·  {progress:.0f}%" + (" 완결" if completed else "")
-        if st.button(label, key=f"story_open_{story['id']}", width="stretch"):
-            st.session_state["consumer_story_id"] = story["id"]
-            st.rerun()
+    now = local_now()
+    with st.container(key="sidebar_list", gap=None):
+        if not stories:
+            st.caption("찾는 작품이 없어." if query else "아직 작품이 없어. 새 작품 기획에서 편하게 말해봐.")
+        for story in stories:
+            completed = bool(story.get("completed_at"))
+            progress = 100.0 if completed else min(100.0, int(story["current_chars"]) / max(1, int(story["target_chars"])) * 100)
+            state = "완결" if completed else f"진행 {progress:.0f}%"
+            label = ("✓ " if completed else "") + _md_label(story["title"])
+            meta = (f"{story['title']}\n\n{story['genre']} · {state} · {int(story['current_chars']):,}자 · "
+                    f"{relative_time(story.get('updated_at'), now=now)}")
+            if st.button(label, key=f"story_open_{story['id']}", width="stretch",
+                         type="secondary" if story["id"] == active else "tertiary", help=meta):
+                if story["id"] != active:
+                    _clear_editor_session()
+                st.session_state["consumer_story_id"] = story["id"]
+                st.rerun()
 
 
 # ---- 일반 채팅 --------------------------------------------------------------------------------
@@ -343,57 +495,121 @@ def _chat_history_for_model(messages: list[dict[str, Any]], max_chars: int = 140
     return [{"role": "system", "content": CHAT_SYSTEM_PROMPT}, *history]
 
 
-def _chat_mode(config: AppConfig, chats: ChatStore, client: Any, user: dict[str, Any]) -> None:
-    user_id = str(user["id"])
+def _ensure_chat(config: AppConfig, chats: ChatStore, user_id: str) -> dict[str, Any]:
+    """열려 있는 대화를 돌려준다. 없으면 가장 최근 대화, 그것도 없으면 새로 만든다."""
     chat_id = str(st.session_state.get("chat_id", ""))
     chat = chats.get_chat(user_id, chat_id) if chat_id else None
     if chat is None:
         rows = chats.list_chats(user_id, limit=1)
         chat = rows[0] if rows else chats.create_chat(user_id, adapter=config.llm.chat_adapter)
         st.session_state["chat_id"] = chat["id"]
-        chat_id = chat["id"]
+    return chat
 
-    head, tone_col, clear_col = st.columns([3, 1.4, 0.8], vertical_alignment="center")
+
+def _chat_header(chats: ChatStore, user_id: str, chat: dict[str, Any], messages: list[dict[str, Any]]) -> None:
+    chat_id = str(chat["id"])
+    head, tone_column, menu_column, delete_column = st.columns([3.4, 1.4, 0.5, 0.5], vertical_alignment="center")
     with head:
         st.markdown('<div class="story-kicker">CHAT</div>', unsafe_allow_html=True)
         st.title(str(chat["title"]))
-    with tone_col:
+        meta = (f"메시지 {len(messages)}개 · 마지막 {relative_time(chat['updated_at'])}" if messages
+                else "첫 메시지를 보내면 그 내용으로 제목이 정해져.")
+        st.markdown(f'<div class="story-meta">{html.escape(meta)}</div>', unsafe_allow_html=True)
+    with tone_column:
         current_tone = next((label for label, value in TONE_OPTIONS.items() if value == chat["adapter"]), "기본 말투")
         tone = st.selectbox("말투", list(TONE_OPTIONS), index=list(TONE_OPTIONS).index(current_tone), key=f"tone_{chat_id}")
         if TONE_OPTIONS[tone] != chat["adapter"]:
             chats.set_adapter(user_id, chat_id, TONE_OPTIONS[tone])
             chat["adapter"] = TONE_OPTIONS[tone]
-    with clear_col:
-        if st.button("🗑 삭제", key="chat_delete", width="stretch", help="이 대화를 완전히 지워."):
-            chats.delete_chat(user_id, chat_id)
-            st.session_state.pop("chat_id", None)
-            st.rerun()
+    with menu_column:
+        with st.popover("⋯", help="이름 바꾸기 · 내려받기 · 비우기", key=f"chat_menu_{chat_id}"):
+            with st.form(f"chat_rename_{chat_id}", border=False):
+                title = st.text_input("대화 이름", value=str(chat["title"]), max_chars=TITLE_CHARS)
+                if st.form_submit_button("이름 저장", width="stretch"):
+                    try:
+                        chats.rename_chat(user_id, chat_id, title)
+                    except ChatStoreError as exc:
+                        st.error(str(exc))
+                    else:
+                        _flash("대화 이름을 바꿨어.")
+                        st.rerun()
+            st.download_button("⬇ 마크다운으로 내려받기", data=lambda: export_chat_markdown(chat, messages).encode("utf-8"),
+                               file_name=f"{_file_stem(chat['title'])}.md", mime="text/markdown", width="stretch",
+                               disabled=not messages, key=f"chat_export_{chat_id}")
+            if st.button("🧹 메시지 모두 비우기", key=f"chat_clear_{chat_id}", width="stretch", disabled=not messages,
+                         help="대화는 남기고 메시지만 지워. 제목은 다음 첫 메시지로 다시 정해져."):
+                chats.clear_messages(user_id, chat_id)
+                _flash("메시지를 비웠어.")
+                st.rerun()
+    with delete_column:
+        with st.popover("🗑", help="이 대화 삭제", key=f"chat_delete_menu_{chat_id}"):
+            st.caption("이 대화와 메시지를 모두 지워. 되돌릴 수 없어.")
+            if st.button("정말 삭제", key=f"chat_delete_{chat_id}", type="primary", width="stretch"):
+                chats.delete_chat(user_id, chat_id)
+                st.session_state.pop("chat_id", None)
+                _flash("대화를 지웠어.")
+                st.rerun()
 
-    messages = chats.list_messages(user_id, chat_id)
-    if not messages:
-        with st.chat_message("assistant"):
-            st.markdown("무엇이든 물어봐. 소설을 쓰고 싶으면 왼쪽에서 **📖 장편 소설** 모드로 바꿔줘.")
-    for message in messages:
-        with st.chat_message(str(message["role"])):
-            st.markdown(str(message["content"]))
 
-    status = _model_status(client)
-    blocked = "" if status["ready"] else f"모델 서버가 준비되지 않았어. {status['reason']}"
-    if blocked:
-        st.warning(blocked)
-    prompt = st.chat_input("메시지를 입력해", disabled=bool(blocked), key=f"chat_input_{chat_id}")
-    if not prompt:
-        return
-    try:
-        chats.append_message(user_id, chat_id, "user", prompt)
-    except ChatStoreError as exc:
-        st.error(str(exc))
-        return
-    messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+def _chat_welcome(blocked: str) -> str:
+    """빈 대화의 첫 화면. 제안 문장을 누르면 그 문장을 돌려준다."""
+    with st.chat_message("assistant"):
+        st.markdown("무엇이든 물어봐. 소설을 쓰고 싶으면 위에서 **📖 장편 소설** 모드로 바꿔줘.")
+    st.caption("이렇게 시작해볼 수도 있어")
+    columns = st.columns(len(CHAT_SUGGESTIONS))
+    for index, (column, suggestion) in enumerate(zip(columns, CHAT_SUGGESTIONS, strict=True)):
+        if column.button(suggestion, key=f"chat_suggest_{index}", width="stretch", disabled=bool(blocked)):
+            return suggestion
+    return ""
+
+
+def _render_chat_messages(chats: ChatStore, user_id: str, chat_id: str, messages: list[dict[str, Any]],
+                          blocked: str) -> bool:
+    """메시지와 턴 도구를 그린다. 지금 바로 답변을 만들어야 하면 True."""
+    want_reply = False
+    last_index = len(messages) - 1
+    user_turns = [index for index, message in enumerate(messages) if str(message["role"]) == "user"]
+    editable = set(user_turns[-CHAT_EDITABLE_TURNS:])
+    for index, message in enumerate(messages):
+        role = str(message["role"])
+        message_id = int(message["id"])
+        content = str(message["content"])
+        with st.chat_message(role):
+            if role != "user":
+                st.markdown(content)
+                if index == last_index and st.button("🔄 다시 생성", key=f"chat_regen_{message_id}", type="tertiary",
+                                                     disabled=bool(blocked), help="이 답변을 지우고 새로 받아."):
+                    chats.delete_messages_from(user_id, chat_id, message_id)
+                    st.session_state["chat_pending_reply"] = chat_id
+                    st.rerun()
+                continue
+            body, edit_column, delete_column = st.columns([10, 0.7, 0.7], vertical_alignment="top")
+            body.markdown(content)
+            if index in editable:
+                with edit_column.popover("✏️", help="고쳐서 다시 보내기", disabled=bool(blocked), key=f"chat_edit_menu_{message_id}"):
+                    edited = st.text_area("메시지 수정", value=content, key=f"chat_edit_{message_id}", height=120)
+                    if index < last_index:
+                        st.caption("이 메시지부터 다시 보내. 뒤에 이어진 대화는 지워져.")
+                    if st.button("다시 보내기", key=f"chat_resend_{message_id}", type="primary", width="stretch"):
+                        if not edited.strip():
+                            st.error("빈 메시지는 보낼 수 없어.")
+                        else:
+                            chats.delete_messages_from(user_id, chat_id, message_id)
+                            st.session_state["chat_pending_prompt"] = edited.strip()
+                            st.rerun()
+            if delete_column.button("✕", key=f"chat_drop_{message_id}", type="tertiary", help="이 질문과 답변을 지워."):
+                chats.delete_message_pair(user_id, chat_id, message_id)
+                st.rerun()
+            if index == last_index and st.button("🔄 답변 다시 받기", key=f"chat_reply_{message_id}", type="tertiary",
+                                                 disabled=bool(blocked), help="답변이 끊겼을 때 이 질문으로 다시 받아."):
+                want_reply = True
+    return want_reply
+
+
+def _stream_reply(config: AppConfig, chats: ChatStore, client: Any, user_id: str, chat: dict[str, Any],
+                  messages: list[dict[str, Any]]) -> None:
+    chat_id = str(chat["id"])
     history = _chat_history_for_model(messages)
-    adapter = chat["adapter"] or None
     with st.chat_message("assistant"):
         try:
             reply = st.write_stream(
@@ -401,17 +617,56 @@ def _chat_mode(config: AppConfig, chats: ChatStore, client: Any, user: dict[str,
                     history,
                     temperature=config.llm.chat_temperature,
                     max_tokens=config.llm.chat_max_tokens,
-                    adapter=adapter,
+                    adapter=chat["adapter"] or None,
                     adapter_scale=config.llm.adapter_scale,
                 )
             )
         except LocalLLMError as exc:
-            st.error(str(exc))
-            return
+            # 여기서 버튼을 그려도 다음 실행에서 다시 그려지지 않아 눌러도 반응이 없다. 오류를 기억해 두고
+            # 다시 그리면 마지막 질문 아래 '🔄 답변 다시 받기' 가 생긴다.
+            st.session_state["chat_error"] = str(exc)
+            st.rerun()
     reply_text = reply if isinstance(reply, str) else "".join(str(part) for part in reply)
     if reply_text.strip():
         chats.append_message(user_id, chat_id, "assistant", reply_text)
     st.rerun()
+
+
+def _chat_mode(config: AppConfig, chats: ChatStore, client: Any, user: dict[str, Any], chat: dict[str, Any]) -> None:
+    user_id = str(user["id"])
+    chat_id = str(chat["id"])
+    messages = chats.list_messages(user_id, chat_id)
+    _chat_header(chats, user_id, chat, messages)
+
+    status = _model_status(client)
+    blocked = "" if status["ready"] else f"모델 서버가 준비되지 않았어. {status['reason']}"
+    pending_prompt = str(st.session_state.pop("chat_pending_prompt", "") or "")
+    want_reply = False
+    if messages:
+        want_reply = _render_chat_messages(chats, user_id, chat_id, messages, blocked)
+    elif not pending_prompt:
+        pending_prompt = _chat_welcome(blocked)
+    if blocked:
+        st.warning(blocked)
+    error = str(st.session_state.pop("chat_error", "") or "")
+    if error:
+        st.error(f"답변을 받지 못했어: {error}  \n마지막 질문 아래 **🔄 답변 다시 받기** 로 다시 시도할 수 있어.")
+
+    prompt = st.chat_input("메시지를 입력해", disabled=bool(blocked), key=f"chat_input_{chat_id}") or pending_prompt
+    if prompt:
+        try:
+            chats.append_message(user_id, chat_id, "user", prompt)
+        except ChatStoreError as exc:
+            st.error(str(exc))
+            return
+        messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        want_reply = True
+    elif st.session_state.pop("chat_pending_reply", None) == chat_id:
+        want_reply = bool(messages) and messages[-1]["role"] == "user"
+    if want_reply and not blocked:
+        _stream_reply(config, chats, client, user_id, chat, messages)
 
 
 # ---- 장편 소설: 기획 대화 ---------------------------------------------------------------------
@@ -488,11 +743,34 @@ def _plan_turn(config: AppConfig, client: Any, messages: list[dict[str, str]], c
     return reply, merged, ready
 
 
-def _plan_mode(config: AppConfig, store: ConsumerStore, client: Any, user: dict[str, Any]) -> None:
-    st.markdown('<div class="story-kicker">NEW STORY</div>', unsafe_allow_html=True)
-    st.title("어떤 이야기를 쓰고 싶어?")
-    st.markdown('<div class="story-meta">장르, 분위기, 주인공, 소재, 분량… 떠오르는 대로 편하게 말해줘. '
-                '빈 곳은 내가 제안해서 채울게.</div>', unsafe_allow_html=True)
+def _start_story(config: AppConfig, store: ConsumerStore, user: dict[str, Any], card: dict[str, Any],
+                 *, target: int, consent: bool, first_wish: str = "") -> None:
+    """작품을 만들고 첫 턴을 큐에 넣은 뒤 집필 화면으로. 대화 기획과 직접 작성이 같이 쓴다."""
+    story = store.create_story(
+        str(user["id"]),
+        title=str(card.get("title", "")), genre=str(card.get("genre", "")),
+        premise=str(card.get("premise", "")), world=str(card.get("world", "")),
+        protagonist=str(card.get("protagonist", "")), characters=str(card.get("characters", "") or ""),
+        target_chars=int(target), research_consent=bool(consent), style_guide=str(card.get("style_guide", "") or ""),
+    )
+    instruction = "첫 장면을 시작해 줘." + (f" 참고: {first_wish[:300]}" if first_wish else "")
+    try:
+        store.enqueue_job(str(user["id"]), story["id"], instruction=instruction,
+                          creativity_profile="balanced", requested_chars=config.consumer.default_turn_chars)
+    except ConsumerStoreError as exc:
+        # 작품은 만들어졌고 첫 턴만 못 넣은 것 (예: 점검 중). 집필 화면에서 다시 요청하면 된다.
+        _flash(f"'{story['title']}' 을 만들었지만 첫 장 요청은 넣지 못했어: {exc}")
+    else:
+        _flash(f"'{story['title']}' 의 첫 장을 큐에 넣었어.")
+    for key in ("plan_messages", "plan_card"):
+        st.session_state.pop(key, None)
+    for field, *_rest in MANUAL_FIELDS:
+        st.session_state.pop(f"tpl_{field}", None)
+    st.session_state["consumer_story_id"] = story["id"]
+    st.rerun()
+
+
+def _plan_chat(config: AppConfig, store: ConsumerStore, client: Any, user: dict[str, Any]) -> None:
     messages: list[dict[str, str]] = st.session_state.setdefault("plan_messages", [])
     card: dict[str, Any] = st.session_state.setdefault("plan_card", {})
 
@@ -517,26 +795,11 @@ def _plan_mode(config: AppConfig, store: ConsumerStore, client: Any, user: dict[
             consent = st.checkbox("내 원고와 익명 품질 지표를 연구 개선에 활용하는 데 동의해", key="plan_consent")
             if not ready:
                 st.caption("제목·장르·소재·세계관·주인공이 다 채워지면 시작할 수 있어. 대화로 보충해줘.")
+            st.caption("세부를 손으로 다듬고 싶으면 옆 **📝 직접 작성** 탭에서 '작품 카드 가져오기' 를 눌러.")
             if st.button("✅ 이 설정으로 집필 시작", type="primary", disabled=not ready, key="plan_start", width="stretch"):
+                first_wish = next((m["content"] for m in messages if m["role"] == "user"), "")
                 try:
-                    story = store.create_story(
-                        str(user["id"]),
-                        title=str(card.get("title", "")), genre=str(card.get("genre", "")),
-                        premise=str(card.get("premise", "")), world=str(card.get("world", "")),
-                        protagonist=str(card.get("protagonist", "")), characters=str(card.get("characters", "")),
-                        target_chars=int(target), research_consent=bool(consent),
-                    )
-                    first_wish = next((m["content"] for m in messages if m["role"] == "user"), "")
-                    instruction = "첫 장면을 시작해 줘." + (f" 참고: {first_wish[:300]}" if first_wish else "")
-                    try:
-                        store.enqueue_job(str(user["id"]), story["id"], instruction=instruction,
-                                          creativity_profile="balanced", requested_chars=config.consumer.default_turn_chars)
-                    except ConsumerStoreError:
-                        pass
-                    st.session_state.pop("plan_messages", None)
-                    st.session_state.pop("plan_card", None)
-                    st.session_state["consumer_story_id"] = story["id"]
-                    st.rerun()
+                    _start_story(config, store, user, card, target=int(target), consent=bool(consent), first_wish=first_wish)
                 except (ValueError, ConsumerStoreError) as exc:
                     st.error(str(exc))
 
@@ -562,6 +825,95 @@ def _plan_mode(config: AppConfig, store: ConsumerStore, client: Any, user: dict[
     messages.append({"role": "assistant", "content": reply})
     st.session_state["plan_card"] = merged
     st.rerun()
+
+
+def _fill_manual_form(config: AppConfig, source: dict[str, Any]) -> None:
+    """템플릿이나 작품 카드의 값을 직접 작성 양식에 채운다 (양식 위젯이 그려지기 전에 부른다)."""
+    for field, *_rest in MANUAL_FIELDS:
+        st.session_state[f"tpl_{field}"] = str(source.get(field, "") or "")
+    st.session_state["tpl_target"] = _normalize_target(config, source.get("target_chars"))
+
+
+def _manual_plan(config: AppConfig, store: ConsumerStore, templates: StoryTemplateStore, user: dict[str, Any]) -> None:
+    user_id = str(user["id"])
+    rows = templates.list_templates(user_id)
+    if rows:
+        by_name = {str(row["name"]): row for row in rows}
+        pick_column, load_column, delete_column = st.columns([3, 1, 0.5], vertical_alignment="bottom")
+        choice = pick_column.selectbox("내 템플릿", options=list(by_name), key="tpl_pick",
+                                       help="저장해 둔 작품 설정. 불러오면 아래 양식에 채워져.")
+        if load_column.button("불러오기", key="tpl_load", width="stretch"):
+            _fill_manual_form(config, by_name[str(choice)])
+            _flash(f"템플릿 '{choice}' 을 양식에 채웠어.")
+            st.rerun()
+        with delete_column.popover("🗑", help="이 템플릿 삭제"):
+            st.caption(f"템플릿 '{choice}' 을 지워. 작품에는 영향 없어.")
+            if st.button("정말 삭제", key="tpl_delete", type="primary", width="stretch"):
+                try:
+                    templates.delete_template(user_id, str(by_name[str(choice)]["id"]))
+                except TemplateStoreError as exc:
+                    st.error(str(exc))
+                else:
+                    st.session_state.pop("tpl_pick", None)
+                    _flash(f"템플릿 '{choice}' 을 지웠어.")
+                    st.rerun()
+    else:
+        st.caption("아직 저장한 템플릿이 없어. 양식을 채우고 **템플릿으로 저장** 을 누르면 다음 작품에서 불러올 수 있어.")
+    card = st.session_state.get("plan_card") or {}
+    if card and st.button("💬 대화로 만든 작품 카드 가져오기", key="tpl_import_card", help="대화 탭에서 정리한 카드를 양식에 채워."):
+        _fill_manual_form(config, card)
+        st.rerun()
+
+    with st.form("manual_card_form"):
+        values: dict[str, str] = {}
+        title_column, genre_column = st.columns([1.2, 1])
+        for field, label, widget, help_text in MANUAL_FIELDS:
+            target_column = title_column if field == "title" else genre_column if field == "genre" else st
+            limit = FIELD_LIMITS[field]
+            if widget == "input":
+                values[field] = target_column.text_input(label, key=f"tpl_{field}", max_chars=limit, help=help_text or None)
+            else:
+                values[field] = target_column.text_area(label, key=f"tpl_{field}", max_chars=limit, help=help_text or None,
+                                                        height=120 if field in ("premise", "protagonist") else 150)
+        options = config.consumer.target_char_options()
+        target = st.selectbox("목표 분량", options=options, key="tpl_target", format_func=lambda value: f"{value:,}자")
+        consent = st.checkbox("내 원고와 익명 품질 지표를 연구 개선에 활용하는 데 동의해", key="tpl_consent")
+        name = st.text_input("템플릿 이름 (저장할 때만)", key="tpl_name", max_chars=TEMPLATE_NAME_CHARS,
+                             placeholder="예: 항구 도시 미스터리 세계관")
+        start_column, save_column = st.columns(2)
+        start = start_column.form_submit_button("✅ 이 설정으로 집필 시작", type="primary", width="stretch")
+        save = save_column.form_submit_button("💾 템플릿으로 저장", width="stretch")
+    if save:
+        try:
+            saved = templates.save_template(user_id, name=name, target_chars=int(target),
+                                            **{field: values[field] for field in TEMPLATE_FIELDS})
+        except TemplateStoreError as exc:
+            st.error(str(exc))
+        else:
+            st.session_state.pop("tpl_pick", None)
+            _flash(f"템플릿 '{saved['name']}' 을 저장했어.")
+            st.rerun()
+    if start:
+        missing = [label for field, label, *_rest in MANUAL_FIELDS if field in REQUIRED_MANUAL and not values[field].strip()]
+        if missing:
+            st.error("비어 있는 항목: " + ", ".join(missing))
+            return
+        try:
+            _start_story(config, store, user, values, target=int(target), consent=bool(consent))
+        except (ValueError, ConsumerStoreError) as exc:
+            st.error(str(exc))
+
+
+def _plan_mode(config: AppConfig, store: ConsumerStore, templates: StoryTemplateStore, client: Any, user: dict[str, Any]) -> None:
+    st.markdown('<div class="story-kicker">NEW STORY</div>', unsafe_allow_html=True)
+    st.title("어떤 이야기를 쓰고 싶어?")
+    st.markdown('<div class="story-meta">말로 해도 되고, 양식을 직접 채워도 돼. 빈 곳은 대화에서 내가 제안해서 채울게.</div>',
+                unsafe_allow_html=True)
+    chat_tab, manual_tab = st.tabs(["💬 대화로 기획", "📝 직접 작성"])
+    with chat_tab:
+        _plan_chat(config, store, client, user)
+    with manual_tab:
+        _manual_plan(config, store, templates, user)
 
 
 # ---- 장편 소설: 집필 화면 ---------------------------------------------------------------------
@@ -613,7 +965,7 @@ def _render_job(job: dict[str, Any], sections: list[str], store: ConsumerStore, 
         instruction_column, delete_column = st.columns([9, 1], vertical_alignment="top")
         instruction_column.markdown(str(job["instruction"]))
         if story_id and status not in (JOB_QUEUED, JOB_RUNNING):
-            if delete_column.button("✕", key=f"delete_job_{job_id}", help="이 턴과 이 턴이 쓴 원고를 함께 지워."):
+            if delete_column.button("✕", key=f"delete_job_{job_id}", type="tertiary", help="이 턴과 이 턴이 쓴 원고를 함께 지워."):
                 try:
                     store.delete_owned_job(user_id, story_id, job_id)
                 except ConsumerStoreError as exc:
@@ -627,8 +979,14 @@ def _render_job(job: dict[str, Any], sections: list[str], store: ConsumerStore, 
             count = int(job["result_section_count"])
             generated = sections[start : start + count]
             if generated:
-                for section in generated:
+                for offset, section in enumerate(generated):
                     st.markdown(section)
+                    section_index = start + offset + 1
+                    if story_id and st.button("✏️ 이 장 수정", key=f"edit_section_{section_index}", type="tertiary",
+                                              help="위의 '원고 수정' 패널에서 이 장을 연다."):
+                        st.session_state["consumer_edit_target"] = section_index
+                        _flash(f"{section_index}장을 위의 '원고 수정' 패널에서 열었어.")
+                        st.rerun()
             else:
                 st.caption("이 턴의 원고는 전체 원고 파일에 저장되어 있어.")
         elif status == JOB_QUEUED:
@@ -657,8 +1015,9 @@ def _settings_view(story: dict[str, Any]) -> None:
     st.markdown(f"**제목** · {story['title']}")
     st.markdown(f"**장르** · {story['genre']}")
     st.caption(f"목표 분량 {int(story['target_chars']):,}자")
-    for label, key in (("핵심 소재", "premise"), ("세계관", "world"), ("주인공", "protagonist"), ("주요 인물", "characters")):
-        value = str(story[key] or "").strip()
+    for label, key in (("핵심 소재", "premise"), ("세계관", "world"), ("주인공", "protagonist"), ("주요 인물", "characters"),
+                       ("집필 지침", "style_guide")):
+        value = str(story.get(key) or "").strip()
         st.markdown(f"**{label}**")
         st.markdown(f'<div class="settings-block">{html.escape(value) or "(비어 있음)"}</div>', unsafe_allow_html=True)
     st.caption("연구 활용 동의: " + ("동의함" if int(story["research_consent"] or 0) else "동의하지 않음"))
@@ -668,13 +1027,18 @@ def _settings_form(config: AppConfig, store: ConsumerStore, user_id: str, story:
     story_id = str(story["id"])
     with st.form(f"edit_story_{story_id}"):
         title_column, genre_column = st.columns([1.2, 1])
-        title = title_column.text_input("제목", value=str(story["title"]), max_chars=100)
-        genre = genre_column.text_input("장르", value=str(story["genre"]), max_chars=80)
-        premise = st.text_area("핵심 소재", value=str(story["premise"]), height=100, max_chars=1500)
-        world = st.text_area("세계관", value=str(story["world"]), height=140, max_chars=4000)
+        title = title_column.text_input("제목", value=str(story["title"]), max_chars=FIELD_LIMITS["title"])
+        genre = genre_column.text_input("장르", value=str(story["genre"]), max_chars=FIELD_LIMITS["genre"])
+        premise = st.text_area("핵심 소재", value=str(story["premise"]), height=100, max_chars=FIELD_LIMITS["premise"])
+        world = st.text_area("세계관", value=str(story["world"]), height=140, max_chars=FIELD_LIMITS["world"])
         protagonist_column, characters_column = st.columns(2)
-        protagonist = protagonist_column.text_area("주인공", value=str(story["protagonist"]), height=120, max_chars=2000)
-        characters = characters_column.text_area("주요 인물 (선택)", value=str(story["characters"] or ""), height=120, max_chars=3000)
+        protagonist = protagonist_column.text_area("주인공", value=str(story["protagonist"]), height=120,
+                                                   max_chars=FIELD_LIMITS["protagonist"])
+        characters = characters_column.text_area("주요 인물 (선택)", value=str(story["characters"] or ""), height=120,
+                                                 max_chars=FIELD_LIMITS["characters"])
+        style_guide = st.text_area("집필 지침 (선택)", value=str(story.get("style_guide") or ""), height=100,
+                                   max_chars=FIELD_LIMITS["style_guide"],
+                                   help="문체·시점·금기·분위기. 매 장 프롬프트에 규칙으로 들어가. 예: 1인칭, 짧은 문장, 욕설 금지.")
         current_chars = int(story["current_chars"])
         options = [value for value in config.consumer.target_char_options() if value >= current_chars]
         current_target = int(story["target_chars"])
@@ -689,7 +1053,7 @@ def _settings_form(config: AppConfig, store: ConsumerStore, user_id: str, story:
         try:
             store.update_owned_story(user_id, story_id, title=title, genre=genre, premise=premise, world=world,
                                      protagonist=protagonist, characters=characters, target_chars=int(target_chars),
-                                     research_consent=consent)
+                                     research_consent=consent, style_guide=style_guide)
         except (ValueError, ConsumerStoreError) as exc:
             st.error(str(exc))
         else:
@@ -793,10 +1157,11 @@ def _story_live(config: AppConfig, store: ConsumerStore, client: Any, user_id: s
 
     st.divider()
     download_a, download_b = st.columns(2)
-    download_a.download_button("전체 원고", data=draft.encode("utf-8"), file_name=f"{story['title']}.md",
+    # 내려받기 내용은 눌렀을 때만 만든다 — 이 fragment 는 1초마다 다시 도니까 매번 zip 을 만들면 낭비다.
+    download_a.download_button("전체 원고", data=lambda: draft.encode("utf-8"), file_name=f"{_file_stem(story['title'])}.md",
                                mime="text/markdown", disabled=not bool(draft), width="stretch")
-    download_b.download_button("이어쓰기 번들", data=build_continuation_bundle(workspace, story),
-                               file_name=f"{story['title']}_continue.zip", mime="application/zip", width="stretch")
+    download_b.download_button("이어쓰기 번들", data=lambda: build_continuation_bundle(workspace, story),
+                               file_name=f"{_file_stem(story['title'])}_continue.zip", mime="application/zip", width="stretch")
 
     with st.expander("작품 관리 · 초기화와 삭제"):
         st.caption("되돌릴 수 없어. 먼저 위에서 원고를 내려받아 두는 걸 권해.")
@@ -826,7 +1191,199 @@ def _story_live(config: AppConfig, store: ConsumerStore, client: Any, user_id: s
                     st.rerun()
 
 
-def _story_mode(config: AppConfig, store: ConsumerStore, client: Any, user: dict[str, Any], story: dict[str, Any]) -> None:
+def _apply_section_edit(config: AppConfig, store: ConsumerStore, client: Any, user_id: str, story_id: str,
+                        index: int, text: str, refresh: bool) -> None:
+    try:
+        result = replace_section(config, store, client, user_id, story_id, index, text, refresh_memory=refresh)
+    except (StoryEditError, ConsumerStoreError, ValueError, LocalLLMError) as exc:
+        st.error(str(exc))
+        return
+    summary = str(result["memory"].summary)[:60]
+    if result["changed"]:
+        _flash(f"{index}장을 저장했어." + (f" 요약: {summary}" if refresh else ""))
+    elif refresh:
+        _flash(f"본문은 그대로, {index}장 요약 메모리만 다시 만들었어: {summary}")
+    else:
+        st.info("바뀐 내용이 없어.")
+        return
+    _forget_editor_widgets(story_id)
+    st.session_state["consumer_edit_target"] = index
+    st.session_state["consumer_edit_open"] = True
+    st.rerun()
+
+
+def _content_key(*parts: Any) -> str:
+    """위젯 키에 내용 해시를 섞는다. 장 번호만 쓰면 턴 삭제로 번호가 밀리거나 메모리를 새로 뽑아도 옛 입력이 남아
+    다른 장 위에 저장될 수 있다 (키 있는 text_area 는 value= 가 바뀌어도 상태를 유지한다)."""
+    digest = hashlib.sha1("\x1f".join(str(part) for part in parts).encode("utf-8")).hexdigest()[:10]
+    return digest
+
+
+def _editor_manual(config: AppConfig, store: ConsumerStore, client: Any, user_id: str, story_id: str,
+                   current: Any, busy: bool) -> None:
+    text = st.text_area("본문 (첫 줄은 '### 소제목')", value=current.text,
+                        key=f"edit_text_{story_id}_{current.index}_{_content_key(current.text)}", height=380, disabled=busy)
+    refresh = st.checkbox("저장할 때 이 장의 요약 메모리를 AI 로 다시 만든다", value=True, key=f"edit_refresh_{story_id}",
+                          help="끄면 기존 메모리를 그대로 둬. 사건·사실이 바뀌었으면 켜 두는 게 안전해.")
+    st.caption("저장하면 본문·요약 메모리·원장·진행 지표가 함께 바뀌고, 이어쓰기는 고친 내용 위에서 계속돼. "
+               f"지금 {len(text):,}자.")
+    if st.button("💾 저장하고 메모리 갱신" if refresh else "💾 저장", type="primary", key=f"edit_save_{story_id}",
+                 disabled=busy, width="stretch"):
+        _apply_section_edit(config, store, client, user_id, story_id, current.index, text, refresh)
+
+
+def _editor_ai(config: AppConfig, store: ConsumerStore, client: Any, user_id: str, story: dict[str, Any],
+               current: Any, busy: bool, model_ready: bool) -> None:
+    story_id = str(story["id"])
+    index = current.index
+    stamp = _content_key(current.text)
+    draft_key = f"edit_ai_draft_{story_id}_{index}_{stamp}"
+    text_key = f"edit_ai_text_{story_id}_{index}_{_content_key(current.text, st.session_state.get(draft_key, ''))}"
+    quick = st.pills("빠른 요청", QUICK_REWRITES, selection_mode="single", key=f"edit_quick_{story_id}_{index}", disabled=busy)
+    custom = st.text_input("직접 요청", placeholder="예: 박 노인의 대사를 더 거칠게. 마지막 문장은 그대로.",
+                           key=f"edit_custom_{story_id}_{index}", disabled=busy)
+    instruction = " / ".join(part for part in (str(quick or ""), str(custom or "").strip()) if part)
+    if not model_ready:
+        st.caption("🔴 모델 서버가 준비되지 않아 AI 보조를 쓸 수 없어.")
+    if st.button("🤖 AI 에게 맡기기", key=f"edit_ai_go_{story_id}_{index}", width="stretch",
+                 disabled=busy or not instruction or not model_ready,
+                 help="원문은 바꾸지 않고 제안만 먼저 보여줘. 마음에 들면 저장해."):
+        with st.container(border=True):
+            st.caption(f"요청: {instruction}")
+            try:
+                with st.spinner("고칠 곳을 고르는 중..."):
+                    plan = plan_edits(client, config, story, current.text, instruction)
+                if plan:
+                    st.markdown("**수정 계획**  " + chr(10) + "  ".join(
+                        f"- '{edit['where']}' → {edit['how']}" + chr(10) for edit in plan))
+                streamed = st.write_stream(stream_rewrite(client, config, story, current.text, instruction, plan))
+                text = streamed if isinstance(streamed, str) else "".join(str(part) for part in streamed)
+                # 4B 모델은 같은 요청도 어떤 장에선 반토막을 낸다. 범위를 벗어나면 이유를 붙여 한 번 더 쓴다.
+                note = retry_note_for(current.text, text, instruction)
+                if note:
+                    st.caption(f"제안이 원문의 {len(text) / max(1, len(current.text)) * 100:.0f}% 라서 한 번 더 쓰는 중…")
+                    retried = st.write_stream(stream_rewrite(client, config, story, current.text, instruction, plan, note))
+                    retried_text = retried if isinstance(retried, str) else "".join(str(part) for part in retried)
+                    if abs(len(retried_text) / max(1, len(current.text)) - 1) < abs(len(text) / max(1, len(current.text)) - 1):
+                        text = retried_text
+            except LocalLLMError as exc:
+                st.error(str(exc))
+                return
+        try:
+            st.session_state[draft_key] = normalize_edit(text, index, current.title, from_model=True)
+        except StoryEditError as exc:
+            st.error(str(exc))
+            return
+        st.session_state.pop(text_key, None)
+        st.rerun()
+    draft = st.session_state.get(draft_key)
+    if not draft:
+        st.caption("제안은 원문 아래에 따로 나와. 고쳐서 저장하거나 버릴 수 있어.")
+        return
+    # text_area 를 캡션보다 먼저: 제안이 사라진 다음 실행에서 같은 자리에 안내 캡션이 들어가 AppTest 의 낡은
+    # 노드를 덮는다 (실제 프런트는 낡은 노드를 알아서 지운다).
+    edited = st.text_area("AI 제안 — 더 고쳐서 저장할 수 있어", value=str(draft), key=text_key, height=380)
+    ratio = len(str(draft)) / max(1, len(current.text))
+    low, high = length_bounds(instruction)
+    note = "" if low <= ratio <= high else " · 분량이 많이 달라졌어. 저장 전에 빠진 내용이 없는지 봐줘."
+    st.caption(f"원문 {len(current.text):,}자 → 제안 {len(str(draft)):,}자 ({ratio * 100:.0f}%){note}")
+    save_column, drop_column = st.columns(2)
+    if save_column.button("💾 이 내용으로 저장", type="primary", key=f"edit_ai_save_{story_id}_{index}", disabled=busy, width="stretch"):
+        _apply_section_edit(config, store, client, user_id, story_id, index, edited, True)
+    if drop_column.button("버리기", key=f"edit_ai_drop_{story_id}_{index}", width="stretch"):
+        st.session_state.pop(draft_key, None)
+        st.session_state.pop(text_key, None)
+        st.rerun()
+
+
+def _editor_memory(config: AppConfig, store: ConsumerStore, client: Any, user_id: str, story_id: str,
+                   workspace: StoryWorkspace, index: int, busy: bool, model_ready: bool) -> None:
+    memory = section_memory(workspace, index)
+    if memory is None:
+        st.caption("이 장의 메모리가 아직 없어. 'AI 로 다시 추출' 을 누르면 만들어져.")
+    else:
+        st.caption("다음 장을 쓸 때 모델은 본문 대신 이 메모리를 본다. 틀린 사실이 있으면 여기서 바로 고쳐.")
+    # 메모리 내용으로 키를 만든다: 저장·재추출로 메모리가 바뀌면 입력칸도 새 값으로 바뀐다.
+    stamp = _content_key(memory.model_dump_json() if memory else "")
+    summary = st.text_area("한 줄 요약", value=memory.summary if memory else "",
+                           key=f"edit_mem_summary_{story_id}_{index}_{stamp}", height=80, disabled=busy)
+    facts = st.text_area("확정된 사실 (줄마다 하나)", value="\n".join(memory.facts) if memory else "",
+                         key=f"edit_mem_facts_{story_id}_{index}_{stamp}", height=120, disabled=busy)
+    clues = st.text_area("미해결 단서 (줄마다 하나)", value="\n".join(memory.open_clues) if memory else "",
+                         key=f"edit_mem_clues_{story_id}_{index}_{stamp}", height=100, disabled=busy)
+    save_column, refresh_column = st.columns(2)
+    if save_column.button("💾 메모리 저장", type="primary", key=f"edit_mem_save_{story_id}_{index}", disabled=busy, width="stretch"):
+        try:
+            saved = update_section_memory(config, store, user_id, story_id, index, summary=summary, facts=facts, open_clues=clues)
+        except (StoryEditError, ConsumerStoreError) as exc:
+            st.error(str(exc))
+        else:
+            _flash(f"{index}장 메모리를 저장했어: {saved.summary[:60]}")
+            _forget_editor_widgets(story_id)
+            st.rerun()
+    if refresh_column.button("🤖 AI 로 다시 추출", key=f"edit_mem_refresh_{story_id}_{index}", width="stretch",
+                             disabled=busy or not model_ready, help="본문은 그대로 두고 요약·사실·단서를 모델이 다시 뽑아."):
+        try:
+            refreshed = refresh_section_memory(config, store, client, user_id, story_id, index)
+        except (StoryEditError, ConsumerStoreError, LocalLLMError) as exc:
+            st.error(str(exc))
+        else:
+            _flash(f"{index}장 요약을 다시 만들었어: {refreshed.summary[:60]}")
+            _forget_editor_widgets(story_id)
+            st.rerun()
+
+
+def _forget_editor_widgets(story_id: str) -> None:
+    """AI 제안(세션 값)을 치운다. 위젯 키(edit_text_/edit_ai_text_/edit_mem_)는 내용 해시가 바뀌면 저절로
+    새 위젯이 되므로 건드리지 않는다 — 직전 실행의 위젯 키를 지우면 AppTest 가 그 위젯 상태를 못 찾는다."""
+    for key in tuple(st.session_state.keys()):
+        if str(key).startswith("edit_ai_draft_") and f"_{story_id}_" in str(key):
+            st.session_state.pop(key, None)
+
+
+def _section_editor(config: AppConfig, store: ConsumerStore, client: Any, user_id: str, story: dict[str, Any]) -> None:
+    """장 단위 원고 수정 패널. 집필 화면의 1초 폴링 fragment 바깥에 둔다 (입력 중 깜빡임 방지)."""
+    story_id = str(story["id"])
+    workspace = StoryWorkspace.for_story(config, story_id)
+    sections = list_sections(workspace)
+    target = st.session_state.pop("consumer_edit_target", None)
+    if target is not None:
+        st.session_state["consumer_edit_open"] = True
+    selected = int(target) if target is not None else int(st.session_state.get("consumer_edit_section") or 0)
+    # 라벨에 고른 장을 넣는다: 라벨이 바뀌면 새 expander 가 되어 접어 둔 패널도 ✏️ 를 누르면 다시 펼쳐진다.
+    label = "✏️ 원고 수정 · 직접 고치거나 AI 에게 맡기기" + (f" · {selected}장" if selected else "")
+    with st.expander(label, expanded=bool(st.session_state.get("consumer_edit_open"))):
+        if not sections:
+            st.caption("아직 쓴 장이 없어. 첫 턴이 끝나면 여기서 장을 고칠 수 있어.")
+            return
+        options = [section.index for section in sections]
+        # 라벨은 번호·소제목만: 글자 수처럼 저장할 때마다 바뀌는 값을 넣으면 브라우저가 기억한 선택지 문자열이
+        # 어긋나 다음 상호작용에서 1장으로 되돌아간다.
+        labels = {section.index: f"{section.index}장 · {section.title}" for section in sections}
+        # 키를 pop 하고 index= 로 다시 만들면 백엔드만 바뀌고 브라우저 선택은 그대로다. 값을 직접 넣어야 동기화된다.
+        if target in options:
+            st.session_state["consumer_edit_section"] = int(target)
+        elif st.session_state.get("consumer_edit_section") not in options:
+            st.session_state["consumer_edit_section"] = options[0]
+        index = int(st.selectbox("수정할 장", options=options, format_func=lambda value: labels[value],
+                                 key="consumer_edit_section"))
+        current = sections[index - 1]
+        st.caption(f"{current.chars:,}자" + (" · 완결된 작품이야. 결말 장을 고쳐도 완결 상태는 유지돼." if story.get("completed_at") else ""))
+        busy = store.owned_outstanding_job(user_id, story_id) is not None
+        model_ready = bool(_model_status(client)["ready"])
+        if busy:
+            st.warning("집필 중이거나 대기 중인 요청이 있어. 끝난 뒤에 고칠 수 있어.")
+        manual_tab, ai_tab, memory_tab = st.tabs(["직접 수정", "AI 보조", "요약 메모리"])
+        with manual_tab:
+            _editor_manual(config, store, client, user_id, story_id, current, busy)
+        with ai_tab:
+            _editor_ai(config, store, client, user_id, story, current, busy, model_ready)
+        with memory_tab:
+            _editor_memory(config, store, client, user_id, story_id, workspace, index, busy, model_ready)
+
+
+def _story_mode(config: AppConfig, store: ConsumerStore, templates: StoryTemplateStore, client: Any,
+                user: dict[str, Any], story: dict[str, Any]) -> None:
     back_column, _spacer = st.columns([1, 5])
     if back_column.button("← 새 작품 기획", key="story_back_to_plan", width="stretch"):
         _clear_story_session()
@@ -838,12 +1395,25 @@ def _story_mode(config: AppConfig, store: ConsumerStore, client: Any, user: dict
     st.markdown(f'<div class="story-meta">{html.escape(str(story["genre"]))} · 장을 이어 쓰며 완성하는 장편</div>',
                 unsafe_allow_html=True)
     with st.expander("작품 설정 · 세계관과 인물"):
-        view_tab, edit_tab = st.tabs(["설정 보기", "설정 수정"])
+        view_tab, edit_tab, template_tab = st.tabs(["설정 보기", "설정 수정", "템플릿으로 저장"])
         with view_tab:
             _settings_view(story)
         with edit_tab:
             st.caption("세계관과 인물은 매 장 프롬프트에 다시 들어가. 수정하면 다음 턴부터 반영되고, 이미 쓴 본문은 그대로 남아.")
             _settings_form(config, store, str(user["id"]), story)
+        with template_tab:
+            st.caption("이 작품의 장르·소재·세계관·인물·집필 지침을 템플릿으로 저장해 두면 새 작품의 **📝 직접 작성** 에서 불러올 수 있어.")
+            with st.form(f"story_template_{story['id']}", border=False):
+                name = st.text_input("템플릿 이름", value=str(story["title"]), max_chars=TEMPLATE_NAME_CHARS)
+                if st.form_submit_button("💾 템플릿으로 저장", width="stretch"):
+                    try:
+                        saved = templates.save_template(str(user["id"]), name=name, target_chars=int(story["target_chars"]),
+                                                        **template_from_story(story))
+                    except TemplateStoreError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.success(f"템플릿 '{saved['name']}' 으로 저장했어.")
+    _section_editor(config, store, client, str(user["id"]), story)
     _story_live(config, store, client, str(user["id"]), str(story["id"]))
 
 
@@ -851,7 +1421,7 @@ def _story_mode(config: AppConfig, store: ConsumerStore, client: Any, user: dict
 
 def main() -> None:
     _styles()
-    config, store, chats, client = _load_runtime()
+    config, store, chats, templates, client = _load_runtime()
     if st.session_state.pop("consumer_logout_pending", False):
         _forget_session_cookie()
     user = _current_user(store)
@@ -859,19 +1429,23 @@ def main() -> None:
         _auth_entry(config, store)
         return
     _sync_session_cookie(str(st.session_state.get("consumer_session_token", "")), config.consumer.auth_session_days)
+    _show_flash()
 
     mode = _mode_bar(client)
-    _sidebar(config, store, chats, user, mode)
     if mode == MODE_CHAT:
-        _chat_mode(config, chats, client, user)
+        # 사이드바가 열린 대화를 표시할 수 있도록 대화를 먼저 정한다.
+        chat = _ensure_chat(config, chats, str(user["id"]))
+        _sidebar(config, store, chats, user, mode)
+        _chat_mode(config, chats, client, user, chat)
         return
+    _sidebar(config, store, chats, user, mode)
     story_id = str(st.session_state.get("consumer_story_id", ""))
     story = store.get_owned_story(str(user["id"]), story_id) if story_id else None
     if story is None:
         _clear_story_session()
-        _plan_mode(config, store, client, user)
+        _plan_mode(config, store, templates, client, user)
         return
-    _story_mode(config, store, client, user, story)
+    _story_mode(config, store, templates, client, user, story)
 
 
 if __name__ == "__main__":

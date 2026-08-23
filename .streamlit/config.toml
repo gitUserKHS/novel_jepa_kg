@@ -6,6 +6,10 @@ enableCORS = true
 enableXsrfProtection = true
 maxUploadSize = 200
 
+[client]
+# 배포 버튼·⋮ 메뉴를 숨긴다. 접힌 사이드바를 펴는 » 버튼은 남는다 (CSS 로 툴바를 통째로 숨기면 사라진다).
+toolbarMode = "minimal"
+
 [browser]
 gatherUsageStats = false
 

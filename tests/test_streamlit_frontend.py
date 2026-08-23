@@ -45,6 +45,15 @@ class StreamlitFrontendTests(unittest.TestCase):
     def test_consumer_has_chat_and_novel_modes(self) -> None:
         _run_isolated_scenario("consumer")
 
+    def test_consumer_chat_list_crud(self) -> None:
+        _run_isolated_scenario("consumer_chat_crud")
+
+    def test_consumer_manual_template_planning(self) -> None:
+        _run_isolated_scenario("consumer_manual_template")
+
+    def test_consumer_section_editing_refreshes_memory(self) -> None:
+        _run_isolated_scenario("consumer_edit_section")
+
 
 def _scenario_dashboard() -> None:
     from streamlit.testing.v1 import AppTest
@@ -163,11 +172,358 @@ def _scenario_consumer() -> None:
         assert any("대기 순번" in item.value for item in app.markdown)
 
 
+def _scenario_consumer_chat_crud() -> None:
+    """사이드바 대화 목록과 기본 CRUD: 새 대화(빈 방 재사용), 이름 바꾸기, 전환, 턴 삭제, 제안 문장,
+    답변 다시 생성, 고쳐서 다시 보내기, 비우기, 삭제, 전체 삭제, 검색."""
+    from streamlit.testing.v1 import AppTest
+
+    from src.service.chat_store import ChatStore
+    from src.service.consumer_store import ConsumerStore
+    from src.utils.config import load_config
+
+    def button(app, label):  # noqa: ANN001, ANN202
+        return next(b for b in app.button if b.label == label)
+
+    def chat_title(app) -> str:  # noqa: ANN001
+        return next(title.value for title in app.title)
+
+    def sidebar_rows(app) -> list[str]:  # noqa: ANN001
+        # st.rerun() 이 한 run 안에서 일어나면 AppTest 트리에는 이전 pass 의 노드가 같은 키로 남을 수 있다
+        # (실제 프런트는 지운다). 키로 중복을 걷어 낸다.
+        seen: dict[str, str] = {}
+        for item in app.sidebar.button:
+            if str(item.key or "").startswith("chat_open_") and item.key not in seen:
+                seen[item.key] = item.label
+        return list(seen.values())
+
+    def markdown_text(app) -> str:  # noqa: ANN001
+        return "\n".join(item.value for item in app.markdown)
+
+    with tempfile.TemporaryDirectory() as temporary, patch.dict(
+        os.environ,
+        {"NOVEL_JEPA_OUTPUT_ROOT": temporary, "NOVEL_LLM_DRY_RUN": "1"},
+        clear=False,
+    ):
+        app = AppTest.from_file(str(PROJECT_ROOT / "consumer_app.py"), default_timeout=30).run()
+        next(item for item in app.text_input if item.label == "표시 이름").set_value("목록 사용자")
+        next(item for item in app.text_input if item.label == "새 아이디").set_value("reader02")
+        next(item for item in app.text_input if item.label == "새 비밀번호").set_value("reader-password")
+        next(item for item in app.text_input if item.label == "비밀번호 확인").set_value("reader-password")
+        button(app, "회원가입").click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        assert chat_title(app) == "새 대화"
+
+        # 빈 대화: 제안 문장이 보이고, 하나를 누르면 그 문장으로 첫 턴이 진행된다.
+        suggestions = [b for b in app.button if b.label == "오늘 저녁 메뉴 하나만 골라줘"]
+        assert len(suggestions) == 1
+        suggestions[0].click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        assert chat_title(app) == "오늘 저녁 메뉴 하나만 골라줘"
+        assert "서윤" in markdown_text(app)
+        assert sidebar_rows(app) == ["오늘 저녁 메뉴 하나만 골라줘"]
+
+        # 이름 바꾸기 (⋯ 메뉴 안의 폼)
+        next(item for item in app.text_input if item.label == "대화 이름").set_value("첫 대화")
+        button(app, "이름 저장").click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        assert chat_title(app) == "첫 대화"
+        assert any("이름을 바꿨어" in toast.value for toast in app.toast)
+
+        # 새 대화를 두 번 눌러도 빈 방은 하나만 생긴다.
+        button(app, "➕ 새 대화").click()
+        app.run()
+        assert chat_title(app) == "새 대화"
+        button(app, "➕ 새 대화").click()
+        app.run()
+        assert sidebar_rows(app) == ["새 대화", "첫 대화"], sidebar_rows(app)
+
+        # 사이드바에서 전환하면 그 대화의 메시지가 보인다.
+        next(b for b in app.sidebar.button if b.label == "첫 대화").click()
+        app.run()
+        assert chat_title(app) == "첫 대화"
+        assert "서윤" in markdown_text(app)
+
+        # 답변 다시 생성: 답변이 하나로 유지된다.
+        button(app, "🔄 다시 생성").click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        assert markdown_text(app).count("젖은 골목의 신호") == 1
+
+        # 고쳐서 다시 보내기: 그 질문부터 뒤가 새로 쓰인다.
+        next(item for item in app.text_area if item.label == "메시지 수정").set_value("저녁 말고 점심 메뉴 골라줘")
+        button(app, "다시 보내기").click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        assert "저녁 말고 점심 메뉴 골라줘" in markdown_text(app)
+        assert "오늘 저녁 메뉴 하나만 골라줘" not in markdown_text(app)
+        assert markdown_text(app).count("젖은 골목의 신호") == 1
+
+        # 턴 삭제: 질문과 답변이 같이 사라지고 제안 문장이 다시 보인다.
+        button(app, "✕").click()
+        app.run()
+        assert "젖은 골목의 신호" not in markdown_text(app)
+        assert any(b.label == "오늘 저녁 메뉴 하나만 골라줘" for b in app.button)
+
+        # 채팅 입력으로 한 턴, 그리고 비우기
+        app.chat_input[0].set_value("다시 물어볼게").run()
+        assert "서윤" in markdown_text(app)
+        button(app, "🧹 메시지 모두 비우기").click()
+        app.run()
+        assert "서윤" not in markdown_text(app)
+        assert chat_title(app) == "새 대화"
+
+        # 대화 삭제: 남은 대화가 열린다.
+        button(app, "정말 삭제").click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        assert len(sidebar_rows(app)) == 1, sidebar_rows(app)
+        assert any("대화를 지웠어" in toast.value for toast in app.toast)
+
+        # 목록이 쌓이면 검색창이 생기고 제목·본문으로 찾는다.
+        config = load_config("configs/default.yaml")
+        store = ChatStore(config)
+        owner = str(ConsumerStore(config).authenticate_user("reader02", "reader-password")["id"])
+        for title, body in (("여름 휴가 계획", "제주도 동쪽 해안"), ("김치찌개 레시피", "돼지고기를 먼저 볶아"),
+                            ("운동 계획", "월수금 달리기"), ("책 추천", "여름에 읽을 소설")):
+            chat = store.create_chat(owner, title=title)
+            store.append_message(owner, chat["id"], "user", body)
+        app.run()
+        search = next(item for item in app.sidebar.text_input if item.label == "대화 검색")
+        search.set_value("여름").run()
+        assert sidebar_rows(app) == ["책 추천", "여름 휴가 계획"], sidebar_rows(app)
+        search.set_value("돼지고기").run()
+        assert sidebar_rows(app) == ["김치찌개 레시피"], sidebar_rows(app)
+
+        # 전체 삭제 뒤에는 빈 대화가 하나 다시 열린다.
+        next(b for b in app.button if b.label.startswith("모든 대화 삭제")).click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        assert chat_title(app) == "새 대화"
+        assert any("개를 지웠어" in toast.value for toast in app.toast)
+        assert sidebar_rows(app) == ["새 대화"], sidebar_rows(app)
+
+
+def _register(app, username: str):  # noqa: ANN001, ANN202
+    next(item for item in app.text_input if item.label == "표시 이름").set_value("작가")
+    next(item for item in app.text_input if item.label == "새 아이디").set_value(username)
+    next(item for item in app.text_input if item.label == "새 비밀번호").set_value("reader-password")
+    next(item for item in app.text_input if item.label == "비밀번호 확인").set_value("reader-password")
+    next(button for button in app.button if button.label == "회원가입").click()
+    app.run()
+    assert len(app.exception) == 0, app.exception
+
+
+def _button(app, label: str):  # noqa: ANN001, ANN202
+    return next(b for b in app.button if b.label == label)
+
+
+def _scenario_consumer_manual_template() -> None:
+    """직접 작성 양식: 템플릿 저장 → 불러오기 → 집필 시작 → 작품 화면에 집필 지침 → 작품에서 템플릿 저장."""
+    from streamlit.testing.v1 import AppTest
+
+    with tempfile.TemporaryDirectory() as temporary, patch.dict(
+        os.environ,
+        {"NOVEL_JEPA_OUTPUT_ROOT": temporary, "NOVEL_LLM_DRY_RUN": "1"},
+        clear=False,
+    ):
+        app = AppTest.from_file(str(PROJECT_ROOT / "consumer_app.py"), default_timeout=30).run()
+        _register(app, "writer03")
+        next(item for item in app.radio if item.label == "모드").set_value("📖 장편 소설")
+        app.run()
+        assert [tab.label for tab in app.tabs] == ["💬 대화로 기획", "📝 직접 작성"]
+        assert not any(item.label == "내 템플릿" for item in app.selectbox), "no templates yet"
+
+        # 양식을 채우고 템플릿으로 저장
+        values = {
+            "tpl_title": "등대의 딸", "tpl_genre": "잔잔한 미스터리",
+            "tpl_premise": "비 오는 항구 도시에서 아버지의 실종을 쫓는다.",
+            "tpl_world": "안개가 걷히지 않는 남해안 항구 도시", "tpl_protagonist": "해원: 등대지기의 딸",
+            "tpl_characters": "문 형사: 과거를 숨긴 형사", "tpl_style_guide": "1인칭, 짧은 문장, 매 장 끝에 여운",
+        }
+        for key, value in values.items():
+            widget = app.text_input(key=key) if key in ("tpl_title", "tpl_genre") else app.text_area(key=key)
+            widget.set_value(value)
+        app.text_input(key="tpl_name").set_value("항구 세계관")
+        _button(app, "💾 템플릿으로 저장").click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        assert any("템플릿 '항구 세계관' 을 저장했어" in toast.value for toast in app.toast), [t.value for t in app.toast]
+        picker = next(item for item in app.selectbox if item.label == "내 템플릿")
+        assert picker.options == ["항구 세계관"]
+
+        # 불러오면 양식이 채워진다 (저장 뒤 양식은 그대로이므로 먼저 비워서 확인)
+        app.text_area(key="tpl_world").set_value("")
+        _button(app, "불러오기").click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        assert app.text_area(key="tpl_world").value == "안개가 걷히지 않는 남해안 항구 도시"
+        assert app.text_area(key="tpl_style_guide").value == "1인칭, 짧은 문장, 매 장 끝에 여운"
+
+        # 필수 항목이 비면 시작하지 않는다
+        app.text_input(key="tpl_genre").set_value("")
+        _button(app, "✅ 이 설정으로 집필 시작").click()
+        app.run()
+        assert any("비어 있는 항목" in item.value for item in app.error), [e.value for e in app.error]
+        app.text_input(key="tpl_genre").set_value("잔잔한 미스터리")
+        _button(app, "✅ 이 설정으로 집필 시작").click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        assert any(title.value == "등대의 딸" for title in app.title)
+        assert any("1인칭, 짧은 문장" in item.value for item in app.markdown), "settings view shows the style guide"
+        assert any("대기 순번" in item.value for item in app.markdown), "the first turn is queued"
+        # 집필 지침은 워커가 쓰는 설정 시트에 들어간다
+        from src.service.consumer_store import ConsumerStore
+        from src.service.story_sheets import style_guide, world_sheet
+        from src.utils.config import load_config
+
+        config = load_config("configs/default.yaml")
+        store = ConsumerStore(config)
+        owner = str(store.authenticate_user("writer03", "reader-password")["id"])
+        story = store.list_owned_stories(owner)[0]
+        assert story["style_guide"] == "1인칭, 짧은 문장, 매 장 끝에 여운"
+        assert style_guide(story) == "1인칭, 짧은 문장, 매 장 끝에 여운"
+        assert "집필 지침" not in world_sheet(story)
+
+        # 작품 화면에서도 템플릿으로 저장할 수 있다 (같은 이름이면 덮어쓴다)
+        next(item for item in app.text_input if item.label == "템플릿 이름").set_value("항구 세계관")
+        _button(app, "💾 템플릿으로 저장").click()
+        app.run()
+        assert any("템플릿 '항구 세계관' 으로 저장했어" in item.value for item in app.success), [x.value for x in app.success]
+        from src.service.template_store import StoryTemplateStore
+
+        templates = StoryTemplateStore(config).list_templates(owner)
+        assert [t["name"] for t in templates] == ["항구 세계관"]
+        assert templates[0]["title"] == "등대의 딸"
+
+
+def _scenario_consumer_edit_section() -> None:
+    """원고 수정 패널: ✏️ 로 장 선택 → 직접 수정 저장(메모리 갱신) → AI 보조 제안 저장 → 메모리 직접 저장."""
+    from streamlit.testing.v1 import AppTest
+
+    from src.memory.story_rag import StoryMemory, load_story_memories, write_story_memories
+    from src.service.consumer_store import ConsumerStore
+    from src.service.story_workspace import StoryWorkspace
+    from src.utils.config import load_config
+
+    with tempfile.TemporaryDirectory() as temporary, patch.dict(
+        os.environ,
+        {"NOVEL_JEPA_OUTPUT_ROOT": temporary, "NOVEL_LLM_DRY_RUN": "1"},
+        clear=False,
+    ):
+        app = AppTest.from_file(str(PROJECT_ROOT / "consumer_app.py"), default_timeout=30).run()
+        _register(app, "writer04")
+
+        # 끝난 턴이 두 장을 쓴 작품을 저장소에서 직접 만든다 (워커 없이).
+        config = load_config("configs/default.yaml")
+        store = ConsumerStore(config)
+        owner = str(store.authenticate_user("writer04", "reader-password")["id"])
+        story = store.create_story(
+            owner, title="유리등의 속삭임", genre="SF 미스터리", premise="사라진 기억을 추적한다",
+            world="기억이 거래되는 근미래 서울", protagonist="서윤: 기록 복원가", characters="민재: 연구원",
+            target_chars=10000,
+        )
+        sid = str(story["id"])
+        workspace = StoryWorkspace.for_story(config, sid, create=True)
+        workspace.draft.write_text(
+            "### 1장 첫 신호\n\n서윤은 장치를 켰다. 민재는 말이 없었다.\n\n"
+            "### 2장 심층 구역\n\n서윤은 좌표를 따라 내려갔다. 문이 열려 있었다.",
+            encoding="utf-8",
+        )
+        write_story_memories(workspace.memory, [
+            StoryMemory(section_index=1, title="1장 첫 신호", summary="옛 요약 하나"),
+            StoryMemory(section_index=2, title="2장 심층 구역", summary="옛 요약 둘"),
+        ])
+        job = store.enqueue_job(owner, sid, instruction="첫 장면을 써줘.", requested_chars=2000, creativity_profile="balanced")
+        store.claim_next_job("worker-1", "v1")
+        store.set_job_start_section_count(int(job["id"]), 0)
+        store.complete_job(int(job["id"]), result_chars=60, result_section_count=2, total_chars=60,
+                           total_section_count=2, metrics={}, novel_completed=False)
+
+        next(item for item in app.radio if item.label == "모드").set_value("📖 장편 소설")
+        app.run()
+        next(b for b in app.sidebar.button if b.label == "유리등의 속삭임").click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        assert any(title.value == "유리등의 속삭임" for title in app.title)
+
+        # 본문 아래의 ✏️ 로 2장을 고른다.
+        edit_buttons = [b for b in app.button if b.label == "✏️ 이 장 수정"]
+        assert len(edit_buttons) == 2, [b.key for b in app.button]
+        edit_buttons[1].click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        picker = app.selectbox(key="consumer_edit_section")
+        assert picker.value == 2, picker.value
+
+        def area(label: str):  # noqa: ANN202
+            return next(item for item in app.text_area if item.label == label)
+
+        body_label = "본문 (첫 줄은 '### 소제목')"
+        assert area(body_label).value.startswith("### 2장 심층 구역")
+
+        # 직접 수정 + 메모리 갱신 (dry-run 모델은 고정 JSON 을 돌려준다)
+        area(body_label).set_value("### 2장 심층 구역\n\n서윤은 좌표를 따라 내려갔다. 문은 잠겨 있었고, 안에서 목소리가 들렸다.")
+        _button(app, "💾 저장하고 메모리 갱신").click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        draft = workspace.draft.read_text(encoding="utf-8")
+        assert "문은 잠겨 있었고" in draft and "문이 열려 있었다" not in draft
+        assert "서윤은 장치를 켰다" in draft, "section 1 untouched"
+        memories = load_story_memories(workspace.memory)
+        assert memories[0].summary == "옛 요약 하나"
+        assert memories[1].summary == "서윤이 첫 단서를 얻는다.", memories[1].summary
+        assert any("2장을 저장했어" in toast.value for toast in app.toast), [t.value for t in app.toast]
+        assert int(store.get_owned_story(owner, sid)["current_chars"]) == len(draft.strip())
+        # 저장 뒤 요약 메모리 탭의 입력칸도 새 메모리를 보여야 한다 (옛 값이 남아 덮어쓰면 안 됨)
+        assert area("한 줄 요약").value == "서윤이 첫 단서를 얻는다.", area("한 줄 요약").value
+
+        # AI 보조: 빠른 요청을 고르면 버튼이 열리고, 제안이 따로 나온 뒤 저장할 수 있다.
+        assert _button(app, "🤖 AI 에게 맡기기").disabled
+        app.pills(key=f"edit_quick_{sid}_2").set_value("더 긴장감 있게")
+        app.run()
+        assert not _button(app, "🤖 AI 에게 맡기기").disabled
+        _button(app, "🤖 AI 에게 맡기기").click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        proposal = area("AI 제안 — 더 고쳐서 저장할 수 있어")
+        assert proposal.value.startswith("### 젖은 골목의 신호"), proposal.value[:60]
+        assert "문은 잠겨 있었고" in workspace.draft.read_text(encoding="utf-8"), "proposal alone changes nothing"
+        _button(app, "💾 이 내용으로 저장").click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        draft = workspace.draft.read_text(encoding="utf-8")
+        assert "### 젖은 골목의 신호" in draft and "문은 잠겨 있었고" not in draft
+        assert "서윤은 장치를 켰다" in draft
+
+        # 요약 메모리 직접 저장
+        area("한 줄 요약").set_value("서윤이 심층 구역에서 동생의 목소리를 들었다.")
+        area("확정된 사실 (줄마다 하나)").set_value("좌표는 심층 구역을 가리켰다\n문은 잠겨 있었다")
+        _button(app, "💾 메모리 저장").click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        memories = load_story_memories(workspace.memory)
+        assert memories[1].summary == "서윤이 심층 구역에서 동생의 목소리를 들었다."
+        assert memories[1].facts == ["좌표는 심층 구역을 가리켰다", "문은 잠겨 있었다"]
+        assert any("메모리를 저장했어" in toast.value for toast in app.toast)
+
+        # 집필 요청이 들어가면 패널은 잠긴다.
+        store.enqueue_job(owner, sid, instruction="다음 장면.", requested_chars=2000, creativity_profile="balanced")
+        app.run()
+        assert any("끝난 뒤에 고칠 수 있어" in item.value for item in app.warning), [w.value for w in app.warning]
+        assert _button(app, "💾 저장하고 메모리 갱신").disabled
+
+
 SCENARIOS = {
     "dashboard": _scenario_dashboard,
     "admin_token": _scenario_admin_token,
     "admin_controls": _scenario_admin_controls,
     "consumer": _scenario_consumer,
+    "consumer_chat_crud": _scenario_consumer_chat_crud,
+    "consumer_manual_template": _scenario_consumer_manual_template,
+    "consumer_edit_section": _scenario_consumer_edit_section,
 }
 
 
