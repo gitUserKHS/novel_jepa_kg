@@ -165,10 +165,14 @@ maintenance 제어와 queue 상태 확인:
 개연성 장치(설계 → 검토 → 고쳐 쓰기 계약), Ollama 클라이언트, fake 생성기 3만 자 누적,
 Streamlit 관리자/소비자 권한 분리가 포함된다.
 
-`Deploy to local Windows host`는 `master`의 CI가 성공한 뒤에만 self-hosted
-Windows runner에서 실행된다. 배포 순서는 maintenance drain, queue idle,
-서비스 중지, 설치·테스트, consumer/worker 재시작, 웹·백엔드·worker health check,
-서비스 재개다. 검증 실패 시 maintenance를 유지한다.
+`Deploy to local Windows host`는 **수동 실행(`workflow_dispatch`) 전용**이다. 배포 순서는
+maintenance drain, queue idle, 서비스 중지, 설치·테스트, consumer/worker 재시작,
+웹·백엔드·worker health check, 서비스 재개다. 검증 실패 시 maintenance를 유지한다.
+
+전에는 CI 성공 뒤 자동으로 걸렸지만, `novel-jepa` 라벨의 self-hosted runner가 등록돼 있지
+않아 매 푸시마다 시작되지 못하는 실행이 Actions 탭에 영구히 쌓였다(포크한 사람에게도 그대로
+간다). runner 를 등록한 뒤 `.github/workflows/deploy-local.yml` 주석의 `workflow_run`
+트리거를 되살리면 자동 배포로 돌아간다.
 
 runner에는 `novel-jepa` 라벨을 붙이고 Ollama를 쓰는 같은 Windows 계정으로
 실행한다. 공개 저장소의 신뢰하지 않는 pull request에는 self-hosted runner를

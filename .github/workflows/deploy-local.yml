@@ -1,10 +1,16 @@
 name: Deploy to local Windows host
 
+# Manual only. This job needs a self-hosted runner labelled `novel-jepa` on the
+# host PC, and none is registered, so the old `workflow_run` trigger queued a
+# run after every green CI that could never start -- a permanently pending
+# entry in the Actions tab, inherited by anyone who forks. Register a runner,
+# then add back:
+#
+#   workflow_run:
+#     workflows: ["CI"]
+#     types: [completed]
 on:
   workflow_dispatch:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
 
 permissions:
   contents: read
@@ -15,17 +21,16 @@ concurrency:
 
 jobs:
   deploy:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'master')
+    # A fork has neither the runner nor the local-production environment.
+    if: github.repository == 'gitUserKHS/novel_jepa_kg'
     runs-on: [self-hosted, Windows, X64, novel-jepa]
     timeout-minutes: 60
     environment: local-production
     steps:
-      - name: Check out CI-approved revision
+      - name: Check out the revision to deploy
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.sha }}
           clean: false
 
       - name: Drain, deploy, verify, and resume consumer service
