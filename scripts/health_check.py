@@ -4,8 +4,8 @@ import argparse
 import json
 import sys
 import time
-from datetime import UTC, datetime
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,10 +15,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.service.health import model_is_available
 from src.service.artifacts import active_model_status
 from src.service.consumer_store import ConsumerStore
-from src.utils.config import load_config
+from src.service.health import model_is_available
+from src.utils.config import AppConfig, load_config
 
 
 def _retry(label: str, attempts: int, delay: float, check: Callable[[], Any]) -> Any:
@@ -46,7 +46,10 @@ def check_ollama(ollama_url: str, models_required: list[str], timeout: float) ->
     models = [item.get("name", "") for item in response.json().get("models", [])]
     missing = [model for model in models_required if not model_is_available(model, models)]
     if missing:
-        raise RuntimeError(f"Ollama models are missing: {missing}; installed models: {models}")
+        raise RuntimeError(
+            f"Ollama models are missing: {missing}; installed models: {models}. "
+            + " ".join(f"Run: ollama pull {model}" for model in missing)
+        )
     return models
 
 
@@ -73,6 +76,14 @@ def check_model_server(base_url: str, timeout: float) -> str:
     return str(payload.get("model", "local"))
 
 
+def check_novel_backend(config: AppConfig, timeout: float) -> str:
+    """소설 백엔드: llm.backend 가 ollama 면 설정된 모델이 Ollama 에 있는지, local 이면 모델 서버 상태."""
+    if config.llm.backend == "local":
+        return f"local model server {check_model_server(config.llm.base_url, timeout)} at {config.llm.base_url}"
+    check_ollama(config.llm.ollama_base_url, [config.llm.model], timeout)
+    return f"ollama model {config.llm.model} at {config.llm.ollama_base_url}"
+
+
 def check_active_jepa(config_path: str) -> str:
     status = active_model_status(load_config(config_path), verify_files=True)
     if not status["ready"]:
@@ -81,22 +92,24 @@ def check_active_jepa(config_path: str) -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Check the local Novel JEPA service and Ollama runtime.")
+    parser = argparse.ArgumentParser(description="Check the consumer web, the novel model backend, and the worker.")
     parser.add_argument("--app-url", default="http://127.0.0.1:8501")
-    parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
-    parser.add_argument("--model", default="gemma4:e4b")
-    parser.add_argument("--embedding-model", default="embeddinggemma:latest")
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--worker-max-age", type=float, default=20.0)
     parser.add_argument("--attempts", type=int, default=20)
     parser.add_argument("--delay", type=float, default=2.0)
     parser.add_argument("--timeout", type=float, default=5.0)
-    parser.add_argument("--model-server-url", default="http://127.0.0.1:8765")
-    parser.add_argument("--skip-model-server", action="store_true")
-    parser.add_argument("--skip-ollama", action="store_true", default=True,
-                        help="Ollama is the legacy research backend; checked only with --check-ollama")
-    parser.add_argument("--check-ollama", dest="skip_ollama", action="store_false")
+    parser.add_argument("--skip-backend", action="store_true", help="Do not check the novel model backend (llm.*).")
+    parser.add_argument("--skip-model-server", dest="skip_backend", action="store_true", help="Alias of --skip-backend.")
+    parser.add_argument("--model-server-url", default=None, help="Override llm.base_url for the legacy local backend.")
     parser.add_argument("--skip-worker", action="store_true")
+    # 레거시 연구 UI 검사 (기본 꺼짐)
+    parser.add_argument("--ollama-url", default="http://127.0.0.1:11434")
+    parser.add_argument("--model", default="gemma4:e4b")
+    parser.add_argument("--embedding-model", default="embeddinggemma:latest")
+    parser.add_argument("--skip-ollama", action="store_true", default=True,
+                        help="Research-UI Ollama models are checked only with --check-ollama")
+    parser.add_argument("--check-ollama", dest="skip_ollama", action="store_false")
     parser.add_argument("--skip-active-jepa", action="store_true", default=True,
                         help="JEPA artifacts are legacy; checked only with --check-active-jepa")
     parser.add_argument("--check-active-jepa", dest="skip_active_jepa", action="store_false")
@@ -105,53 +118,31 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    config = load_config(args.config)
+    if args.model_server_url:
+        config.llm.base_url = args.model_server_url
+    backend_label = ""
     try:
-        _retry(
-            "Streamlit health check",
-            args.attempts,
-            args.delay,
-            lambda: check_streamlit(args.app_url, args.timeout),
-        )
-        if not args.skip_model_server:
-            _retry(
-                "Model server health check",
-                args.attempts,
-                args.delay,
-                lambda: check_model_server(args.model_server_url, args.timeout),
-            )
+        _retry("Streamlit health check", args.attempts, args.delay, lambda: check_streamlit(args.app_url, args.timeout))
+        if not args.skip_backend:
+            backend_label = _retry("Novel model backend check", args.attempts, args.delay,
+                                   lambda: check_novel_backend(config, args.timeout))
         if not args.skip_ollama:
-            _retry(
-                "Ollama health check",
-                args.attempts,
-                args.delay,
-                lambda: check_ollama(
-                    args.ollama_url,
-                    [args.model, args.embedding_model],
-                    args.timeout,
-                ),
-            )
+            _retry("Ollama health check", args.attempts, args.delay,
+                   lambda: check_ollama(args.ollama_url, [args.model, args.embedding_model], args.timeout))
         if not args.skip_worker:
-            _retry(
-                "Consumer worker heartbeat",
-                args.attempts,
-                args.delay,
-                lambda: check_worker(args.config, args.worker_max_age),
-            )
+            _retry("Consumer worker heartbeat", args.attempts, args.delay,
+                   lambda: check_worker(args.config, args.worker_max_age))
         if not args.skip_active_jepa:
-            _retry(
-                "Active JEPA artifact health",
-                args.attempts,
-                args.delay,
-                lambda: check_active_jepa(args.config),
-            )
+            _retry("Active JEPA artifact health", args.attempts, args.delay, lambda: check_active_jepa(args.config))
     except Exception as exc:  # noqa: BLE001 - command-line probes report one clear error.
         print(f"[FAIL] {exc}", file=sys.stderr)
         return 1
     print(f"[OK] Novel service is healthy at {args.app_url}")
-    if not args.skip_model_server:
-        print(f"[OK] Model server is ready at {args.model_server_url}")
+    if not args.skip_backend:
+        print(f"[OK] Novel backend ready: {backend_label}")
     if not args.skip_ollama:
-        print(f"[OK] Ollama models are available: {args.model}, {args.embedding_model}")
+        print(f"[OK] Research Ollama models are available: {args.model}, {args.embedding_model}")
     if not args.skip_worker:
         print("[OK] Consumer worker heartbeat is fresh")
     if not args.skip_active_jepa:

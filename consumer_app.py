@@ -1,8 +1,10 @@
-"""이야기 공방 — 소비자 앱 (ChatGPT 식 두 모드: 일반 채팅 / 장편 소설).
+"""이야기 공방 — 소비자 앱 (장편 소설 전용).
 
-- 일반 채팅: 로컬 Qwen 모델 서버에 직접 스트리밍. 대화는 계정별로 저장(ChatStore).
-  사이드바 목록(날짜 묶음·검색), 이름 바꾸기·내보내기·비우기·삭제, 턴 삭제·고쳐 보내기·답변 다시 생성.
-- 장편 소설: 자유로운 말로 기획 대화 → 작품 카드 확정 → 장 단위 연재(큐 + 워커).
+- 기획: 자유로운 말로 기획 대화 → 작품 카드 확정, 또는 양식 직접 작성(템플릿 저장·불러오기).
+- 집필: 장 단위 연재(SQLite 큐 + 워커). 다음 전개를 말하거나 자동 이어쓰기에 맡긴다. 쓰는 장은 실시간으로 보이고,
+  게이트·개연성 검토가 한 일(걷어내기·다시 쓰기·고쳐 쓰기·점수)이 턴 아래 남는다.
+- 편집: 장 단위 직접 수정 / AI 퇴고 / 요약 메모리 편집.
+- 모델: src/service/runtime.make_llm_client (기본 Ollama Gemma4 26B-A4B). 일반 채팅은 2026-09-03 에 제거했다.
 """
 
 from __future__ import annotations
@@ -20,8 +22,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from streamlit.errors import StreamlitAPIException
 
-from src.llm.local_client import LocalLLMError
-from src.service.chat_store import TITLE_CHARS, ChatStore, ChatStoreError, export_chat_markdown
+from src.llm.common import LocalLLMError
 from src.service.consumer_store import (
     JOB_FAILED,
     JOB_FAILED_RECOVERABLE,
@@ -67,14 +68,12 @@ from src.service.story_workspace import (
 )
 from src.memory.story_outline import load_story_outline
 from src.utils.config import AppConfig, load_config
-from src.utils.timefmt import date_group, local_now, relative_time
+from src.utils.timefmt import local_now, relative_time
 
 
 st.set_page_config(page_title="이야기 공방", page_icon="✦", layout="wide", initial_sidebar_state="expanded")
 
 _SESSION_COOKIE = "novel_jepa_session"
-MODE_CHAT = "💬 일반 채팅"
-MODE_NOVEL = "📖 장편 소설"
 CREATIVITY_LABELS = {"안정": "stable", "균형": "balanced", "대담": "bold"}
 STATUS_LABELS = {
     JOB_QUEUED: "대기 중",
@@ -83,17 +82,7 @@ STATUS_LABELS = {
     JOB_FAILED: "실패",
     JOB_FAILED_RECOVERABLE: "복구 가능",
 }
-TONE_OPTIONS = {"기본 말투": "", "밝고 귀여운 말투": "cute"}
 SEARCH_THRESHOLD = 5  # 목록이 이만큼 쌓이면 검색창을 보인다
-CHAT_SUGGESTIONS = (
-    "오늘 저녁 메뉴 하나만 골라줘",
-    "정중한 거절 이메일 문장을 다듬어줘",
-    "일주일 동안 할 수 있는 가벼운 운동 계획 짜줘",
-)
-CHAT_SYSTEM_PROMPT = (
-    "당신은 친절하고 정확한 한국어 AI 어시스턴트다. 질문에는 간결하고 자연스러운 한국어로 답하고, "
-    "모르는 것은 모른다고 말한다. 코드나 목록이 필요할 때만 마크다운을 쓴다."
-)
 PLANNER_SYSTEM_PROMPT = (
     "너는 한국어 장편 소설의 기획 편집자다. 사용자가 편하게 말한 바람(장르, 분위기, 주인공, 소재, 분량 등)을 듣고 "
     "작품 카드를 채운다. 사용자가 명시한 내용은 그대로 두고, 비어 있는 항목은 사용자의 말과 어울리게 스스로 제안해 채운다. "
@@ -116,7 +105,6 @@ MANUAL_FIELDS = (
     ("characters", "주요 인물 (선택)", "area", "'이름: 역할과 목표' 를 줄바꿈으로. 여기 없는 이름은 모델이 만들지 않아."),
     ("style_guide", "집필 지침 (선택)", "area", "문체·시점·금기·분위기. 예: 1인칭, 짧은 문장, 욕설 금지, 매 장 끝에 여운."),
 )
-CHAT_EDITABLE_TURNS = 5  # 고쳐 보내기 팝오버는 최근 질문 몇 개에만 (메시지마다 text_area 를 그리면 긴 대화가 무거워진다)
 REQUIRED_MANUAL = ("title", "genre", "premise", "world", "protagonist")
 CARD_LABELS = {
     "title": "제목", "genre": "장르", "premise": "핵심 소재", "world": "세계관",
@@ -215,16 +203,16 @@ def _md_label(text: str) -> str:
 
 
 def _file_stem(text: str) -> str:
-    return re.sub(r'[\\/:*?"<>|\r\n]+', "_", str(text)).strip() or "대화"
+    return re.sub(r'[\\/:*?"<>|\r\n]+', "_", str(text)).strip() or "원고"
 
 
 # ---- 런타임 / 세션 ---------------------------------------------------------------------------
 
 @st.cache_resource(show_spinner=False)
-def _load_runtime() -> tuple[AppConfig, ConsumerStore, ChatStore, StoryTemplateStore, Any]:
+def _load_runtime() -> tuple[AppConfig, ConsumerStore, StoryTemplateStore, Any]:
     """설정·저장소·클라이언트는 프로세스에 하나면 된다 (저장소는 호출마다 연결을 새로 연다)."""
     config = load_config("configs/default.yaml")
-    return config, ConsumerStore(config), ChatStore(config), StoryTemplateStore(config), make_llm_client(config)
+    return config, ConsumerStore(config), StoryTemplateStore(config), make_llm_client(config)
 
 
 def _model_status(client: Any) -> dict[str, Any]:
@@ -264,7 +252,7 @@ def _clear_editor_session() -> None:
 
 def _clear_account_session() -> None:
     for key in tuple(st.session_state.keys()):
-        if str(key).startswith(("consumer_", "plan_", "chat_", "story_", "tpl_", "edit_")) or key == "delete_story_confirmation":
+        if str(key).startswith(("consumer_", "plan_", "story_", "tpl_", "edit_")) or key == "delete_story_confirmation":
             st.session_state.pop(key, None)
 
 
@@ -353,11 +341,11 @@ def _auth_entry(config: AppConfig, store: ConsumerStore) -> None:
                             _finish_login(store, user)
                         except (ValueError, AccountExistsError) as exc:
                             st.error(str(exc))
-            st.markdown('<div class="auth-note">대화와 작품은 계정별로 분리 보관되며 작품은 30일 뒤 자동 정리돼.</div>',
+            st.markdown('<div class="auth-note">작품은 계정별로 분리 보관되며 30일 뒤 자동 정리돼.</div>',
                         unsafe_allow_html=True)
     with artwork:
         st.image("assets/consumer/writing_studio.png", width="stretch")
-        st.markdown('<div class="auth-art-caption">일반 채팅과 장편 소설 집필을 한 곳에서</div>', unsafe_allow_html=True)
+        st.markdown('<div class="auth-art-caption">말로 기획하고, 장 단위로 완성하는 장편 소설</div>', unsafe_allow_html=True)
 
 
 def _logout(store: ConsumerStore) -> None:
@@ -369,88 +357,30 @@ def _logout(store: ConsumerStore) -> None:
     st.rerun()
 
 
-# ---- 모드 전환 / 사이드바 ----------------------------------------------------------------------
+# ---- 상태 표시 / 사이드바 ----------------------------------------------------------------------
 
-def _mode_bar(client: Any) -> str:
-    """본문 상단의 모드 전환. 사이드바는 화면 폭에 따라 접히므로 여기에 둔다."""
-    left, right = st.columns([1.6, 1], vertical_alignment="center")
-    with left:
-        mode = st.radio("모드", [MODE_CHAT, MODE_NOVEL], key="consumer_mode", horizontal=True,
-                        label_visibility="collapsed")
-    with right:
-        status = _model_status(client)
-        if status["ready"]:
-            health = status.get("health") or {}
-            st.caption(f"🟢 모델 준비됨 · {health.get('model', 'local')} · VRAM {health.get('vram_gib', '?')} GiB")
-        else:
-            st.caption("🔴 모델 서버 연결 안 됨 — run_model_server.bat 을 실행해줘.")
-    return str(mode or MODE_CHAT)
+def _status_bar(client: Any) -> None:
+    """본문 상단의 모델 상태 한 줄. 사이드바는 화면 폭에 따라 접히므로 여기에 둔다."""
+    status = _model_status(client)
+    if status["ready"]:
+        health = status.get("health") or {}
+        vram = health.get("vram_gib")
+        extra = f" · VRAM {vram} GiB" if vram is not None else ""
+        st.caption(f"🟢 모델 준비됨 · {health.get('model', 'local')}{extra}")
+    else:
+        reason = " ".join(str(status.get("reason") or "").split())[:200]
+        st.caption(f"🔴 모델을 쓸 수 없어 — {reason or 'run_service.bat 을 실행해줘.'}")
 
 
-def _sidebar(config: AppConfig, store: ConsumerStore, chats: ChatStore, user: dict[str, Any], mode: str) -> None:
+def _sidebar(store: ConsumerStore, user: dict[str, Any]) -> None:
     with st.sidebar:
         st.markdown('<div class="story-kicker">STORY STUDIO</div>', unsafe_allow_html=True)
-        if mode == MODE_CHAT:
-            _sidebar_chats(config, chats, user)
-        else:
-            _sidebar_stories(store, user)
+        _sidebar_stories(store, user)
         st.divider()
         st.caption("로그인 계정")
         st.markdown(f"**{user['display_name']}**  \n@{user['username']}")
         if st.button("로그아웃", width="stretch", key="consumer_logout"):
             _logout(store)
-
-
-def _open_new_chat(config: AppConfig, chats: ChatStore, user_id: str) -> None:
-    """빈 대화가 이미 있으면 그걸 맨 위로 올려 연다 — '새 대화' 를 연타해도 빈 방이 쌓이지 않게."""
-    chat = chats.find_empty_chat(user_id)
-    if chat is None:
-        chat = chats.create_chat(user_id, adapter=config.llm.chat_adapter)
-    else:
-        chats.touch_chat(user_id, chat["id"])
-    st.session_state["chat_id"] = chat["id"]
-    if "chat_search" in st.session_state:
-        st.session_state["chat_search"] = ""  # pop 은 백엔드만 비우고 브라우저 입력칸엔 옛 검색어가 남는다
-
-
-def _sidebar_chats(config: AppConfig, chats: ChatStore, user: dict[str, Any]) -> None:
-    user_id = str(user["id"])
-    if st.button("➕ 새 대화", width="stretch", key="chat_new", type="primary"):
-        _open_new_chat(config, chats, user_id)
-        st.rerun()
-    everything = chats.list_chats(user_id)
-    query = ""
-    if len(everything) >= SEARCH_THRESHOLD:
-        query = str(st.text_input("대화 검색", key="chat_search", placeholder="🔍 제목이나 내용으로 찾기",
-                                  label_visibility="collapsed") or "").strip()
-    rows = chats.list_chats(user_id, query=query) if query else everything
-    active = str(st.session_state.get("chat_id", ""))
-    now = local_now()
-    with st.container(key="sidebar_list", gap=None):
-        if not rows:
-            st.caption("찾는 대화가 없어." if query else "아직 대화가 없어. 새 대화를 시작해봐.")
-        elif query:
-            st.caption(f"{len(rows)}개 찾음")
-        current_group = ""
-        for row in rows:
-            group = date_group(row["updated_at"], now=now)
-            if group != current_group and not query:
-                st.markdown(f'<div class="list-group">{group}</div>', unsafe_allow_html=True)
-                current_group = group
-            is_active = row["id"] == active
-            meta = f"메시지 {int(row['message_count'])}개 · {relative_time(row['updated_at'], now=now)}"
-            if st.button(_md_label(row["title"]), key=f"chat_open_{row['id']}", width="stretch",
-                         type="secondary" if is_active else "tertiary", help=f"{row['title']}\n\n{meta}"):
-                st.session_state["chat_id"] = row["id"]
-                st.rerun()
-    if everything:
-        with st.popover("🗑 대화 정리", width="stretch", help="모든 대화를 한 번에 지워"):
-            st.caption(f"대화 {len(everything)}개를 모두 지워. 되돌릴 수 없어.")
-            if st.button(f"모든 대화 삭제 ({len(everything)}개)", key="chat_delete_all", type="primary", width="stretch"):
-                removed = chats.delete_all_chats(user_id)
-                st.session_state.pop("chat_id", None)
-                _flash(f"대화 {removed}개를 지웠어.")
-                st.rerun()
 
 
 def _sidebar_stories(store: ConsumerStore, user: dict[str, Any]) -> None:
@@ -484,195 +414,6 @@ def _sidebar_stories(store: ConsumerStore, user: dict[str, Any]) -> None:
                     _clear_editor_session()
                 st.session_state["consumer_story_id"] = story["id"]
                 st.rerun()
-
-
-# ---- 일반 채팅 --------------------------------------------------------------------------------
-
-def _chat_history_for_model(messages: list[dict[str, Any]], max_chars: int = 14000) -> list[dict[str, str]]:
-    history: list[dict[str, str]] = []
-    used = 0
-    for message in reversed(messages):
-        content = str(message["content"])
-        if used + len(content) > max_chars and history:
-            break
-        history.append({"role": str(message["role"]), "content": content})
-        used += len(content)
-    history.reverse()
-    return [{"role": "system", "content": CHAT_SYSTEM_PROMPT}, *history]
-
-
-def _ensure_chat(config: AppConfig, chats: ChatStore, user_id: str) -> dict[str, Any]:
-    """열려 있는 대화를 돌려준다. 없으면 가장 최근 대화, 그것도 없으면 새로 만든다."""
-    chat_id = str(st.session_state.get("chat_id", ""))
-    chat = chats.get_chat(user_id, chat_id) if chat_id else None
-    if chat is None:
-        rows = chats.list_chats(user_id, limit=1)
-        chat = rows[0] if rows else chats.create_chat(user_id, adapter=config.llm.chat_adapter)
-        st.session_state["chat_id"] = chat["id"]
-    return chat
-
-
-def _chat_header(chats: ChatStore, user_id: str, chat: dict[str, Any], messages: list[dict[str, Any]]) -> None:
-    chat_id = str(chat["id"])
-    head, tone_column, menu_column, delete_column = st.columns([3.4, 1.4, 0.5, 0.5], vertical_alignment="center")
-    with head:
-        st.markdown('<div class="story-kicker">CHAT</div>', unsafe_allow_html=True)
-        st.title(str(chat["title"]))
-        meta = (f"메시지 {len(messages)}개 · 마지막 {relative_time(chat['updated_at'])}" if messages
-                else "첫 메시지를 보내면 그 내용으로 제목이 정해져.")
-        st.markdown(f'<div class="story-meta">{html.escape(meta)}</div>', unsafe_allow_html=True)
-    with tone_column:
-        current_tone = next((label for label, value in TONE_OPTIONS.items() if value == chat["adapter"]), "기본 말투")
-        tone = st.selectbox("말투", list(TONE_OPTIONS), index=list(TONE_OPTIONS).index(current_tone), key=f"tone_{chat_id}")
-        if TONE_OPTIONS[tone] != chat["adapter"]:
-            chats.set_adapter(user_id, chat_id, TONE_OPTIONS[tone])
-            chat["adapter"] = TONE_OPTIONS[tone]
-    with menu_column:
-        with st.popover("⋯", help="이름 바꾸기 · 내려받기 · 비우기", key=f"chat_menu_{chat_id}"):
-            with st.form(f"chat_rename_{chat_id}", border=False):
-                title = st.text_input("대화 이름", value=str(chat["title"]), max_chars=TITLE_CHARS)
-                if st.form_submit_button("이름 저장", width="stretch"):
-                    try:
-                        chats.rename_chat(user_id, chat_id, title)
-                    except ChatStoreError as exc:
-                        st.error(str(exc))
-                    else:
-                        _flash("대화 이름을 바꿨어.")
-                        st.rerun()
-            st.download_button("⬇ 마크다운으로 내려받기", data=lambda: export_chat_markdown(chat, messages).encode("utf-8"),
-                               file_name=f"{_file_stem(chat['title'])}.md", mime="text/markdown", width="stretch",
-                               disabled=not messages, key=f"chat_export_{chat_id}")
-            if st.button("🧹 메시지 모두 비우기", key=f"chat_clear_{chat_id}", width="stretch", disabled=not messages,
-                         help="대화는 남기고 메시지만 지워. 제목은 다음 첫 메시지로 다시 정해져."):
-                chats.clear_messages(user_id, chat_id)
-                _flash("메시지를 비웠어.")
-                st.rerun()
-    with delete_column:
-        with st.popover("🗑", help="이 대화 삭제", key=f"chat_delete_menu_{chat_id}"):
-            st.caption("이 대화와 메시지를 모두 지워. 되돌릴 수 없어.")
-            if st.button("정말 삭제", key=f"chat_delete_{chat_id}", type="primary", width="stretch"):
-                chats.delete_chat(user_id, chat_id)
-                st.session_state.pop("chat_id", None)
-                _flash("대화를 지웠어.")
-                st.rerun()
-
-
-def _chat_welcome(blocked: str) -> str:
-    """빈 대화의 첫 화면. 제안 문장을 누르면 그 문장을 돌려준다."""
-    with st.chat_message("assistant"):
-        st.markdown("무엇이든 물어봐. 소설을 쓰고 싶으면 위에서 **📖 장편 소설** 모드로 바꿔줘.")
-    st.caption("이렇게 시작해볼 수도 있어")
-    columns = st.columns(len(CHAT_SUGGESTIONS))
-    for index, (column, suggestion) in enumerate(zip(columns, CHAT_SUGGESTIONS, strict=True)):
-        if column.button(suggestion, key=f"chat_suggest_{index}", width="stretch", disabled=bool(blocked)):
-            return suggestion
-    return ""
-
-
-def _render_chat_messages(chats: ChatStore, user_id: str, chat_id: str, messages: list[dict[str, Any]],
-                          blocked: str) -> bool:
-    """메시지와 턴 도구를 그린다. 지금 바로 답변을 만들어야 하면 True."""
-    want_reply = False
-    last_index = len(messages) - 1
-    user_turns = [index for index, message in enumerate(messages) if str(message["role"]) == "user"]
-    editable = set(user_turns[-CHAT_EDITABLE_TURNS:])
-    for index, message in enumerate(messages):
-        role = str(message["role"])
-        message_id = int(message["id"])
-        content = str(message["content"])
-        with st.chat_message(role):
-            if role != "user":
-                st.markdown(content)
-                if index == last_index and st.button("🔄 다시 생성", key=f"chat_regen_{message_id}", type="tertiary",
-                                                     disabled=bool(blocked), help="이 답변을 지우고 새로 받아."):
-                    chats.delete_messages_from(user_id, chat_id, message_id)
-                    st.session_state["chat_pending_reply"] = chat_id
-                    st.rerun()
-                continue
-            body, edit_column, delete_column = st.columns([10, 0.7, 0.7], vertical_alignment="top")
-            body.markdown(content)
-            if index in editable:
-                with edit_column.popover("✏️", help="고쳐서 다시 보내기", disabled=bool(blocked), key=f"chat_edit_menu_{message_id}"):
-                    edited = st.text_area("메시지 수정", value=content, key=f"chat_edit_{message_id}", height=120)
-                    if index < last_index:
-                        st.caption("이 메시지부터 다시 보내. 뒤에 이어진 대화는 지워져.")
-                    if st.button("다시 보내기", key=f"chat_resend_{message_id}", type="primary", width="stretch"):
-                        if not edited.strip():
-                            st.error("빈 메시지는 보낼 수 없어.")
-                        else:
-                            chats.delete_messages_from(user_id, chat_id, message_id)
-                            st.session_state["chat_pending_prompt"] = edited.strip()
-                            st.rerun()
-            if delete_column.button("✕", key=f"chat_drop_{message_id}", type="tertiary", help="이 질문과 답변을 지워."):
-                chats.delete_message_pair(user_id, chat_id, message_id)
-                st.rerun()
-            if index == last_index and st.button("🔄 답변 다시 받기", key=f"chat_reply_{message_id}", type="tertiary",
-                                                 disabled=bool(blocked), help="답변이 끊겼을 때 이 질문으로 다시 받아."):
-                want_reply = True
-    return want_reply
-
-
-def _stream_reply(config: AppConfig, chats: ChatStore, client: Any, user_id: str, chat: dict[str, Any],
-                  messages: list[dict[str, Any]]) -> None:
-    chat_id = str(chat["id"])
-    history = _chat_history_for_model(messages)
-    with st.chat_message("assistant"):
-        try:
-            reply = st.write_stream(
-                client.stream_messages(
-                    history,
-                    temperature=config.llm.chat_temperature,
-                    max_tokens=config.llm.chat_max_tokens,
-                    adapter=chat["adapter"] or None,
-                    adapter_scale=config.llm.adapter_scale,
-                )
-            )
-        except LocalLLMError as exc:
-            # 여기서 버튼을 그려도 다음 실행에서 다시 그려지지 않아 눌러도 반응이 없다. 오류를 기억해 두고
-            # 다시 그리면 마지막 질문 아래 '🔄 답변 다시 받기' 가 생긴다.
-            st.session_state["chat_error"] = str(exc)
-            st.rerun()
-    reply_text = reply if isinstance(reply, str) else "".join(str(part) for part in reply)
-    if reply_text.strip():
-        chats.append_message(user_id, chat_id, "assistant", reply_text)
-    st.rerun()
-
-
-def _chat_mode(config: AppConfig, chats: ChatStore, client: Any, user: dict[str, Any], chat: dict[str, Any]) -> None:
-    user_id = str(user["id"])
-    chat_id = str(chat["id"])
-    messages = chats.list_messages(user_id, chat_id)
-    _chat_header(chats, user_id, chat, messages)
-
-    status = _model_status(client)
-    blocked = "" if status["ready"] else f"모델 서버가 준비되지 않았어. {status['reason']}"
-    pending_prompt = str(st.session_state.pop("chat_pending_prompt", "") or "")
-    want_reply = False
-    if messages:
-        want_reply = _render_chat_messages(chats, user_id, chat_id, messages, blocked)
-    elif not pending_prompt:
-        pending_prompt = _chat_welcome(blocked)
-    if blocked:
-        st.warning(blocked)
-    error = str(st.session_state.pop("chat_error", "") or "")
-    if error:
-        st.error(f"답변을 받지 못했어: {error}  \n마지막 질문 아래 **🔄 답변 다시 받기** 로 다시 시도할 수 있어.")
-
-    prompt = st.chat_input("메시지를 입력해", disabled=bool(blocked), key=f"chat_input_{chat_id}") or pending_prompt
-    if prompt:
-        try:
-            chats.append_message(user_id, chat_id, "user", prompt)
-        except ChatStoreError as exc:
-            st.error(str(exc))
-            return
-        messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        want_reply = True
-    elif st.session_state.pop("chat_pending_reply", None) == chat_id:
-        want_reply = bool(messages) and messages[-1]["role"] == "user"
-    if want_reply and not blocked:
-        _stream_reply(config, chats, client, user_id, chat, messages)
 
 
 # ---- 장편 소설: 기획 대화 ---------------------------------------------------------------------
@@ -810,7 +551,7 @@ def _plan_chat(config: AppConfig, store: ConsumerStore, client: Any, user: dict[
                     st.error(str(exc))
 
     status = _model_status(client)
-    blocked = "" if status["ready"] else f"모델 서버가 준비되지 않았어. {status['reason']}"
+    blocked = "" if status["ready"] else f"모델을 쓸 수 없어. {status['reason']}"
     if blocked:
         st.warning(blocked)
     prompt = st.chat_input("쓰고 싶은 이야기를 말해줘", disabled=bool(blocked), key="plan_input")
@@ -982,12 +723,15 @@ def _render_live_note(note: dict[str, Any] | None) -> None:
     discarded = str(note.get("discarded") or "").strip()
     if kind == "retry":
         st.warning(f"🔁 {text} — 이 장을 다시 쓰는 중이야. 아래 초안은 저장되지 않고, 다시 쓸 때 참고하지도 않아.")
+    elif kind == "repair":
+        st.warning(f"🧭 {text} — 검토에서 나온 문제를 고쳐 다시 쓰는 중이야. 고치기 전 초안은 저장되지 않아.")
     elif kind == "trim":
         st.caption(f"✂️ {text}")
     elif kind == "decision":
-        st.caption(f"🔁 {text}")
+        st.caption(("🧭 " if "개연성" in text else "🔁 ") + text)
     if discarded:
-        with st.expander("버려진 초안 보기 (저장되지 않음)"):
+        label = "고치기 전 초안 보기 (저장되지 않음)" if kind == "repair" else "버려진 초안 보기 (저장되지 않음)"
+        with st.expander(label):
             st.markdown(f'<div class="discarded-draft">{html.escape(discarded)}</div>', unsafe_allow_html=True)
 
 
@@ -1027,8 +771,9 @@ def _render_job(job: dict[str, Any], sections: list[str], store: ConsumerStore, 
                         st.rerun()
             else:
                 st.caption("이 턴의 원고는 전체 원고 파일에 저장되어 있어.")
+            # 게이트가 한 일: ✂️ 걷어냄 · 🔁 다시 씀 · 🧭 개연성 검토(점수·모순·고쳐 쓰기)
             for line in _job_retry_notes(job):
-                st.caption(("✂️ " if "걷어냄" in line else "🔁 ") + line)
+                st.caption(("✂️ " if "걷어냄" in line else "🧭 " if "개연성" in line else "🔁 ") + line)
         elif status == JOB_QUEUED:
             position = store.queue_position(user_id, job_id)
             st.markdown(f'<div class="queue-note">대기 순번 {position or "-"}번 · 요청을 안전하게 보관했어.</div>',
@@ -1350,7 +1095,7 @@ def _editor_ai(config: AppConfig, store: ConsumerStore, client: Any, user_id: st
                            key=f"edit_custom_{story_id}_{index}", disabled=busy)
     instruction = " / ".join(part for part in (str(quick or ""), str(custom or "").strip()) if part)
     if not model_ready:
-        st.caption("🔴 모델 서버가 준비되지 않아 AI 보조를 쓸 수 없어.")
+        st.caption("🔴 모델을 쓸 수 없어 AI 보조가 잠겼어.")
     if st.button("🤖 AI 에게 맡기기", key=f"edit_ai_go_{story_id}_{index}", width="stretch",
                  disabled=busy or not instruction or not model_ready,
                  help="원문은 바꾸지 않고 제안만 먼저 보여줘. 마음에 들면 저장해."):
@@ -1527,7 +1272,7 @@ def _story_mode(config: AppConfig, store: ConsumerStore, templates: StoryTemplat
 
 def main() -> None:
     _styles()
-    config, store, chats, templates, client = _load_runtime()
+    config, store, templates, client = _load_runtime()
     if st.session_state.pop("consumer_logout_pending", False):
         _forget_session_cookie()
     user = _current_user(store)
@@ -1537,14 +1282,8 @@ def main() -> None:
     _sync_session_cookie(str(st.session_state.get("consumer_session_token", "")), config.consumer.auth_session_days)
     _show_flash()
 
-    mode = _mode_bar(client)
-    if mode == MODE_CHAT:
-        # 사이드바가 열린 대화를 표시할 수 있도록 대화를 먼저 정한다.
-        chat = _ensure_chat(config, chats, str(user["id"]))
-        _sidebar(config, store, chats, user, mode)
-        _chat_mode(config, chats, client, user, chat)
-        return
-    _sidebar(config, store, chats, user, mode)
+    _status_bar(client)
+    _sidebar(store, user)
     story_id = str(st.session_state.get("consumer_story_id", ""))
     story = store.get_owned_story(str(user["id"]), story_id) if story_id else None
     if story is None:

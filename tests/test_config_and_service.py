@@ -18,16 +18,25 @@ from src.service.security import (
     verify_access_token,
     verify_story_secret,
 )
-from src.utils.config import AppConfig, apply_environment_overrides
+from src.utils.config import DEFAULT_NOVEL_MODEL, AppConfig, apply_environment_overrides
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigTests(unittest.TestCase):
-    def test_checked_in_default_uses_gemma4_e4b(self) -> None:
+    def test_checked_in_default_runs_gemma4_26b_on_ollama(self) -> None:
         raw = yaml.safe_load((PROJECT_ROOT / "configs/default.yaml").read_text(encoding="utf-8"))
         config = AppConfig(**raw)
+        self.assertEqual(config.llm.backend, "ollama")
+        self.assertEqual(config.llm.model, DEFAULT_NOVEL_MODEL)
+        self.assertIn("Gemma4-26B-A4B", config.llm.model)
+        self.assertEqual(config.llm.ollama_base_url, "http://127.0.0.1:11434")
+        self.assertEqual(config.llm.num_ctx, 16384)
+        self.assertTrue(config.generation.enable_scene_plan)
+        self.assertTrue(config.generation.enable_plausibility_gate)
+        self.assertEqual(config.generation.plausibility_min_score, 7)
+        # 레거시 연구 UI 의 Ollama 설정은 그대로다.
         self.assertEqual(config.ollama.chat_model, "gemma4:e4b")
         self.assertEqual(config.service.bind_host, "127.0.0.1")
         self.assertEqual(config.service.port, 8502)
@@ -46,10 +55,16 @@ class ConfigTests(unittest.TestCase):
             "NOVEL_JEPA_BIND_HOST": "0.0.0.0",
             "NOVEL_JEPA_PORT": "9510",
             "NOVEL_JEPA_REQUIRE_AUTH": "true",
+            "NOVEL_LLM_MODEL": "gemma4:test-novel",
+            "NOVEL_LLM_OLLAMA_BASE_URL": "http://10.0.0.5:11434",
+            "NOVEL_LLM_BACKEND": "local",
         }
         with patch.dict(os.environ, values, clear=True):
             config = apply_environment_overrides(AppConfig())
         self.assertEqual(config.ollama.chat_model, "gemma4:e4b-test")
+        self.assertEqual(config.llm.model, "gemma4:test-novel")
+        self.assertEqual(config.llm.ollama_base_url, "http://10.0.0.5:11434")
+        self.assertEqual(config.llm.backend, "local")
         self.assertEqual(config.service.bind_host, "0.0.0.0")
         self.assertEqual(config.service.port, 9510)
         self.assertTrue(config.service.require_access_token)

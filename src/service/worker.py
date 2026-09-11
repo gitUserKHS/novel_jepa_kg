@@ -19,18 +19,15 @@ from src.evaluation.metrics import (
     repetition_rate,
 )
 from src.generation.consistency import check_name_consistency
-from src.generation.hallucination import generate_with_controlled_hallucination
 from src.generation.longform import generate_longform
 from src.generation.stability import assess_section_stability
-from src.llm.local_client import LocalLLMClient, LocalLLMError
-from src.llm.ollama_client import OllamaClient
+from src.llm.common import LocalLLMError
 from src.memory.story_rag import (
     StoryMemory,
     build_story_ledger,
     load_story_memories,
     split_story_memory,
 )
-from src.service.artifacts import ActiveModelUnavailable, load_active_manifest
 from src.service.auto_continue import (
     AUTO_FALLBACK_DIRECTION,
     AUTO_PLACEHOLDER,
@@ -60,20 +57,19 @@ from src.utils.paths import resolve_path
 
 logger = logging.getLogger(__name__)
 Generator = Callable[..., str | dict[str, Any]]
-ClientFactory = Callable[[AppConfig], OllamaClient | LocalLLMClient]
+ClientFactory = Callable[[AppConfig], Any]
 ManifestLoader = Callable[[AppConfig], dict[str, Any]]
 
 
 def local_model_manifest(config: AppConfig) -> dict[str, Any]:
-    """로컬 Qwen 서버가 준비됐으면 그 정체를 manifest 로 돌려준다 (JEPA 산출물 불필요)."""
-    if config.llm.backend == "ollama":
-        return load_active_manifest(config, verify_files=True)
+    """소설 백엔드(Ollama 또는 레거시 모델 서버)가 준비됐으면 그 정체를 manifest 로 돌려준다 (JEPA 산출물 불필요)."""
     client = make_llm_client(config)
     status = client.status()
     if not status["ready"]:
-        raise ActiveModelUnavailable(status["reason"])
+        raise LocalLLMError(status["reason"])
     health = status["health"] or {}
-    return {"version": f"{health.get('model', 'local')}@{config.llm.base_url}", "paths": {}, "health": health}
+    model = health.get("model") or getattr(client, "chat_model", "") or "local"
+    return {"version": f"{model}@{config.llm.backend}", "paths": {}, "health": health}
 
 
 def _public_error(exc: Exception) -> str:
@@ -97,6 +93,10 @@ def _section_metrics(
     coherence_by_section = {
         int(key): float(value)
         for key, value in dict(planner.get("jepa_coherence_by_section", {})).items()
+    }
+    plausibility_by_section = {
+        int(key): float(value)
+        for key, value in dict(planner.get("plausibility_by_section", {})).items()
     }
     metric_memories = list(memories or [])
     while len(metric_memories) < len(sections):
@@ -147,6 +147,9 @@ def _section_metrics(
         # keep whatever they were given when they were generated.
         if zero_index + 1 in coherence_by_section:
             values["jepa_coherence_score"] = round(coherence_by_section[zero_index + 1], 4)
+        # 연속성 편집자 역할의 모델이 매긴 개연성 (1~10). 검토가 불가능했던 장은 없다.
+        if zero_index + 1 in plausibility_by_section:
+            values["plausibility_score"] = round(plausibility_by_section[zero_index + 1], 2)
         output.append((zero_index + 1, values))
     return output
 
@@ -192,9 +195,7 @@ class ConsumerWorker:
         self.store = store or ConsumerStore(config)
         self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
         self.client_factory = client_factory or (lambda value: make_llm_client(value))
-        if generator is None:
-            generator = generate_longform if config.llm.backend != "ollama" else generate_with_controlled_hallucination
-        self.generator = generator
+        self.generator = generator or generate_longform
         self.manifest_loader = manifest_loader or local_model_manifest
 
     def process_one(self) -> bool:
@@ -207,7 +208,7 @@ class ConsumerWorker:
             return False
         try:
             manifest = self.manifest_loader(self.config)
-        except (ActiveModelUnavailable, LocalLLMError) as exc:
+        except LocalLLMError as exc:
             self.store.heartbeat_worker(self.worker_id, "model_unavailable")
             logger.warning("Consumer worker waiting for active model: %s", exc)
             return False
@@ -250,7 +251,7 @@ class ConsumerWorker:
             logger.info("Auto turn for story %s: %s", story_id, job["instruction"])
         characters = character_sheet(story)
         world = world_sheet(story)
-        # 집필 지침은 Qwen 생성기만 받는다. 레거시(ollama) 생성기에는 그 인자가 없다.
+        # 집필 지침은 기본 생성기만 받는다. 테스트가 끼워 넣는 가짜 생성기에는 그 인자가 없을 수 있다.
         guide = style_guide(story)
         generator_extra = {"style_guide": guide} if guide and self.generator is generate_longform else {}
         previous_sections = split_sections(read_draft(workspace.draft))
@@ -338,6 +339,11 @@ class ConsumerWorker:
                     planner.get("turn_stability_retry_successes", 0)
                 ),
                 "mean_stability_score": float(planner.get("mean_stability_score", 0.0)),
+                # 개연성 검토: 이 턴의 장별 점수 평균·최저, 고쳐 쓴 횟수와 그중 통과한 횟수.
+                "mean_plausibility": float(planner.get("mean_plausibility", 0.0)),
+                "min_plausibility": float(planner.get("min_plausibility", 0.0)),
+                "plausibility_repairs": int(planner.get("turn_plausibility_repairs", 0)),
+                "plausibility_repair_successes": int(planner.get("turn_plausibility_repair_successes", 0)),
                 "mean_jepa_coherence": float(planner.get("mean_jepa_coherence", 0.0)),
                 "min_jepa_coherence": float(planner.get("min_jepa_coherence", 0.0)),
                 "coherence_retries": int(planner.get("turn_coherence_retries", 0)),

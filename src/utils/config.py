@@ -44,31 +44,37 @@ class OllamaConfig(BaseModel):
     fallback_keep_alive: str = "10s"
 
 
-class LLMConfig(BaseModel):
-    """생성 백엔드. 기본은 로컬 Qwen3.5-4B 모델 서버(model_server/server.py)."""
+DEFAULT_NOVEL_MODEL = "hf.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced:Q4_K_M"
 
-    backend: str = "local"  # "local" | "ollama"
-    base_url: str = "http://127.0.0.1:8765"
-    dry_run: bool = False  # 테스트/CI: 모델 서버 없이 고정 응답
-    timeout_sec: int = 900
-    # 일반 채팅 기본 말투 어댑터 ("" = 기본 모델). 소설 생성은 항상 기본 모델을 쓴다:
-    # 말투 LoRA 는 서술 분량을 짧게 만든다 (08-23 실측: 1,561자 → 886자).
-    chat_adapter: str = ""
-    adapter_scale: float = 0.6
-    korean_filter: bool = True
-    chat_temperature: float = 0.7
-    chat_max_tokens: int = 1024
+
+class LLMConfig(BaseModel):
+    """소설 생성 백엔드. 기본은 Ollama 의 Gemma4 26B-A4B (MoE, 활성 4B, Q4_K_M, 17GB)."""
+
+    backend: str = "ollama"  # "ollama" | "local" (레거시 Qwen3.5-4B 모델 서버)
+    model: str = DEFAULT_NOVEL_MODEL  # Ollama 모델 태그 (ollama pull 로 받은 그대로)
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    # 09-03 실측 (RTX 4060 8GB): 한국어 1.5자/토큰, 장 프롬프트 ~15K자 ≈ 10K 토큰 + 생성 1,500 토큰.
+    # 16384 면 여유가 있고 KV 포함 VRAM 4.6 GiB. 요청마다 명시해야 하며(Ollama 기본 4096 은 작품 설정·인물을
+    # 소리 없이 잘라 낸다), 값을 바꾸면 모델을 다시 올리므로 서비스 안에서는 고정한다.
+    num_ctx: int = 16384
+    keep_alive: str = "30m"  # 턴 사이에 모델을 내리지 않는다
+    base_url: str = "http://127.0.0.1:8765"  # local 백엔드(모델 서버) 주소
+    dry_run: bool = False  # 테스트/CI: 모델 없이 고정 응답
+    timeout_sec: int = 1800
+    korean_filter: bool = True  # local 백엔드 전용 — Ollama 에는 토큰 필터가 없다
     novel_temperature: float = 0.75
     novel_top_p: float = 0.9
-    novel_top_k: int = 20
+    novel_top_k: int = 40
     novel_repetition_penalty: float = 1.05
     novel_max_tokens: int = 1500
-    # DRY(구절 반복 억제) — 0 이면 꺼짐. min_p 는 0 이면 top_p 사용. 값은 bench_prose_settings 로 결정.
+    # DRY(구절 반복 억제) — local 백엔드 전용, 0 이면 꺼짐. min_p 는 0 이면 top_p 사용. 값은 bench_prose_settings 로 결정.
     novel_dry_multiplier: float = 0.8
     novel_dry_base: float = 1.75
     novel_dry_allowed_length: int = 2
     novel_min_p: float = 0.0
-    memory_max_tokens: int = 500
+    memory_max_tokens: int = 600  # 장 요약 메모리 JSON
+    plan_max_tokens: int = 400  # 장 설계 JSON
+    review_max_tokens: int = 600  # 개연성 검토 JSON
 
 
 class DataConfig(BaseModel):
@@ -134,12 +140,13 @@ class GenerationConfig(BaseModel):
     turn_target_chars: int = 5000
     turn_max_sections: int = 8
     longform_max_sections: int = 60
-    longform_recent_context_chars: int = 2200
+    # 직전 장 꼬리 원문. 앞 장들은 요약·상태 원장으로만 넣는다 (직전 장 전문은 복사 루프의 원인, 08-23 실측).
+    longform_recent_context_chars: int = 2600
     longform_checkpoint_path: str = "reports/runs/creative_longform_latest.md"
     longform_state_path: str = "reports/runs/creative_longform_state.json"
     enable_story_memory_rag: bool = True
     story_memory_top_k: int = 4
-    story_memory_context_chars: int = 2600
+    story_memory_context_chars: int = 3200
     story_memory_path: str = "reports/runs/creative_longform_memory.jsonl"
     story_ledger_path: str = "reports/runs/creative_longform_ledger.json"
     story_outline_path: str = "reports/runs/creative_longform_outline.json"
@@ -153,7 +160,13 @@ class GenerationConfig(BaseModel):
     hallucination_temperature_span: float = 0.8
     enable_consistency_repair: bool = False
     enable_story_outline: bool = True
-    outline_beat_count: int = 8
+    outline_beat_count: int = 12
+    # 개연성 장치 (2026-09-03, src/generation/plausibility.py): 장을 쓰기 전에 인과 설계를 받고, 쓴 뒤 연속성
+    # 편집자 역할의 모델이 확정 사실·앞선 사건·직전 장면과의 모순과 원인 없는 사건을 1~10 으로 검토한다.
+    # 모순이 하나라도 있거나 점수가 기준 미만이면 문제 목록을 들고 한 번 고쳐 쓴 뒤 다시 검토한다.
+    enable_scene_plan: bool = True
+    enable_plausibility_gate: bool = True
+    plausibility_min_score: int = 7
     enable_stability_retry: bool = True
     stability_min_section_ratio: float = 0.55
     enable_jepa_coherence_gate: bool = True
@@ -303,8 +316,12 @@ def apply_environment_overrides(config: AppConfig) -> AppConfig:
     config.ollama.embed_model = _first_env("NOVEL_JEPA_EMBED_MODEL", "OLLAMA_EMBED_MODEL") or config.ollama.embed_model
     config.output_root = _first_env("NOVEL_JEPA_OUTPUT_ROOT") or config.output_root
     config.llm.backend = _first_env("NOVEL_LLM_BACKEND") or config.llm.backend
+    config.llm.model = _first_env("NOVEL_LLM_MODEL") or config.llm.model
+    config.llm.ollama_base_url = (
+        _first_env("NOVEL_LLM_OLLAMA_BASE_URL", "OLLAMA_BASE_URL", "NOVEL_JEPA_OLLAMA_BASE_URL")
+        or config.llm.ollama_base_url
+    )
     config.llm.base_url = _first_env("NOVEL_LLM_BASE_URL", "NOVEL_QWEN_BASE_URL") or config.llm.base_url
-    config.llm.chat_adapter = _first_env("NOVEL_LLM_CHAT_ADAPTER") or config.llm.chat_adapter
     config.llm.dry_run = _env_bool(_first_env("NOVEL_LLM_DRY_RUN"), config.llm.dry_run)
     config.service.name = _first_env("NOVEL_JEPA_SERVICE_NAME") or config.service.name
     config.service.bind_host = _first_env("NOVEL_JEPA_BIND_HOST") or config.service.bind_host

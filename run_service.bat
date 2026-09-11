@@ -4,7 +4,7 @@ cd /d "%~dp0"
 
 if /i "%~1"=="--help" (
     echo Usage: run_service.bat
-    echo Starts the consumer web app and generation worker on port 8501.
+    echo Starts the model backend ^(Ollama by default^), the generation worker and the consumer web app on port 8501.
     exit /b 0
 )
 

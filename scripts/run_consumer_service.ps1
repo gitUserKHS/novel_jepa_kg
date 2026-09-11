@@ -63,10 +63,28 @@ if (Test-Path -LiteralPath $WorkerLock) {
     }
 }
 
-# The generation worker needs the local Qwen model server; start it first (no-op
-# when one is already healthy on the port). It keeps running after this launcher
-# exits so the next start is instant.
-& (Join-Path $PSScriptRoot "run_model_server.ps1") -Port 8765 -Hidden
+# The generation worker needs the model backend from configs/default.yaml. The
+# default is Ollama (Gemma4 26B-A4B): make sure the server answers, the model is
+# installed, and start loading it in the background so the first section does
+# not wait on a 17GB load. `llm.backend: local` keeps the legacy Qwen server.
+Push-Location -LiteralPath $ProjectRoot
+try {
+    $env:PYTHONUTF8 = "1"
+    $Backend = (& $Python -c "from src.utils.config import load_config; print(load_config('configs/default.yaml').llm.backend)")
+    $Backend = if ($Backend) { ([string]$Backend).Trim().ToLowerInvariant() } else { "ollama" }
+}
+finally {
+    Pop-Location
+}
+if ($Backend -eq "local") {
+    & (Join-Path $PSScriptRoot "run_model_server.ps1") -Port 8765 -Hidden
+}
+else {
+    & (Join-Path $PSScriptRoot "run_ollama.ps1") -Hidden
+    if ($LASTEXITCODE -ne 0) {
+        throw "Ollama backend is not ready (see the messages above)."
+    }
+}
 
 $Worker = Start-Process `
     -FilePath $Python `

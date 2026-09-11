@@ -1,4 +1,6 @@
-# Environment for model_server/server.py (NOT the project venv).
+# LEGACY. Environment for model_server/server.py (NOT the project venv), needed only when
+# configs/default.yaml sets llm.backend: local. The default backend (ollama) needs no Python
+# dependencies beyond requirements.txt -- just an Ollama install and `ollama pull <llm.model>`.
 # Validated 2026-08-23 on Windows 11 / RTX 4060 8GB / Python 3.14:
 #   torch 2.13.0+cu126, transformers 5.15.1, bitsandbytes 0.50.1, peft 0.20.0,
 #   accelerate 1.14.0, hqq 0.2.8 (optional), fastapi 0.141, uvicorn 0.52

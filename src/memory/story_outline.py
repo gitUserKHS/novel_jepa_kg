@@ -51,9 +51,10 @@ def create_story_outline(
 - 전체 분량: 약 {int(target_chars):,}자
 - 정확히 {safe_count}개의 순차 beat
 - 1막 설정과 압박, 2막 선택과 대가, 3막 수렴과 결말 의도를 모두 포함
-- 각 beat는 사건을 하나만 전진시키고 이전 beat의 결과를 이어받음
+- 각 beat는 사건을 하나만 전진시키고, 이전 beat의 결과(required_change)를 원인으로 삼는다 — 원인 → 결과 사슬이
+  끊기는 beat, 앞선 상태와 모순되는 beat, 우연으로 문제가 풀리는 beat 를 만들지 않음
 - 인물표에 없는 새 고유명사 인물은 만들지 않음
-- 단서의 setup과 payoff를 분리하고, 같은 반전이나 경고를 새 사실처럼 반복하지 않음
+- 단서의 setup과 payoff를 분리하고(설치한 단서는 뒤에서 반드시 회수), 같은 반전이나 경고를 새 사실처럼 반복하지 않음
 - 각 문자열 값은 40자 이내로 짧게 (premise, ending_intent 는 60자 이내)
 
 JSON 객체 하나만 출력하세요. 마크다운 코드 블록은 쓰지 마세요.
@@ -73,11 +74,13 @@ JSON 객체 하나만 출력하세요. 마크다운 코드 블록은 쓰지 마�
 }}
 """.strip()
     try:
+        # json_mode: Ollama 는 format=json 으로 문법을 강제한다. beat 12개 × 6항목이면 2,000 토큰 가까이 나온다.
         raw = client.chat(
             prompt,
             system="당신은 장편 소설의 인과관계와 복선을 설계하는 한국어 스토리 에디터입니다.",
             temperature=0.25,
-            max_tokens=1400,
+            max_tokens=2400,
+            json_mode=True,
         )
         outline = StoryOutline.model_validate(_json_object(raw))
         if len(outline.beats) < 4:

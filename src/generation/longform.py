@@ -1,14 +1,21 @@
-"""장편 소설 생성기 — 로컬 Qwen3.5-4B 전용 (JEPA·임베딩 없이 구조적 장치만 유지).
+"""장편 소설 생성기 — Ollama Gemma4 26B-A4B (기본) / 레거시 Qwen3.5-4B 모델 서버.
 
-설계 근거 (2026-08-23 실측, C:/연구_프로젝트/ai_아키텍처/applied/README.md):
-- 4B 4bit 모델은 직전 장 전문을 문맥에 두면 그대로 베끼는 루프에 빠진다 → 앞 내용은
-  요약·상태 원장(story_rag)으로 치환하고, 직전 장은 꼬리 일부만 원문으로 준다.
-- 반복 페널티를 올리면 한자·영어로 샌다 → 페널티 1.05 + 한국어 토큰 필터(서버),
-  대신 생성 후 길이·종결·복사·반복·이름 게이트로 최대 1회 재생성.
-- 말투 LoRA 는 서술을 짧게 만든다 → 소설은 항상 기본 모델.
+설계 근거:
+- 랩 실측(2026-08-23, 4B, C:/연구_프로젝트/ai_아키텍처/applied/README.md): 직전 장 전문을 문맥에 두면 베끼는
+  루프 → 앞 내용은 요약·상태 원장(story_rag)으로 치환하고 직전 장은 꼬리만 원문으로 준다. 반복 페널티를 올리면
+  언어 이탈 → 페널티 1.05 + 생성 후 게이트. 26B 로 바꾼 뒤에도 이 구조는 그대로 둔다.
+- 개연성(2026-09-03): 장을 쓰기 전에 인과 설계(목표·장애·전환·결과)를 정하고, 쓴 뒤 연속성 편집자 역할의 모델이
+  확정 사실·앞선 사건·직전 장면과의 모순과 원인 없는 사건을 검토한다(plausibility). 모순이 있거나 점수가 기준
+  미만이면 문제 목록을 들고 한 번 고쳐 쓰고 다시 검토한다.
+- 모든 장 단위 호출(설계·생성·검토·기록)은 같은 시스템 프롬프트 + 같은 순서의 접두사(작품 설정 → 인물 →
+  이야기 지도 → 줄거리·상태 → 지나간 사건 → 직전 장면 끝 → 집필 지침)로 시작한다. Ollama 가 접두사 KV 캐시를
+  재사용해 뒤따르는 호출의 프리필이 거의 0 이 된다 (09-03 실측 8.7K 토큰 16.4s → 0.4s).
 
-흐름: 이야기 지도(outline, 1회) → 장별 과제(primary function + 소비된 비트)
-→ 장 생성 → 게이트 → 1회 재생성 → 메모리 기록(별도 짧은 호출) → 원자 저장.
+흐름: 이야기 지도(1회) → 장 설계 → 장 생성 → 기계 게이트(길이·종결·복사·반복·이름; 반복은 걷어내기, 그 외 1회
+재생성) → 개연성 검토 → (문제 시) 고쳐 쓰기 → 재검토 → 메모리 기록 → 원자 저장.
+두 종류의 다시 쓰기는 다르다. 기계 게이트의 재생성은 버린 초안을 프롬프트에 넣지 않는다 (복사 유인 차단,
+tests/test_longform_retry_isolation.py). 개연성 고쳐 쓰기는 초안을 넣고 문제만 바로잡게 한다 — 사건 순서와
+문장을 지키며 모순을 고치는 데는 그게 맞다 (tests/test_plausibility_gate.py).
 워커와의 계약은 generate_with_controlled_hallucination 과 동일하다.
 """
 
@@ -16,6 +23,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import logging
 import math
 import re
 import time
@@ -24,6 +32,8 @@ from datetime import datetime
 from typing import Any, Callable
 
 from src.generation.consistency import check_name_consistency, extract_character_names
+from src.generation.plausibility import PlausibilityReport, review_section
+from src.llm.jsonish import json_object, salvage_json_object
 from src.memory.beat_ledger import (
     ConsumedBeat,
     build_consumed_beat_context,
@@ -52,18 +62,40 @@ from src.memory.story_rag import (
 from src.utils.config import AppConfig
 from src.utils.paths import ensure_parent, resolve_path
 
+logger = logging.getLogger(__name__)
+
 TraceCallback = Callable[[str, str, dict[str, Any] | None], None]
-GENERATOR_NAME = "longform-qwen"
+GENERATOR_NAME = "longform"
 SECTION_HEADING_RE = re.compile(r"(?m)^###\s+")
 SENTENCE_END = ".!?。！？…\"'”’)]」』"
 FOREIGN_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\u0400-\u04ff]")
 CREATIVITY_ANCHOR = 0.35
+# 문맥 예산: 한국어 1.5자/토큰 실측(Gemma4)보다 보수적으로 잡는다. 접두사 뒤에 붙는 가장 긴 과제(검토 = 장 본문
+# + 지시)를 위해 남겨 두는 글자 수.
+CHARS_PER_TOKEN = 1.45
+TASK_RESERVE_CHARS = 3600
+LOCAL_SERVER_CONTEXT_TOKENS = 110_000
+MIN_MEMORY_CHARS = 600
+MIN_CONSUMED_CHARS = 300
+MIN_TAIL_CHARS = 600
 
-SYSTEM_PROMPT = (
-    "당신은 한국어 장편 소설을 장(章) 단위로 이어 쓰는 작가다. 독자에게 보이는 본문만 쓴다. "
-    "설정과 앞선 사건을 지키되 같은 장면을 되풀이하지 않고, 매 장마다 이야기를 한 걸음 앞으로 옮긴다."
+# 모든 장 단위 호출이 공유하는 시스템 프롬프트. 역할은 사용자 메시지 끝에서 정한다 (접두사 캐시 유지).
+NOVEL_SYSTEM_PROMPT = (
+    "당신은 한국어 장편 소설 제작팀이다. 요청에 따라 작가·장 설계자·연속성 편집자·기록 담당 역할로 답한다. "
+    "어느 역할이든 [작품 설정]·[인물]·[지금까지의 줄거리와 현재 상태]에 적힌 확정 사실을 어기지 않고, "
+    "지나간 사건을 새 사실처럼 되풀이하지 않으며, 모든 사건에 앞선 사건이나 장면 안의 원인을 둔다. "
+    "작가 역할일 때는 독자에게 보이는 본문만 쓴다."
 )
-MEMORY_SYSTEM_PROMPT = "당신은 소설 편집자다. 본문에서 확정된 사실만 간결한 JSON 으로 기록한다."
+SYSTEM_PROMPT = NOVEL_SYSTEM_PROMPT
+MEMORY_SYSTEM_PROMPT = NOVEL_SYSTEM_PROMPT
+PLAN_ROLE_MARKER = "[역할: 장 설계자]"
+WRITE_ROLE_MARKER = "[작성 규칙 — 작가 역할]"
+REPAIR_MARKER = "[역할: 작가 — 검토 결과 고쳐 쓰기]"
+MEMORY_ROLE_MARKER = "[역할: 기록 담당]"
+PLAN_BLOCK_HEADER = "[이번 장의 설계 — 이 인과를 따른다]"
+
+# story_editor 가 예전 이름으로 가져다 쓴다.
+_salvage_json_object = salvage_json_object
 
 
 def _emit(trace: TraceCallback | None, stage: str, status: str, detail: dict[str, Any] | None = None) -> None:
@@ -87,6 +119,17 @@ def _stream(callback: Callable[[str], None] | None, method: str, *args: Any) -> 
         handler = getattr(callback, method, None)
         if callable(handler):
             handler(*args)
+
+
+def _revise_stream(callback: Callable[[str], None] | None, reason: str) -> None:
+    """개연성 고쳐 쓰기 시작: 화면의 초안을 치우고 사유를 남긴다. revise_section 이 없는 콜백은 restart 로 대신한다."""
+    if callback is None or not _has_stream_control(callback):
+        return
+    handler = getattr(callback, "revise_section", None)
+    if callable(handler):
+        handler(reason)
+    else:
+        callback.restart_section(reason)  # type: ignore[attr-defined]
 
 
 # ---- 텍스트 유틸 ---------------------------------------------------------------------------
@@ -160,9 +203,9 @@ TRIMMABLE_ISSUES = ("같은 구절", "마지막 문장")  # 걷어내기로 풀 
 def trim_repetitions(section: str) -> tuple[str, int]:
     """되풀이된 문단·문장을 첫 등장만 남기고 걷어낸다. (정리된 장, 걷어낸 개수).
 
-    4B 모델의 반복 루프는 대개 같은 문장이나 문단을 그대로 다시 쓰는 형태라, 장 전체를 다시 생성하기
-    전에 기계적으로 걷어내면 전개를 지킨 채 통과시킬 수 있다. 문장 안에 같은 구절이 박힌 경우는 못 잡는다 —
-    그때는 게이트가 그대로 남아 재생성으로 간다.
+    반복 루프는 대개 같은 문장이나 문단을 그대로 다시 쓰는 형태라, 장 전체를 다시 생성하기 전에 기계적으로
+    걷어내면 전개를 지킨 채 통과시킬 수 있다. 문장 안에 같은 구절이 박힌 경우는 못 잡는다 — 그때는 게이트가
+    그대로 남아 재생성으로 간다.
     """
     title = _section_title(section, 0)
     body = _section_body(section)
@@ -312,7 +355,45 @@ def _creativity_temperature(config: AppConfig) -> float:
     return max(0.3, min(1.1, base + (target - CREATIVITY_ANCHOR) * 0.6))
 
 
-def _section_prompt(
+def section_max_tokens(config: AppConfig, section_target: int) -> int:
+    """장 하나의 생성 토큰 상한: 목표 글자 수 / 1.5 + 여유, 설정 상한 안에서."""
+    return int(max(600, min(int(config.llm.novel_max_tokens), section_target / 1.5 + 250)))
+
+
+def prompt_char_budget(config: AppConfig, max_tokens: int) -> int:
+    """프롬프트 전체가 넘지 말아야 할 글자 수. Ollama 는 num_ctx 를 넘는 앞부분(작품 설정·인물)을 소리 없이 자른다."""
+    if str(config.llm.backend).strip().lower() == "local":
+        window = LOCAL_SERVER_CONTEXT_TOKENS
+    else:
+        window = int(config.llm.num_ctx)
+    return max(2000, int((window - int(max_tokens) - 600) * CHARS_PER_TOKEN))
+
+
+def _fit_prefix(
+    build: Callable[[int, int, int], str],
+    *,
+    budget: int,
+    memory_chars: int,
+    consumed_chars: int,
+    tail_chars: int,
+) -> str:
+    """접두사를 문맥 예산에 맞춘다: 요약 메모리 → 지나간 사건 → 직전 장 꼬리 순으로 줄인다 (꼬리는 끝을 지킨다)."""
+    limit = max(800, budget - TASK_RESERVE_CHARS)
+    prefix = build(memory_chars, consumed_chars, tail_chars)
+    while len(prefix) > limit:
+        if memory_chars > MIN_MEMORY_CHARS:
+            memory_chars = max(MIN_MEMORY_CHARS, int(memory_chars * 0.7))
+        elif consumed_chars > MIN_CONSUMED_CHARS:
+            consumed_chars = max(MIN_CONSUMED_CHARS, int(consumed_chars * 0.7))
+        elif tail_chars > MIN_TAIL_CHARS:
+            tail_chars = max(MIN_TAIL_CHARS, int(tail_chars * 0.7))
+        else:
+            break
+        prefix = build(memory_chars, consumed_chars, tail_chars)
+    return prefix
+
+
+def _canon_prefix(
     *,
     world: str,
     characters: str,
@@ -320,6 +401,24 @@ def _section_prompt(
     memory_context: str,
     consumed_context: str,
     tail: str,
+    style_guide: str = "",
+) -> str:
+    """설계·생성·검토·기록 호출이 공유하는 접두사. 순서를 바꾸거나 앞에 무언가를 끼우면 Ollama 접두사 캐시가 깨진다."""
+    parts = [
+        "[작품 설정]", world.strip(),
+        "[인물 — 이 이름들만 쓴다]", characters.strip() or "(주인공 한 명)",
+        "[이야기 지도]", outline_text.strip(),
+        "[지금까지의 줄거리와 현재 상태]", memory_context.strip(),
+        "[이미 지나간 사건 — 새 사실처럼 반복하지 말 것]", consumed_context.strip(),
+        "[직전 장면의 끝부분 — 여기서 바로 이어 쓴다]", tail.strip() or "(첫 장면이다)",
+    ]
+    if style_guide.strip():
+        parts.extend(["[집필 지침 — 작가가 정한 문체·시점·금기]", style_guide.strip()])
+    return "\n".join(parts) + "\n"
+
+
+def _task_block(
+    *,
     section_index: int,
     section_role: str,
     function_name: str,
@@ -327,116 +426,148 @@ def _section_prompt(
     target_chars: int,
     completion_rule: str,
     instruction: str,
-    revision_notes: list[str] | None = None,
-    style_guide: str = "",
 ) -> str:
-    parts = [
-        "[작품 설정]", world.strip(),
-        "[인물 — 이 이름들만 쓴다]", characters.strip() or "(주인공 한 명)",
-        "[이야기 지도]", outline_text.strip(),
-        "[지금까지의 줄거리와 현재 상태]", memory_context.strip(),
-        "[이미 지나간 사건 — 새 사실처럼 반복하지 말 것]", consumed_context.strip(),
-        f"[직전 장면의 끝부분 — 여기서 바로 이어 쓴다]", tail.strip() or "(첫 장면이다)",
+    return "\n".join([
         f"[이번 장({section_index}장)의 과제]",
         f"- 역할: {section_role}",
         f"- 핵심 서사 기능 하나: {function_name} — {function_rule}",
         f"- 분량: 약 {target_chars:,}자 (공백 포함). 대화와 묘사를 섞고, 구체적인 행동·장소 변화·상태 변화를 하나 이상 넣는다.",
         f"- 마무리 규칙: {completion_rule}",
         f"- 사용자 요청: {instruction.strip() or '기존의 미해결 압력과 인물의 목표를 따라간다.'}",
-        "[집필 지침 — 작가가 정한 문체·시점·금기, 아래 작성 규칙과 함께 지킨다]" if style_guide.strip() else None,
-        style_guide.strip() or None,
-        "[작성 규칙]",
+    ])
+
+
+def _section_prompt(prefix: str, task: str, *, plan_text: str = "", revision_notes: list[str] | None = None) -> str:
+    parts = [prefix.rstrip(), task]
+    if plan_text.strip():
+        parts.extend([PLAN_BLOCK_HEADER, plan_text.strip()])
+    parts.extend([
+        WRITE_ROLE_MARKER,
         "- 첫 줄은 '### 소제목' 한 줄. 그 뒤는 본문 문단만 쓴다 (목록·해설·제목 반복·메모 금지).",
         "- 직전 장면을 요약하거나 되풀이하지 않고 바로 새 사건을 진행한다.",
+        "- 모든 사건에는 앞선 사건이나 이 장 안의 원인이 있어야 한다. 확정된 사실(장소·소유·관계·목표·생사)을 바꿀 때는 "
+        "그 원인을 장면으로 보여 준다. 우연으로 문제를 풀지 않는다.",
         "- 인물표에 없는 새 이름을 만들지 않는다. 한국어로만 쓴다.",
         "- 마지막 문장을 완전히 끝맺는다.",
-    ]
+    ])
     if revision_notes:
         parts.extend(["[이전 시도의 문제 — 이번엔 반드시 피할 것]", *[f"- {note}" for note in revision_notes]])
-    return "\n".join(part for part in parts if part is not None)
+    return "\n".join(parts)
 
 
-def _memory_prompt(section: str, section_index: int, known_names: list[str]) -> str:
+def _plan_prompt(prefix: str, task: str) -> str:
+    return "\n".join([
+        prefix.rstrip(),
+        task,
+        f"{PLAN_ROLE_MARKER} 본문을 쓰기 전에 이 장의 인과 설계를 정한다. [지금까지의 줄거리와 현재 상태]의 확정 사실과 "
+        "미해결 단서, [직전 장면의 끝부분]의 상황에서 출발해 위 과제(핵심 서사 기능·사용자 요청·마무리 규칙)를 이루는 "
+        "사건 하나를 설계한다. 새 인물·새 설정을 만들지 않고, [이미 지나간 사건]을 다시 겪게 하지 않는다. "
+        "모든 항목은 '무엇 때문에 무엇이 일어나는지' 가 보이게 쓴다.",
+        "아래 키만 가진 JSON 객체 하나를 한 줄로 출력한다. 각 값은 60자 이내 한국어.",
+        '{"goal": "시점 인물이 이 장에서 이루려는 것", "obstacle": "그것을 막는 것 (앞선 사건에서 비롯)", '
+        '"turn": "장 중반의 전환 — 새 정보·선택·사건", "outcome": "장이 끝날 때 달라진 상태와 그 원인", '
+        '"uses": ["가져다 쓰는 앞선 단서·사실 1~3개"], "avoid": ["되풀이하면 안 되는 지나간 사건 1~2개"]}',
+    ])
+
+
+def _string_items(value: Any, limit: int = 3) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    items = [" ".join(str(item).split())[:120] for item in value if str(item).strip()]
+    return items[:limit]
+
+
+def _render_plan(payload: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for key, label in (("goal", "목표"), ("obstacle", "장애"), ("turn", "전환"), ("outcome", "결과")):
+        value = " ".join(str(payload.get(key) or "").split())[:160]
+        if value:
+            lines.append(f"- {label}: {value}")
+    uses = _string_items(payload.get("uses"))
+    avoid = _string_items(payload.get("avoid"))
+    if uses:
+        lines.append("- 가져다 쓰는 앞선 사실: " + "; ".join(uses))
+    if avoid:
+        lines.append("- 되풀이 금지: " + "; ".join(avoid))
+    return "\n".join(lines) if len(lines) >= 2 else ""
+
+
+def _plan_section(client: Any, config: AppConfig, prefix: str, task: str, section_index: int) -> str:
+    """장을 쓰기 전에 인과 설계를 받는다. 실패하면 빈 문자열 — 설계 없이 쓴다."""
+    try:
+        raw = client.chat(
+            _plan_prompt(prefix, task),
+            system=NOVEL_SYSTEM_PROMPT,
+            temperature=0.4,
+            max_tokens=int(config.llm.plan_max_tokens),
+            json_mode=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - 설계는 보조 단계, 없이도 쓴다
+        logger.warning("Scene plan for section %d failed: %s", section_index, exc)
+        return ""
+    plan = _render_plan(json_object(raw) or {})
+    if not plan:
+        logger.warning("Scene plan for section %d returned no usable JSON (%d chars)", section_index, len(raw or ""))
+    return plan
+
+
+def _repair_prompt(prefix: str, *, section: str, section_index: int, issues: list[str], plan_text: str) -> str:
+    parts = [
+        prefix.rstrip(),
+        f"[이번 장({section_index}장) 본문 — 고칠 대상]",
+        section.strip(),
+        "[검토에서 나온 문제 — 모두 고친다]",
+        *[f"- {issue}" for issue in issues],
+    ]
+    if plan_text.strip():
+        parts.extend([PLAN_BLOCK_HEADER, plan_text.strip()])
+    parts.append(
+        f"{REPAIR_MARKER} 위 문제만 바로잡아 이 장 전체를 다시 쓴다. 모순은 [작품 설정]·[인물]·[지금까지의 줄거리와 현재 "
+        "상태]의 확정 사실에 맞게 고치고, 원인 없는 사건에는 앞선 사건에서 비롯한 원인을 장면으로 넣거나 그 사건을 뺀다. "
+        "문제와 무관한 문장·사건 순서·분량·소제목은 그대로 둔다. 첫 줄은 '### 소제목', 그 뒤는 본문 문단만. 인물표에 "
+        "없는 새 이름을 만들지 않고 한국어로만 쓰며 마지막 문장을 완전히 끝맺는다."
+    )
+    return "\n".join(parts)
+
+
+def _memory_prompt(section: str, section_index: int, known_names: list[str], *, prefix: str = "") -> str:
     names = ", ".join(known_names) if known_names else "(인물표 없음)"
-    return (
-        f"다음은 한국어 장편 소설의 {section_index}장이다. 이 장에서 확정된 사실만 기록하라. 인물 이름은 {names} 중에서만 쓴다.\n\n"
-        f"[본문]\n{section[:3500]}\n\n"
-        "아래 키를 가진 JSON 객체 하나만, 줄바꿈 없이 한 줄로 출력하라. 각 목록은 최대 4개, 각 항목은 30자 이내 한국어.\n"
+    if prefix:
+        head = [prefix.rstrip(), f"[이번 장({section_index}장) 본문 — 기록 대상]"]
+    else:
+        head = [f"다음은 한국어 장편 소설의 {section_index}장이다.", "[본문]"]
+    return "\n".join([
+        *head,
+        section[:3500],
+        f"{MEMORY_ROLE_MARKER} 이 장에서 새로 확정된 사실만 기록한다. 인물 이름은 {names} 중에서만 쓴다. 앞선 장에서 "
+        "이미 확정된 사실은 다시 적지 않는다. state_updates 에는 이 장에서 실제로 바뀐 값만(location|emotion|goal|status|owner), "
+        "open_clues 에는 이 장이 남긴 미해결 질문·약속·위협, resolved_clues 에는 이 장에서 답이 난 앞선 단서를 적는다.",
+        "아래 키를 가진 JSON 객체 하나만, 줄바꿈 없이 한 줄로 출력하라. 각 목록은 최대 4개, 각 항목은 40자 이내 한국어.",
         '{"title": "소제목", "summary": "한 문장 요약", "characters": ["등장 인물"], "facts": ["새로 확정된 사실"], '
         '"open_clues": ["미해결 단서"], "resolved_clues": ["해결된 단서"], "locations": ["장소"], '
         '"state_changes": ["인물·물건·목표의 상태 변화"], '
         '"state_updates": [{"entity": "인물/물건", "attribute": "location|emotion|goal|status|owner", "value": "현재 값"}], '
-        '"keywords": ["핵심어 3~6개"]}'
-    )
+        '"relations": [{"source": "인물/물건", "relation": "possesses|trusts|hides|seeks|located_at|causes", "target": "대상"}], '
+        '"keywords": ["핵심어 3~6개"]}',
+    ])
 
 
-def _salvage_json_object(text: str) -> dict[str, Any] | None:
-    """토큰 상한에 잘린 JSON 객체를 마지막 완결 항목까지 살려 닫는다.
-
-    괄호 스택을 추적하며 쉼표·닫는 괄호 위치를 '안전 지점'으로 모은 뒤, 뒤에서부터
-    하나씩 잘라 닫아 보고 처음 파싱되는 후보를 돌려준다. 값 없이 끝난 키나 미완성
-    문자열은 자연히 건너뛴다.
-    """
-    start = text.find("{")
-    if start < 0:
-        return None
-    body = text[start:]
-    try:
-        payload = json.loads(body[: body.rfind("}") + 1])
-        return payload if isinstance(payload, dict) else None
-    except json.JSONDecodeError:
-        pass
-    stack: list[str] = []
-    in_string = False
-    escape = False
-    safe_points: list[tuple[int, list[str]]] = []
-    for index, char in enumerate(body):
-        if in_string:
-            if escape:
-                escape = False
-            elif char == "\\":
-                escape = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char in "{[":
-            stack.append("}" if char == "{" else "]")
-        elif char in "}]":
-            if stack:
-                stack.pop()
-            safe_points.append((index + 1, list(stack)))
-        elif char == ",":
-            safe_points.append((index, list(stack)))
-    for cut, open_brackets in reversed(safe_points[-80:]):
-        candidate = body[:cut].rstrip().rstrip(",")
-        candidate = re.sub(r',?\s*"[^"]*"\s*:\s*$', "", candidate).rstrip().rstrip(",")
-        candidate += "".join(reversed(open_brackets))
-        try:
-            payload = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict) and payload:
-            return _prune_incomplete_items(payload)
-    return None
-
-
-def _prune_incomplete_items(payload: dict[str, Any]) -> dict[str, Any]:
-    """잘린 꼬리에서 살아남은 불완전 객체(키가 모자란 항목)를 목록에서 뺀다."""
-    for key, value in list(payload.items()):
-        if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
-            widest = max(len(item) for item in value)
-            payload[key] = [item for item in value if len(item) == widest]
-    return payload
-
-
-def _extract_memory(client: Any, config: AppConfig, section: str, section_index: int, known_names: list[str]) -> StoryMemory:
+def _extract_memory(
+    client: Any,
+    config: AppConfig,
+    section: str,
+    section_index: int,
+    known_names: list[str],
+    *,
+    prefix: str = "",
+) -> StoryMemory:
     title = _section_title(section, section_index)
     try:
         raw = client.chat(
-            _memory_prompt(section, section_index, known_names),
-            system=MEMORY_SYSTEM_PROMPT,
+            _memory_prompt(section, section_index, known_names, prefix=prefix),
+            system=NOVEL_SYSTEM_PROMPT,
             temperature=0.2,
             max_tokens=int(config.llm.memory_max_tokens),
             json_mode=True,
@@ -446,7 +577,7 @@ def _extract_memory(client: Any, config: AppConfig, section: str, section_index:
         raw = ""
     memory = _parse_memory_payload(raw, section_index, title) if raw else None
     if memory is None and raw:
-        salvaged = _salvage_json_object(raw)
+        salvaged = salvage_json_object(raw)
         if salvaged:
             salvaged.setdefault("section_index", section_index)
             salvaged.setdefault("title", title)
@@ -494,7 +625,7 @@ def _write_run_state(config: AppConfig, sections: list[str], memories: list[Stor
     ensure_parent(path)
     text = "\n\n".join(sections).strip()
     payload = {
-        "version": 2,
+        "version": 3,
         "generator": GENERATOR_NAME,
         "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "total_chars": len(text),
@@ -505,7 +636,7 @@ def _write_run_state(config: AppConfig, sections: list[str], memories: list[Stor
         "ledger_path": str(resolve_path(config, config.generation.story_ledger_path)),
     }
     payload.update(values)
-    payload["retry_reasons"] = list(payload.get("retry_reasons", []))[-20:]
+    payload["retry_reasons"] = list(payload.get("retry_reasons", []))[-30:]
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(path)
 
@@ -523,6 +654,17 @@ def _persist(config: AppConfig, sections: list[str], memories: list[StoryMemory]
 
 
 # ---- 메인 --------------------------------------------------------------------------------------
+
+COUNTER_KEYS = (
+    "repetition_trim_count",
+    "repetition_retry_count",
+    "retry_success_count",
+    "stability_retry_count",
+    "stability_retry_success_count",
+    "plausibility_repair_count",
+    "plausibility_repair_success_count",
+)
+
 
 def generate_longform(
     config: AppConfig,
@@ -587,23 +729,19 @@ def generate_longform(
     story_seed = f"{genre}\n{world.strip()}\n{characters.strip()}"
     titles = [_section_title(section, index) for index, section in enumerate(sections, start=1)]
     consumed: list[ConsumedBeat] = []
-    if config.generation.enable_consumed_beat_ledger:
+    enable_consumed = bool(config.generation.enable_consumed_beat_ledger)
+    if enable_consumed:
         for index, (section, memory) in enumerate(zip(sections, memories, strict=True), start=1):
             consumed.extend(extract_consumed_beats(section, memory=memory, section_index=index, genre=genre))
 
     turns_completed = int(run_state.get("turns_completed", 0) or 0)
     current_turn = turns_completed + 1
-    counters = {
-        "repetition_trim_count": int(run_state.get("repetition_trim_count", 0) or 0),
-        "repetition_retry_count": int(run_state.get("repetition_retry_count", 0) or 0),
-        "retry_success_count": int(run_state.get("retry_success_count", 0) or 0),
-        "stability_retry_count": int(run_state.get("stability_retry_count", 0) or 0),
-        "stability_retry_success_count": int(run_state.get("stability_retry_success_count", 0) or 0),
-    }
+    counters = {key: int(run_state.get(key, 0) or 0) for key in COUNTER_KEYS}
     start_counters = dict(counters)
     retry_reasons = [str(item) for item in (run_state.get("retry_reasons", []) or [])]
     turn_reason_start = len(retry_reasons)
     stability_scores: list[float] = []
+    plausibility_scores: dict[int, int] = {}
     memory_retrievals = 0
     turn_sections: list[str] = []
     turn_start_chars = len("\n\n".join(sections))
@@ -611,13 +749,19 @@ def generate_longform(
     turn_floor = int(turn_target * 0.9)
     temperature = _creativity_temperature(config)
     recent_chars = max(400, int(config.generation.longform_recent_context_chars))
-    max_tokens = int(max(600, min(config.llm.novel_max_tokens, section_target / 1.5 + 250)))
+    memory_budget = max(400, int(config.generation.story_memory_context_chars))
+    consumed_budget = max(300, int(config.generation.consumed_beat_context_chars))
+    max_tokens = section_max_tokens(config, section_target)
+    char_budget = prompt_char_budget(config, max_tokens)
     minimum_chars = int(section_target * float(config.generation.stability_min_section_ratio))
+    min_score = int(config.generation.plausibility_min_score)
+    enable_plan = bool(config.generation.enable_scene_plan)
+    enable_review = bool(config.generation.enable_plausibility_gate)
     _persist(config, sections, memories, turns_completed=turns_completed, turn_in_progress=current_turn,
              turn_target_chars=turn_target, novel_completed=False, retry_reasons=retry_reasons, **counters)
     _emit(trace_callback, "장편 생성 준비", "done", {
         "turn": current_turn, "sections": len(sections), "overall_target": overall_target,
-        "turn_target": turn_target, "temperature": temperature, "max_tokens": max_tokens,
+        "turn_target": turn_target, "temperature": temperature, "max_tokens": max_tokens, "char_budget": char_budget,
     })
 
     section_index = len(sections) + 1
@@ -628,7 +772,7 @@ def generate_longform(
         or ((total_chars - turn_start_chars) < turn_floor and generated < turn_section_cap)
     ):
         previous_body = _section_body(sections[-1]) if sections else ""
-        tail = previous_body[-recent_chars:] if previous_body else previous_scene.strip()[-recent_chars:]
+        tail_source = previous_body if previous_body else previous_scene.strip()
         final_of_turn = generated + 1 >= expected_turn_sections
         completion_rule, final_section = _completion_rule(total_chars, overall_target, section_target, final_of_turn=final_of_turn)
         if outline is not None:
@@ -641,37 +785,47 @@ def generate_longform(
         if final_section:
             section_role = "중심 갈등을 해결하고 결정적 결과를 보여 준 뒤 마지막 이미지로 소설을 끝맺는다."
         function_name, function_rule = choose_primary_function(section_index, consumed, story_seed=story_seed)
-        consumed_context = (
-            build_consumed_beat_context(consumed, max_chars=max(300, int(config.generation.consumed_beat_context_chars)))
-            if config.generation.enable_consumed_beat_ledger else "(없음)"
-        )
-        query = "\n".join([outline_text, continuation_instruction, tail])
+        query = "\n".join([outline_text, continuation_instruction, tail_source[-recent_chars:]])
         retrieved = (
             retrieve_story_memories(memories, query, config.generation.story_memory_top_k, section_index)
             if config.generation.enable_story_memory_rag else []
         )
         memory_retrievals += len(retrieved)
-        memory_context, _ledger = format_hierarchical_story_context(
-            memories, retrieved, query, max(400, int(config.generation.story_memory_context_chars)),
-            group_size=config.generation.story_summary_group_size,
-        )
-        prompt_kwargs = dict(
-            world=world, characters=characters, outline_text=outline_text, memory_context=memory_context,
-            consumed_context=consumed_context, tail=tail, section_index=section_index, section_role=section_role,
-            function_name=function_name, function_rule=function_rule, target_chars=section_target,
-            completion_rule=completion_rule, instruction=continuation_instruction, style_guide=style_guide,
+
+        def build_prefix(memory_chars: int, consumed_chars: int, tail_chars: int) -> str:
+            memory_context, _ledger = format_hierarchical_story_context(
+                memories, retrieved, query, max(400, memory_chars), group_size=config.generation.story_summary_group_size,
+            )
+            consumed_context = (
+                build_consumed_beat_context(consumed, max_chars=max(200, consumed_chars)) if enable_consumed else "(없음)"
+            )
+            return _canon_prefix(
+                world=world, characters=characters, outline_text=outline_text, memory_context=memory_context,
+                consumed_context=consumed_context, tail=tail_source[-tail_chars:] if tail_source else "",
+                style_guide=style_guide,
+            )
+
+        prefix = _fit_prefix(build_prefix, budget=char_budget, memory_chars=memory_budget,
+                             consumed_chars=consumed_budget, tail_chars=recent_chars)
+        task = _task_block(
+            section_index=section_index, section_role=section_role, function_name=function_name,
+            function_rule=function_rule, target_chars=section_target, completion_rule=completion_rule,
+            instruction=continuation_instruction,
         )
         _emit(trace_callback, "장 생성", "running", {
             "section": section_index, "turn": current_turn, "turn_section": generated + 1,
             "chars": total_chars, "outline_beat": beat_index + 1, "function": function_name,
-            "memory_hits": len(retrieved),
+            "memory_hits": len(retrieved), "prefix_chars": len(prefix),
         })
         _stream(stream_callback, "begin_section", "\n\n" if turn_sections else "")
         started = time.monotonic()
         try:
+            plan_text = _plan_section(client, config, prefix, task, section_index) if enable_plan else ""
+            if enable_plan:
+                _emit(trace_callback, "장 설계", "done", {"section": section_index, "planned": bool(plan_text)})
             candidate = _generate_section(
-                client, config, _section_prompt(**prompt_kwargs), temperature, max_tokens, section_index,
-                stream_callback, seed=None,
+                client, config, _section_prompt(prefix, task, plan_text=plan_text), temperature, max_tokens,
+                section_index, stream_callback, seed=None,
             )
             gate_kwargs = dict(previous_body=previous_body, characters=characters, prior_titles=titles,
                                minimum_chars=minimum_chars, consumed_beats=consumed, memory=None, genre=genre)
@@ -695,7 +849,7 @@ def generate_longform(
                         candidate, check = trimmed, trimmed_check
             if check.hard and config.generation.enable_stability_retry:
                 # 연한 문제만으로는 재생성하지 않는다 (재생성 = 장 하나 분량의 시간).
-                # 재생성 프롬프트는 첫 시도 전에 만든 prompt_kwargs 와 문제 목록만 쓴다 — 버려진 초안의 본문은
+                # 재생성 프롬프트는 첫 시도와 같은 접두사·과제·설계와 문제 목록만 쓴다 — 버려진 초안의 본문은
                 # 어디에도 들어가지 않는다 (tests/test_longform_retry_isolation.py 가 고정).
                 counters["stability_retry_count"] += 1
                 if any("되풀이" in item or "반복" in item for item in check.hard):
@@ -706,7 +860,7 @@ def generate_longform(
                 _stream(stream_callback, "restart_section", first_issues)
                 retry = _generate_section(
                     client, config,
-                    _section_prompt(**prompt_kwargs, revision_notes=check.issues),
+                    _section_prompt(prefix, task, plan_text=plan_text, revision_notes=check.issues),
                     min(1.1, temperature + 0.1), max_tokens, section_index, stream_callback, seed=section_index * 7919,
                 )
                 retry_check = assess_section(retry, **gate_kwargs)
@@ -728,7 +882,66 @@ def generate_longform(
                 _emit(trace_callback, "장 재생성", "done", {"section": section_index, "used": better, "remaining": check.issues})
             if not candidate:
                 raise RuntimeError("모델이 빈 장을 돌려줬어.")
-            memory = _extract_memory(client, config, candidate, section_index, known_names)
+
+            # ---- 개연성 검토 → 고쳐 쓰기 → 재검토 ------------------------------------------------
+            report: PlausibilityReport | None = None
+            if enable_review:
+                report = review_section(
+                    client, prefix=prefix, section=candidate, section_index=section_index, plan_text=plan_text,
+                    instruction=continuation_instruction, system=NOVEL_SYSTEM_PROMPT,
+                    max_tokens=int(config.llm.review_max_tokens),
+                )
+                if report.available and not report.passes(min_score):
+                    issues = report.issues(min_score)
+                    counters["plausibility_repair_count"] += 1
+                    retry_reasons.extend(f"{section_index}장: {issue}" for issue in issues)
+                    _emit(trace_callback, "개연성 고쳐 쓰기", "running",
+                          {"section": section_index, "score": report.score, "issues": issues})
+                    _revise_stream(stream_callback, ("개연성 검토: " + "; ".join(issues))[:300])
+                    repaired = _generate_section(
+                        client, config,
+                        _repair_prompt(prefix, section=candidate, section_index=section_index, issues=issues, plan_text=plan_text),
+                        min(temperature, 0.6), max_tokens, section_index, stream_callback, seed=None,
+                    )
+                    repaired_check = assess_section(repaired, **gate_kwargs) if repaired else None
+                    repaired_report: PlausibilityReport | None = None
+                    if repaired and repaired_check is not None and not repaired_check.hard:
+                        repaired_report = review_section(
+                            client, prefix=prefix, section=repaired, section_index=section_index, plan_text=plan_text,
+                            instruction=continuation_instruction, system=NOVEL_SYSTEM_PROMPT,
+                            max_tokens=int(config.llm.review_max_tokens),
+                        )
+                    better = bool(
+                        repaired_report is not None and repaired_report.available and (
+                            len(repaired_report.issues(min_score)) < len(issues) or repaired_report.score > report.score
+                        )
+                    )
+                    if better and repaired_check is not None and repaired_report is not None:
+                        discarded = candidate
+                        candidate, check, report = repaired, repaired_check, repaired_report
+                        if report.passes(min_score):
+                            counters["plausibility_repair_success_count"] += 1
+                        decision = f"개연성 검토에서 나온 문제를 고친 판을 채택했어. (문제: {'; '.join(issues)[:200]})"
+                    else:
+                        discarded = repaired
+                        if repaired_check is not None and repaired_check.hard:
+                            remaining = "고친 판이 기계 게이트에 걸림: " + "; ".join(repaired_check.hard)
+                        elif repaired_report is not None and repaired_report.available:
+                            remaining = "남은 문제: " + ("; ".join(repaired_report.issues(min_score)) or repaired_report.verdict)
+                        else:
+                            remaining = "고친 판을 검토할 수 없었어"
+                        decision = f"고친 판이 더 낫지 않아 처음 판을 그대로 채택했어. ({remaining[:200]})"
+                    _stream(stream_callback, "note_section", "decision", decision, discarded)
+                    _emit(trace_callback, "개연성 고쳐 쓰기", "done",
+                          {"section": section_index, "used": better, "score": report.score if report.available else None})
+                if report.available:
+                    plausibility_scores[section_index] = int(report.score)
+                retry_reasons.append(f"{section_index}장: {report.summary()}")
+                _emit(trace_callback, "개연성 검토", "done", {
+                    "section": section_index, "available": report.available, "score": report.score,
+                    "notes": report.notes(),
+                })
+            memory = _extract_memory(client, config, candidate, section_index, known_names, prefix=prefix)
         except Exception as exc:
             _stream(stream_callback, "abort_section")
             paths = _persist(config, sections, memories, turns_completed=turns_completed, turn_in_progress=current_turn,
@@ -743,7 +956,7 @@ def generate_longform(
         turn_sections.append(candidate)
         titles.append(_section_title(candidate, section_index))
         memories.append(memory)
-        if config.generation.enable_consumed_beat_ledger:
+        if enable_consumed:
             consumed.extend(extract_consumed_beats(candidate, memory=memory, section_index=section_index, genre=genre))
         stability_scores.append(check.score)
         total_chars = len("\n\n".join(sections))
@@ -753,7 +966,8 @@ def generate_longform(
                  turn_target_chars=turn_target, novel_completed=ending_written, retry_reasons=retry_reasons, **counters)
         _emit(trace_callback, "장 생성", "done", {
             "section": section_index, "chars": len(candidate), "total_chars": total_chars,
-            "issues": check.issues, "score": check.score, "seconds": round(time.monotonic() - started, 1),
+            "issues": check.issues, "score": check.score, "plausibility": plausibility_scores.get(section_index),
+            "seconds": round(time.monotonic() - started, 1),
         })
         if final_section:
             break
@@ -768,6 +982,7 @@ def generate_longform(
     if not return_details:
         return full_text
     mean_stability = round(sum(stability_scores) / len(stability_scores), 4) if stability_scores else 0.0
+    scores = list(plausibility_scores.values())
     details = {
         "generator": GENERATOR_NAME,
         "direction": "",
@@ -790,12 +1005,21 @@ def generate_longform(
         "turn_stability_retries": counters["stability_retry_count"] - start_counters["stability_retry_count"],
         "turn_stability_retry_successes": counters["stability_retry_success_count"] - start_counters["stability_retry_success_count"],
         "mean_stability_score": mean_stability,
+        # 개연성 검토 (연속성 편집자 역할의 모델, 1~10). 검토가 불가능했던 장은 빠진다.
+        "plausibility_by_section": dict(plausibility_scores),
+        "mean_plausibility": round(sum(scores) / len(scores), 2) if scores else 0.0,
+        "min_plausibility": min(scores) if scores else 0,
+        "turn_plausibility_repairs": counters["plausibility_repair_count"] - start_counters["plausibility_repair_count"],
+        "turn_plausibility_repair_successes": (
+            counters["plausibility_repair_success_count"] - start_counters["plausibility_repair_success_count"]
+        ),
+        # 레거시 JEPA 게이트 필드 (워커 지표 호환)
         "mean_jepa_coherence": 0.0,
         "min_jepa_coherence": 0.0,
         "turn_coherence_retries": 0,
         "turn_coherence_retry_successes": 0,
         "jepa_coherence_by_section": {},
-        "retry_reasons": retry_reasons[-20:],
+        "retry_reasons": retry_reasons[-30:],
         "checkpoint_path": paths["checkpoint"],
         "story_memory_path": paths["memory"],
         "story_ledger_path": paths["ledger"],
@@ -828,11 +1052,11 @@ def _generate_section(
         options.update(min_p=float(llm.novel_min_p), top_p=1.0, top_k=0)
     raw = client.chat(
         prompt,
-        system=SYSTEM_PROMPT,
+        system=NOVEL_SYSTEM_PROMPT,
         temperature=temperature,
         max_tokens=max_tokens,
         stream_callback=visible,
-        korean_filter="strict",  # 소설 본문: 한자·가나 + 영어 단어 토큰까지 차단 (08-23 실측 누출 대응)
+        korean_filter="strict",  # 레거시 로컬 서버: 한자·가나 + 영어 단어 토큰까지 차단. Ollama 는 무시한다.
         **options,
     )
     section = _normalize_section(raw, section_index)

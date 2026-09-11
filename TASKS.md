@@ -249,3 +249,37 @@
       37 tok/s; 65536 도 실측 OK) — 초과 문맥은 eager 폴백, CUDA 오류 시 자동 강등.
 - [x] 연재 품질: DRY 샘플러(rep12 3.7→1.3, distinct3 0.77→0.87, 기본 0.8/1.75/2) +
       메모리 JSON 간결 스키마·잘린 JSON 복구·한국어 필터 적용.
+
+## Phase 9 - Gemma4 26B-A4B (Ollama) · 채팅 제거 · 개연성 장치 (2026-09-03)
+
+- [x] 모델 교체: 소설 백엔드를 Ollama 의 `hf.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced:Q4_K_M`
+      (MoE 25.2B, 활성 4B, 17GB, 262K 문맥)로. `src/llm/ollama_chat.OllamaChatClient` 가 `LocalLLMClient` 와 같은 표면을
+      제공하고 `runtime.make_llm_client` 가 `llm.backend`(`ollama` 기본 | `local` 레거시)로 고른다. 워커는 항상
+      `generate_longform` 을 쓰고 JEPA 매니페스트를 요구하지 않는다. 런처는 `run_ollama.ps1` 로 Ollama 확인·모델 확인·
+      사전 적재를 한다 (`run_service.bat` 이 백엔드에 따라 분기).
+- [x] Ollama 실측 (09-03, RTX 4060 8GB, ollama 0.33.2): 모델 16.9 GiB 중 VRAM 4.6 GiB, 디코드 27~30 tok/s, 프리필
+      533 tok/s(8.7K 토큰 16.4s), 같은 접두사 재요청 0.4s(KV 캐시), 한국어 1.5~1.6 자/토큰. **think=false 필수** —
+      없으면 320 토큰이 전부 thinking 필드로 가고 content 는 빈다. `format=json` 정상. `num_ctx` 는 요청마다 명시(기본
+      4096 은 장 프롬프트를 자른다), 바꾸면 모델을 다시 올리므로 16384 로 고정.
+- [x] 일반 채팅 제거: `consumer_app.py` 의 모드 전환·채팅 화면·말투 선택·`ChatStore`(+테스트) 삭제, 로그인 직후 기획 화면.
+      `llm.chat_*`/어댑터 설정과 `NOVEL_LLM_CHAT_ADAPTER` 제거. 기존 DB 의 `chats` 테이블은 그대로 두되 읽지 않는다.
+- [x] 개연성 장치 (`src/generation/plausibility.py`, `longform.py`): (1) 장을 쓰기 전에 **장 설계**(목표·장애·전환·결과·
+      가져다 쓰는 사실·되풀이 금지) JSON 을 받아 작가 프롬프트에 넣는다. (2) 쓴 뒤 **연속성 편집자** 역할의 모델이
+      확정 사실·상태 원장·직전 장면과의 모순, 원인 없는 사건, 연속성, 설계 실현을 1~10 으로 검토한다. (3) 모순이 하나라도
+      있거나 점수 < `plausibility_min_score`(7) 이면 문제 목록을 들고 **고쳐 쓰기**(초안을 넣고 문제만 바로잡음) → 재검토
+      → 더 나으면 채택, 아니면 처음 판 유지 + 결정 기록. 검토·설계 호출 실패는 본문을 막지 않는다. 점수·모순·결정은
+      `retry_reasons`(🧭)·`section_metrics.plausibility_score`·`jobs.metrics_json.mean/min_plausibility` 로 남고, 고쳐 쓰는
+      동안 화면은 `live_note.kind=repair` 로 사유와 고치기 전 초안을 보인다.
+- [x] 실제 턴 실측 (09-03, 1만 자 목표 미스터리, 첫 턴 3,755자·2장·이야기 지도 12 beat): 276초, 게이트·고쳐 쓰기 0회,
+      두 장 모두 검토 10/10. 그런데 본문에서 개 콩떡이 "하린아, 또 그거 보고 있어?" / "하린아, 으르렁!" 이라고 말하는
+      대목을 검토가 놓쳤다 — "동물이 말하면 모순" 이라는 일반 지시를 넣어도 여전히 놓침(9~10점). 검토 절차에 **모든 대사를
+      화자에 배정**(dialogue: quote·speaker·can_speak)을 넣자 두 장 모두에서 잡아냈고(can_speak=false → 모순 자동 추가),
+      같은 장을 고쳐 쓰기 프롬프트로 다시 쓰면 개의 대사가 서술로 바뀐다. 교훈: 자기 글의 오류는 열거시켜야 보인다.
+- [x] 접두사 캐시 설계: 장 단위 호출(설계·생성·검토·기록)이 `NOVEL_SYSTEM_PROMPT` 와 `_canon_prefix`(작품 설정 → 인물 →
+      이야기 지도 → 줄거리·상태 → 지나간 사건 → 직전 장면 끝 → 집필 지침)를 공유하고 역할 지시는 끝에 붙인다. JSON 모드는
+      시스템 프롬프트를 건드리지 않는다. 문맥 예산(`prompt_char_budget`)을 넘으면 메모리 → 지나간 사건 → 꼬리 순으로 줄인다.
+- [x] 이야기 지도: `outline_beat_count` 8 → 12, JSON 모드, 원인 → 결과 사슬 규칙 추가. 메모리 추출 프롬프트에 `relations`
+      와 "이 장에서 새로 확정된 사실만" 규칙.
+- [x] 테스트: `test_ollama_chat_client.py`(NDJSON·think·format·힌트 위치·사용량·상태), `test_plausibility_gate.py`(설계 →
+      생성 → 검토 → 고쳐 쓰기 계약, 실패 내성, 문맥 예산, dry-run 전체 경로), 기존 생성기·프론트 테스트 갱신,
+      채팅 테스트 삭제. `health_check.py` 는 설정된 백엔드를 검사한다.

@@ -156,7 +156,7 @@ def clear_live_prose(workspace: StoryWorkspace) -> None:
 
 
 def read_live_note(workspace: StoryWorkspace) -> dict[str, Any] | None:
-    """The note beside the live prose: {"kind": retry|trim|decision, "text": ..., "discarded": ...}."""
+    """The note beside the live prose: {"kind": retry|repair|trim|decision, "text": ..., "discarded": ...}."""
     try:
         if not workspace.note.exists():
             return None
@@ -221,6 +221,15 @@ class LiveProseWriter:
         # blank that looks like a new chapter starting.
         self.flush()
         write_live_note(self.workspace, "retry", reason, "".join(self._streamed))
+        self._clear_prose()
+
+    def revise_section(self, reason: str = "") -> None:
+        # The plausibility review found a contradiction or an unmotivated event.
+        # Unlike restart_section, the draft is not thrown away blind: the writer
+        # gets it back with the problem list and fixes it in place. The reader
+        # sees why the prose vanished and what is being fixed.
+        self.flush()
+        write_live_note(self.workspace, "repair", reason, "".join(self._streamed))
         self._clear_prose()
 
     def note_section(self, kind: str, text: str, discarded: str = "") -> None:

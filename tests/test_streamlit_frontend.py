@@ -42,11 +42,8 @@ class StreamlitFrontendTests(unittest.TestCase):
     def test_admin_keeps_research_controls_and_service_management(self) -> None:
         _run_isolated_scenario("admin_controls")
 
-    def test_consumer_has_chat_and_novel_modes(self) -> None:
+    def test_consumer_plans_and_starts_a_story(self) -> None:
         _run_isolated_scenario("consumer")
-
-    def test_consumer_chat_list_crud(self) -> None:
-        _run_isolated_scenario("consumer_chat_crud")
 
     def test_consumer_manual_template_planning(self) -> None:
         _run_isolated_scenario("consumer_manual_template")
@@ -131,27 +128,18 @@ def _scenario_consumer() -> None:
         app.run()
         assert len(app.exception) == 0, app.exception
 
-        # 기본은 일반 채팅 모드: 모드 선택, 새 대화 제목, 말투 선택, 채팅 입력창이 있다.
-        mode = next(item for item in app.radio if item.label == "모드")
-        assert mode.options == ["💬 일반 채팅", "📖 장편 소설"]
-        assert any(title.value == "새 대화" for title in app.title)
-        assert any(item.label == "말투" for item in app.selectbox)
+        # 로그인 직후 바로 장편 소설 기획 화면이다: 모드 전환·말투·일반 채팅은 없다.
+        assert len(app.radio) == 0, "no mode switch any more"
+        assert not any(item.label == "말투" for item in app.selectbox)
+        assert any(title.value == "어떤 이야기를 쓰고 싶어?" for title in app.title)
+        assert [tab.label for tab in app.tabs] == ["💬 대화로 기획", "📝 직접 작성"]
         assert len(app.chat_input) == 1
         visible = [button.label for button in app.button] + [tab.label for tab in app.tabs]
-        for forbidden in ["Dataset", "Embedding", "Train", "Evaluate", "Service"]:
+        for forbidden in ["Dataset", "Embedding", "Train", "Evaluate", "Service", "➕ 새 대화"]:
             assert forbidden not in visible
+        assert any("모델 준비됨" in item.value for item in app.caption), [c.value for c in app.caption]
 
-        # 채팅 한 턴 (dry-run 모델): 답변이 저장되어 다시 렌더된다.
-        app.chat_input[0].set_value("안녕, 자기소개 해줘").run()
-        assert len(app.exception) == 0, app.exception
-        assert any("서윤" in item.value for item in app.markdown)
-
-        # 장편 소설 모드로 전환: 자유 입력 기획 화면 (rerun 뒤라 요소를 다시 조회한다)
-        mode = next(item for item in app.radio if item.label == "모드")
-        mode.set_value("📖 장편 소설")
-        app.run()
-        assert len(app.exception) == 0, app.exception
-        assert any(title.value == "어떤 이야기를 쓰고 싶어?" for title in app.title)
+        # 기획 대화 한 턴 (dry-run 모델): 작품 카드가 채워진다.
         app.chat_input[0].set_value("비 오는 도시의 미스터리, 주인공은 기록 복원가 서윤. 3만 자쯤.").run()
         assert len(app.exception) == 0, app.exception
         assert any("작품 카드" in item.value for item in app.markdown)
@@ -170,140 +158,6 @@ def _scenario_consumer() -> None:
         turn_selector = next(item for item in app.selectbox if item.label == "이번에 생성할 글자 수")
         assert turn_selector.options == ["약 2,000자", "약 3,000자", "약 5,000자"]
         assert any("대기 순번" in item.value for item in app.markdown)
-
-
-def _scenario_consumer_chat_crud() -> None:
-    """사이드바 대화 목록과 기본 CRUD: 새 대화(빈 방 재사용), 이름 바꾸기, 전환, 턴 삭제, 제안 문장,
-    답변 다시 생성, 고쳐서 다시 보내기, 비우기, 삭제, 전체 삭제, 검색."""
-    from streamlit.testing.v1 import AppTest
-
-    from src.service.chat_store import ChatStore
-    from src.service.consumer_store import ConsumerStore
-    from src.utils.config import load_config
-
-    def button(app, label):  # noqa: ANN001, ANN202
-        return next(b for b in app.button if b.label == label)
-
-    def chat_title(app) -> str:  # noqa: ANN001
-        return next(title.value for title in app.title)
-
-    def sidebar_rows(app) -> list[str]:  # noqa: ANN001
-        # st.rerun() 이 한 run 안에서 일어나면 AppTest 트리에는 이전 pass 의 노드가 같은 키로 남을 수 있다
-        # (실제 프런트는 지운다). 키로 중복을 걷어 낸다.
-        seen: dict[str, str] = {}
-        for item in app.sidebar.button:
-            if str(item.key or "").startswith("chat_open_") and item.key not in seen:
-                seen[item.key] = item.label
-        return list(seen.values())
-
-    def markdown_text(app) -> str:  # noqa: ANN001
-        return "\n".join(item.value for item in app.markdown)
-
-    with tempfile.TemporaryDirectory() as temporary, patch.dict(
-        os.environ,
-        {"NOVEL_JEPA_OUTPUT_ROOT": temporary, "NOVEL_LLM_DRY_RUN": "1"},
-        clear=False,
-    ):
-        app = AppTest.from_file(str(PROJECT_ROOT / "consumer_app.py"), default_timeout=30).run()
-        next(item for item in app.text_input if item.label == "표시 이름").set_value("목록 사용자")
-        next(item for item in app.text_input if item.label == "새 아이디").set_value("reader02")
-        next(item for item in app.text_input if item.label == "새 비밀번호").set_value("reader-password")
-        next(item for item in app.text_input if item.label == "비밀번호 확인").set_value("reader-password")
-        button(app, "회원가입").click()
-        app.run()
-        assert len(app.exception) == 0, app.exception
-        assert chat_title(app) == "새 대화"
-
-        # 빈 대화: 제안 문장이 보이고, 하나를 누르면 그 문장으로 첫 턴이 진행된다.
-        suggestions = [b for b in app.button if b.label == "오늘 저녁 메뉴 하나만 골라줘"]
-        assert len(suggestions) == 1
-        suggestions[0].click()
-        app.run()
-        assert len(app.exception) == 0, app.exception
-        assert chat_title(app) == "오늘 저녁 메뉴 하나만 골라줘"
-        assert "서윤" in markdown_text(app)
-        assert sidebar_rows(app) == ["오늘 저녁 메뉴 하나만 골라줘"]
-
-        # 이름 바꾸기 (⋯ 메뉴 안의 폼)
-        next(item for item in app.text_input if item.label == "대화 이름").set_value("첫 대화")
-        button(app, "이름 저장").click()
-        app.run()
-        assert len(app.exception) == 0, app.exception
-        assert chat_title(app) == "첫 대화"
-        assert any("이름을 바꿨어" in toast.value for toast in app.toast)
-
-        # 새 대화를 두 번 눌러도 빈 방은 하나만 생긴다.
-        button(app, "➕ 새 대화").click()
-        app.run()
-        assert chat_title(app) == "새 대화"
-        button(app, "➕ 새 대화").click()
-        app.run()
-        assert sidebar_rows(app) == ["새 대화", "첫 대화"], sidebar_rows(app)
-
-        # 사이드바에서 전환하면 그 대화의 메시지가 보인다.
-        next(b for b in app.sidebar.button if b.label == "첫 대화").click()
-        app.run()
-        assert chat_title(app) == "첫 대화"
-        assert "서윤" in markdown_text(app)
-
-        # 답변 다시 생성: 답변이 하나로 유지된다.
-        button(app, "🔄 다시 생성").click()
-        app.run()
-        assert len(app.exception) == 0, app.exception
-        assert markdown_text(app).count("젖은 골목의 신호") == 1
-
-        # 고쳐서 다시 보내기: 그 질문부터 뒤가 새로 쓰인다.
-        next(item for item in app.text_area if item.label == "메시지 수정").set_value("저녁 말고 점심 메뉴 골라줘")
-        button(app, "다시 보내기").click()
-        app.run()
-        assert len(app.exception) == 0, app.exception
-        assert "저녁 말고 점심 메뉴 골라줘" in markdown_text(app)
-        assert "오늘 저녁 메뉴 하나만 골라줘" not in markdown_text(app)
-        assert markdown_text(app).count("젖은 골목의 신호") == 1
-
-        # 턴 삭제: 질문과 답변이 같이 사라지고 제안 문장이 다시 보인다.
-        button(app, "✕").click()
-        app.run()
-        assert "젖은 골목의 신호" not in markdown_text(app)
-        assert any(b.label == "오늘 저녁 메뉴 하나만 골라줘" for b in app.button)
-
-        # 채팅 입력으로 한 턴, 그리고 비우기
-        app.chat_input[0].set_value("다시 물어볼게").run()
-        assert "서윤" in markdown_text(app)
-        button(app, "🧹 메시지 모두 비우기").click()
-        app.run()
-        assert "서윤" not in markdown_text(app)
-        assert chat_title(app) == "새 대화"
-
-        # 대화 삭제: 남은 대화가 열린다.
-        button(app, "정말 삭제").click()
-        app.run()
-        assert len(app.exception) == 0, app.exception
-        assert len(sidebar_rows(app)) == 1, sidebar_rows(app)
-        assert any("대화를 지웠어" in toast.value for toast in app.toast)
-
-        # 목록이 쌓이면 검색창이 생기고 제목·본문으로 찾는다.
-        config = load_config("configs/default.yaml")
-        store = ChatStore(config)
-        owner = str(ConsumerStore(config).authenticate_user("reader02", "reader-password")["id"])
-        for title, body in (("여름 휴가 계획", "제주도 동쪽 해안"), ("김치찌개 레시피", "돼지고기를 먼저 볶아"),
-                            ("운동 계획", "월수금 달리기"), ("책 추천", "여름에 읽을 소설")):
-            chat = store.create_chat(owner, title=title)
-            store.append_message(owner, chat["id"], "user", body)
-        app.run()
-        search = next(item for item in app.sidebar.text_input if item.label == "대화 검색")
-        search.set_value("여름").run()
-        assert sidebar_rows(app) == ["책 추천", "여름 휴가 계획"], sidebar_rows(app)
-        search.set_value("돼지고기").run()
-        assert sidebar_rows(app) == ["김치찌개 레시피"], sidebar_rows(app)
-
-        # 전체 삭제 뒤에는 빈 대화가 하나 다시 열린다.
-        next(b for b in app.button if b.label.startswith("모든 대화 삭제")).click()
-        app.run()
-        assert len(app.exception) == 0, app.exception
-        assert chat_title(app) == "새 대화"
-        assert any("개를 지웠어" in toast.value for toast in app.toast)
-        assert sidebar_rows(app) == ["새 대화"], sidebar_rows(app)
 
 
 def _register(app, username: str):  # noqa: ANN001, ANN202
@@ -331,8 +185,6 @@ def _scenario_consumer_manual_template() -> None:
     ):
         app = AppTest.from_file(str(PROJECT_ROOT / "consumer_app.py"), default_timeout=30).run()
         _register(app, "writer03")
-        next(item for item in app.radio if item.label == "모드").set_value("📖 장편 소설")
-        app.run()
         assert [tab.label for tab in app.tabs] == ["💬 대화로 기획", "📝 직접 작성"]
         assert not any(item.label == "내 템플릿" for item in app.selectbox), "no templates yet"
 
@@ -442,7 +294,6 @@ def _scenario_consumer_edit_section() -> None:
         store.complete_job(int(job["id"]), result_chars=60, result_section_count=2, total_chars=60,
                            total_section_count=2, metrics={}, novel_completed=False)
 
-        next(item for item in app.radio if item.label == "모드").set_value("📖 장편 소설")
         app.run()
         next(b for b in app.sidebar.button if b.label == "유리등의 속삭임").click()
         app.run()
@@ -575,7 +426,6 @@ SCENARIOS = {
     "admin_token": _scenario_admin_token,
     "admin_controls": _scenario_admin_controls,
     "consumer": _scenario_consumer,
-    "consumer_chat_crud": _scenario_consumer_chat_crud,
     "consumer_manual_template": _scenario_consumer_manual_template,
     "consumer_edit_section": _scenario_consumer_edit_section,
 }

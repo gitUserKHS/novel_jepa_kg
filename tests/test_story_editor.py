@@ -317,15 +317,20 @@ class StorySheetTests(unittest.TestCase):
         self.assertTrue(world_sheet(story).endswith("세계관: 세계"))
 
     def test_section_prompt_renders_the_guide_as_its_own_block(self) -> None:
-        from src.generation.longform import _section_prompt
+        from src.generation.longform import WRITE_ROLE_MARKER, _canon_prefix, _section_prompt, _task_block
 
-        common = dict(world="w", characters="c", outline_text="o", memory_context="m", consumed_context="x", tail="t",
-                      section_index=2, section_role="r", function_name="f", function_rule="fr", target_chars=1800,
-                      completion_rule="cr", instruction="i")
-        plain = _section_prompt(**common)
+        canon = dict(world="w", characters="c", outline_text="o", memory_context="m", consumed_context="x", tail="t")
+        task = _task_block(section_index=2, section_role="r", function_name="f", function_rule="fr", target_chars=1800,
+                           completion_rule="cr", instruction="i")
+        plain = _section_prompt(_canon_prefix(**canon), task)
         self.assertNotIn("[집필 지침", plain)
-        guided = _section_prompt(**common, style_guide="1인칭, 짧은 문장")
-        self.assertIn("[집필 지침 — 작가가 정한 문체·시점·금기, 아래 작성 규칙과 함께 지킨다]" + chr(10) + "1인칭, 짧은 문장" + chr(10) + "[작성 규칙]", guided)
+        guided_prefix = _canon_prefix(**canon, style_guide="1인칭, 짧은 문장")
+        # 집필 지침은 공유 접두사의 마지막 블록이다 (설계·검토·기록 호출도 같은 규칙을 본다).
+        self.assertTrue(guided_prefix.endswith("[집필 지침 — 작가가 정한 문체·시점·금기]" + chr(10) + "1인칭, 짧은 문장" + chr(10)))
+        guided = _section_prompt(guided_prefix, task)
+        self.assertIn("1인칭, 짧은 문장" + chr(10) + "[이번 장(2장)의 과제]", guided)
+        self.assertIn(WRITE_ROLE_MARKER, guided)
+        self.assertLess(guided.index("[집필 지침"), guided.index(WRITE_ROLE_MARKER))
 
     def test_character_sheet_rules(self) -> None:
         self.assertEqual(character_sheet({"protagonist": "서윤", "characters": ""}), "서윤: 작품의 주인공")

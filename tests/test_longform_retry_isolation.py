@@ -97,6 +97,9 @@ def _config(root: str) -> AppConfig:
     config.generation.enable_story_outline = False
     config.generation.enable_story_memory_rag = False
     config.generation.enable_consumed_beat_ledger = False
+    # 이 파일은 기계 게이트의 재생성 계약만 본다. 개연성 검토·장 설계는 tests/test_plausibility_gate.py.
+    config.generation.enable_scene_plan = False
+    config.generation.enable_plausibility_gate = False
     config.generation.target_novel_chars = 20000
     config.generation.section_min_chars = 1800
     config.generation.turn_target_chars = 3000

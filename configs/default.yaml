@@ -4,26 +4,31 @@ project:
   seed: 42
 
 llm:
-  backend: "local"            # local = model_server/server.py (Qwen3.5-4B 4bit) | ollama = 연구용 레거시
-  base_url: "http://127.0.0.1:8765"
-  timeout_sec: 900
-  chat_adapter: ""            # 일반 채팅 기본 말투: "" 기본 모델 | "cute" 밝고 귀여운 말투
-  adapter_scale: 0.6
-  korean_filter: true
-  chat_temperature: 0.7
-  chat_max_tokens: 1024
+  backend: "ollama"           # ollama = Gemma4 26B-A4B (기본) | local = 레거시 Qwen3.5-4B 모델 서버(model_server/server.py)
+  model: "hf.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced:Q4_K_M"
+  ollama_base_url: "http://127.0.0.1:11434"
+  # 09-03 실측 (RTX 4060 8GB): 한국어 1.5자/토큰, 장 프롬프트 ~15K자 ≈ 10K 토큰 + 생성 1,500 토큰.
+  # 16384 면 여유가 있고 KV 포함 VRAM 4.6 GiB. 값을 바꾸면 Ollama 가 모델을 다시 올린다 (고정해 둘 것).
+  num_ctx: 16384
+  keep_alive: "30m"           # 턴 사이에 모델을 내리지 않는다 (17GB 재적재 회피)
+  base_url: "http://127.0.0.1:8765"   # local 백엔드 주소
+  timeout_sec: 1800
+  korean_filter: true         # local 백엔드 전용 (Ollama 에는 토큰 필터가 없다 — 26B 는 누출이 드물다)
   novel_temperature: 0.75
   novel_top_p: 0.9
-  novel_top_k: 20
+  novel_top_k: 40
   novel_repetition_penalty: 1.05
   novel_max_tokens: 1500
-  novel_dry_multiplier: 0.8   # 08-23 bench: rep12 3.7->1.3, distinct3 0.77->0.87. 구절 반복 억제(DRY). scripts/bench_prose_settings.py 로 결정
+  novel_dry_multiplier: 0.8   # local 백엔드 전용 DRY 샘플러 (08-23 bench). Ollama 는 무시한다.
   novel_dry_base: 1.75
   novel_dry_allowed_length: 2
   novel_min_p: 0.0
-  memory_max_tokens: 500
+  memory_max_tokens: 600      # 장 요약 메모리 JSON
+  plan_max_tokens: 400        # 장 설계 JSON
+  review_max_tokens: 600      # 개연성 검토 JSON
 
 ollama:
+  # 레거시 연구 UI(app.py, JEPA 파이프라인) 전용. 소설 서비스는 위 llm 절을 쓴다.
   base_url: "http://localhost:11434"
   chat_model: "gemma4:e4b"
   embed_model: "embeddinggemma:latest"
@@ -104,12 +109,12 @@ generation:
   turn_target_chars: 5000
   turn_max_sections: 8
   longform_max_sections: 60
-  longform_recent_context_chars: 2200
+  longform_recent_context_chars: 2600   # 직전 장 꼬리 원문. 앞 장들은 요약·상태 원장으로만 (복사 루프 방지)
   longform_checkpoint_path: "reports/runs/creative_longform_latest.md"
   longform_state_path: "reports/runs/creative_longform_state.json"
   enable_story_memory_rag: true
   story_memory_top_k: 4
-  story_memory_context_chars: 2600
+  story_memory_context_chars: 3200
   story_memory_path: "reports/runs/creative_longform_memory.jsonl"
   story_ledger_path: "reports/runs/creative_longform_ledger.json"
   story_outline_path: "reports/runs/creative_longform_outline.json"
@@ -123,10 +128,16 @@ generation:
   hallucination_temperature_span: 0.8
   enable_consistency_repair: false
   enable_story_outline: true
-  outline_beat_count: 8
+  outline_beat_count: 12
+  # 개연성 장치 (2026-09-03): 장을 쓰기 전에 인과 설계(목표·장애·전환·결과)를 정하고, 쓴 뒤에 연속성 편집자
+  # 역할의 모델이 확정 사실·앞선 사건·직전 장면과의 모순을 검토한다. 모순이 있거나 점수가 기준 미만이면
+  # 문제 목록을 들고 한 번 고쳐 쓴 뒤 다시 검토한다. 점수는 끝난 턴 아래 🧭 로 보인다.
+  enable_scene_plan: true
+  enable_plausibility_gate: true
+  plausibility_min_score: 7
   enable_stability_retry: true
   stability_min_section_ratio: 0.55
-  enable_jepa_coherence_gate: true
+  enable_jepa_coherence_gate: true      # 레거시 JEPA 생성기 전용
   jepa_coherence_min_cosine: 0.64
   jepa_coherence_keep_chat_loaded: true
   use_scene_analyzer: true
@@ -149,6 +160,7 @@ evaluation:
     - "jepa_no_context_dropout"
 
 chat:
+  # 레거시 연구 UI(app.py)의 대화 탭 메모리 설정. 소비자 앱에는 일반 채팅이 없다.
   session_dir: "data/sessions"
   recent_messages: 8
   compress_every_messages: 6
@@ -184,7 +196,7 @@ consumer:
   default_target_chars: 30000
   max_target_chars: 50000
   target_char_step: 1000
-  chat_model: "gemma4:e4b"
+  chat_model: "gemma4:e4b"              # 레거시 JEPA 산출물 매니페스트용
   embed_model: "embeddinggemma:latest"
   active_manifest_path: "artifacts/active.json"
   candidates_dir: "artifacts/candidates"

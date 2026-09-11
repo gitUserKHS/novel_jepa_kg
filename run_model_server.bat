@@ -4,7 +4,8 @@ cd /d "%~dp0"
 
 if /i "%~1"=="--help" (
     echo Usage: run_model_server.bat
-    echo Starts the local Qwen3.5-4B model server at http://127.0.0.1:8765
+    echo Legacy: starts the Qwen3.5-4B model server at http://127.0.0.1:8765
+    echo Only needed when configs/default.yaml has llm.backend: local. The default backend is Ollama ^(run_ollama.bat^).
     exit /b 0
 )
 

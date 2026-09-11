@@ -7,11 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from src.generation.longform import (
+    PLAN_ROLE_MARKER,
+    WRITE_ROLE_MARKER,
     _normalize_section,
     _trim_to_last_sentence,
     assess_section,
     generate_longform,
 )
+from src.generation.plausibility import DIALOGUE_ROLE_MARKER, REVIEW_ROLE_MARKER
 from src.memory.story_rag import load_story_memories
 from src.utils.config import AppConfig
 
@@ -43,6 +46,15 @@ MEMORY_JSON = json.dumps(
     },
     ensure_ascii=False,
 )
+PLAN_JSON = json.dumps(
+    {"goal": "하린이 좌표의 뜻을 알아낸다", "obstacle": "일지의 마지막 장이 찢겨 있다", "turn": "콩떡이 찢긴 종이를 찾아온다",
+     "outcome": "좌표가 아버지의 마지막 항로임을 안다", "uses": ["항해일지의 좌표"], "avoid": ["좌표를 처음 발견하는 장면"]},
+    ensure_ascii=False,
+)
+REVIEW_JSON = json.dumps(
+    {"score": 9, "contradictions": [], "unmotivated": [], "continuity_ok": True, "beat_progress": True, "verdict": "모순 없음"},
+    ensure_ascii=False,
+)
 PROSE_SENTENCES = [
     "서하린은 등대실 창가에 앉아 낡은 항해일지를 펼쳤다.",
     "바람이 유리창을 두드렸고 콩떡은 발치에서 몸을 말았다.",
@@ -71,6 +83,12 @@ class FakeClient:
         self.prompts.append(prompt)
         if "계층형 이야기 지도" in prompt:
             return OUTLINE_JSON
+        if PLAN_ROLE_MARKER in prompt:
+            return PLAN_JSON
+        if DIALOGUE_ROLE_MARKER in prompt:
+            return '{"non_speakers": [], "dialogue": []}'
+        if REVIEW_ROLE_MARKER in prompt:
+            return REVIEW_JSON
         if "확정된 사실만 기록" in prompt:
             return MEMORY_JSON
         self.prose_calls += 1
@@ -158,9 +176,14 @@ class LongformGeneratorTests(unittest.TestCase):
         self.assertTrue(Path(self.config.generation.story_outline_path).exists())
         self.assertTrue(Path(self.config.generation.story_ledger_path).exists())
         # 프롬프트는 직전 장 전문이 아니라 꼬리만 싣는다
-        second_prompt = [p for p in client.prompts if "이번 장(2장)" in p][0]
+        second_prompt = [p for p in client.prompts if "이번 장(2장)의 과제" in p and WRITE_ROLE_MARKER in p][0]
         self.assertIn("직전 장면의 끝부분", second_prompt)
         self.assertNotIn("### 장면 1-1", second_prompt)
+        # 장 설계가 작가 프롬프트에 들어가고, 모든 장이 개연성 검토를 거친다
+        self.assertIn("[이번 장의 설계", second_prompt)
+        self.assertIn("목표: 하린이 좌표의 뜻을 알아낸다", second_prompt)
+        self.assertEqual(planner["plausibility_by_section"], {1: 9, 2: 9})
+        self.assertEqual(planner["mean_plausibility"], 9.0)
 
     def test_continuation_reaches_the_ending(self) -> None:
         client = FakeClient()
