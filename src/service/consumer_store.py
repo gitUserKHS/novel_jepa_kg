@@ -7,7 +7,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from src.service.security import (
     build_session_token,
@@ -39,6 +39,10 @@ JOB_ORIGIN_USER = "user"
 JOB_ORIGIN_AUTO = "auto"
 JOB_ORIGINS = (JOB_ORIGIN_USER, JOB_ORIGIN_AUTO)
 CREATIVITY_LEVELS = {"stable": 0.20, "balanced": 0.35, "bold": 0.50}
+# 할루시네이션 강도는 0~1 실수다 (0 = 설정에 붙어 쓰기, 1 = 마음껏 지어내기). 위 세 이름은 이 값을 담던 옛
+# 단계 표기로, jobs.creativity_profile 의 CHECK 제약과 관리자 화면의 집계 축이 아직 이 이름을 쓰기 때문에
+# 가장 가까운 단계 이름을 함께 저장한다.
+DEFAULT_CREATIVITY = 0.35
 MAINTENANCE_OFF = "0"
 MAINTENANCE_ACTIVE = "1"
 MAINTENANCE_DRAINING = "draining"
@@ -62,6 +66,32 @@ class AccountExistsError(ConsumerStoreError):
 
 class AuthorizationError(ConsumerStoreError):
     pass
+
+
+def creativity_from_profile(value: Any) -> float:
+    """0~1 실수, 숫자 문자열, 또는 옛 단계 이름을 할루시네이션 강도로 바꾼다."""
+    if isinstance(value, str) and value in CREATIVITY_LEVELS:
+        return CREATIVITY_LEVELS[value]
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("할루시네이션 강도는 0과 1 사이의 숫자여야 해.") from None
+    if number != number or not 0.0 <= number <= 1.0:
+        raise ValueError("할루시네이션 강도는 0과 1 사이의 숫자여야 해.")
+    return round(number, 3)
+
+
+def creativity_bucket(value: float) -> str:
+    """강도에 가장 가까운 옛 단계 이름. CHECK 제약과 관리자 집계가 이 이름을 쓴다."""
+    return min(CREATIVITY_LEVELS, key=lambda name: abs(CREATIVITY_LEVELS[name] - value))
+
+
+def job_creativity(job: Mapping[str, Any]) -> float:
+    """작업 행의 할루시네이션 강도. 마이그레이션 전 행은 단계 이름만 있으므로 거기서 되살린다."""
+    raw = job.get("creativity") if hasattr(job, "get") else None
+    if raw is not None:
+        return creativity_from_profile(raw)
+    return creativity_from_profile(job["creativity_profile"])
 
 
 def utc_now() -> datetime:
@@ -188,6 +218,7 @@ class ConsumerStore:
                     story_id TEXT NOT NULL REFERENCES stories(id) ON DELETE CASCADE,
                     instruction TEXT NOT NULL,
                     creativity_profile TEXT NOT NULL,
+                    creativity REAL,
                     requested_chars INTEGER NOT NULL,
                     status TEXT NOT NULL,
                     model_version TEXT,
@@ -221,6 +252,7 @@ class ConsumerStore:
                     section_index INTEGER NOT NULL,
                     model_version TEXT,
                     creativity_profile TEXT NOT NULL,
+                    creativity REAL,
                     metrics_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     UNIQUE(story_id, section_index)
@@ -249,6 +281,21 @@ class ConsumerStore:
             if "origin" not in job_columns:
                 # 누가 넣은 턴인가: 'user' | 'auto'. 자동 턴은 말풍선에 🤖 로 표시되고 연속 상한에 세인다.
                 connection.execute("ALTER TABLE jobs ADD COLUMN origin TEXT NOT NULL DEFAULT 'user'")
+            backfill = (
+                "SET creativity = CASE creativity_profile "
+                "WHEN 'stable' THEN 0.20 WHEN 'balanced' THEN 0.35 WHEN 'bold' THEN 0.50 END "
+                "WHERE creativity IS NULL"
+            )
+            if "creativity" not in job_columns:
+                # 할루시네이션 강도 0~1. 옛 행은 단계 이름에서 되살린다.
+                connection.execute("ALTER TABLE jobs ADD COLUMN creativity REAL")
+                connection.execute("UPDATE jobs " + backfill)
+            metric_columns = {
+                str(row["name"]) for row in connection.execute("PRAGMA table_info(section_metrics)").fetchall()
+            }
+            if "creativity" not in metric_columns:
+                connection.execute("ALTER TABLE section_metrics ADD COLUMN creativity REAL")
+                connection.execute("UPDATE section_metrics " + backfill)
             if "completed_at" not in story_columns:
                 connection.execute("ALTER TABLE stories ADD COLUMN completed_at TEXT")
                 # Legacy stories finished under the old char-count rule stay closed.
@@ -516,15 +563,17 @@ class ConsumerStore:
         story_id: str,
         *,
         instruction: str,
-        creativity_profile: str,
         requested_chars: int,
+        creativity: float | str | None = None,
+        creativity_profile: str | None = None,
         origin: str = JOB_ORIGIN_USER,
     ) -> dict[str, Any]:
         clean_instruction = instruction.strip()
         if not clean_instruction:
             raise ValueError("다음 전개 지시를 입력해줘.")
-        if creativity_profile not in CREATIVITY_LEVELS:
-            raise ValueError("지원하지 않는 창의성 단계야.")
+        if creativity is None and creativity_profile is None:
+            raise ValueError("할루시네이션 강도를 골라줘.")
+        level = creativity_from_profile(creativity if creativity is not None else creativity_profile)
         if origin not in JOB_ORIGINS:
             raise ValueError("지원하지 않는 요청 출처야.")
         if requested_chars not in self.config.consumer.allowed_turn_chars:
@@ -549,14 +598,15 @@ class ConsumerStore:
                 cursor = connection.execute(
                     """
                     INSERT INTO jobs(
-                        story_id, instruction, creativity_profile, requested_chars, status,
+                        story_id, instruction, creativity_profile, creativity, requested_chars, status,
                         start_section_count, origin, created_at
-                    ) VALUES(?, ?, ?, ?, 'queued', ?, ?, ?)
+                    ) VALUES(?, ?, ?, ?, ?, 'queued', ?, ?, ?)
                     """,
                     (
                         story_id,
                         clean_instruction,
-                        creativity_profile,
+                        creativity_bucket(level),
+                        level,
                         requested_chars,
                         int(story["section_count"]),
                         origin,
@@ -813,9 +863,13 @@ class ConsumerStore:
         story_id: str,
         job_id: int,
         model_version: str,
-        creativity_profile: str,
         values: Sequence[tuple[int, dict[str, Any]]],
+        creativity: float | str | None = None,
+        creativity_profile: str | None = None,
     ) -> None:
+        if creativity is None and creativity_profile is None:
+            raise ValueError("할루시네이션 강도를 골라줘.")
+        level = creativity_from_profile(creativity if creativity is not None else creativity_profile)
         now = iso_time()
         rows = [
             (
@@ -823,7 +877,8 @@ class ConsumerStore:
                 job_id,
                 section_index,
                 model_version,
-                creativity_profile,
+                creativity_bucket(level),
+                level,
                 json.dumps(metrics, ensure_ascii=False),
                 now,
             )
@@ -836,12 +891,13 @@ class ConsumerStore:
                 """
                 INSERT INTO section_metrics(
                     story_id, job_id, section_index, model_version,
-                    creativity_profile, metrics_json, created_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                    creativity_profile, creativity, metrics_json, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(story_id, section_index) DO UPDATE SET
                     job_id = excluded.job_id,
                     model_version = excluded.model_version,
                     creativity_profile = excluded.creativity_profile,
+                    creativity = excluded.creativity,
                     metrics_json = excluded.metrics_json,
                     created_at = excluded.created_at
                 """,
@@ -944,7 +1000,7 @@ class ConsumerStore:
             rows = connection.execute(
                 """
                 SELECT section_metrics.model_version, section_metrics.creativity_profile,
-                       section_metrics.metrics_json
+                       section_metrics.creativity, section_metrics.metrics_json
                 FROM section_metrics
                 JOIN stories ON stories.id = section_metrics.story_id
                 WHERE stories.deleted_at IS NULL
@@ -956,6 +1012,7 @@ class ConsumerStore:
                 {
                     "model_version": row["model_version"],
                     "creativity_profile": row["creativity_profile"],
+                    "creativity": row["creativity"],
                     **json.loads(row["metrics_json"]),
                 }
             )

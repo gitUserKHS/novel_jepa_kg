@@ -252,6 +252,9 @@
 
 ## Phase 9 - Gemma4 26B-A4B (Ollama) · 채팅 제거 · 개연성 장치 (2026-09-03)
 
+- [x] 할루시네이션 강도를 3단계(안정/균형/대담)에서 0~1 슬라이더로 (2026-09-14). `jobs.creativity`/`section_metrics.creativity`
+      REAL 열 추가 + 옛 이름에서 backfill 하는 마이그레이션. CHECK 제약과 관리자 집계 축이 옛 이름을 쓰므로 가장 가까운
+      단계 이름을 `creativity_profile` 에 함께 저장한다. 온도 매핑은 그대로라 0.20/0.35/0.50 의 실측이 유효하다.
 - [x] 모델 교체: 소설 백엔드를 Ollama 의 `hf.co/HauhauCS/Gemma4-26B-A4B-Uncensored-HauhauCS-Balanced:Q4_K_M`
       (MoE 25.2B, 활성 4B, 17GB, 262K 문맥)로. `src/llm/ollama_chat.OllamaChatClient` 가 `LocalLLMClient` 와 같은 표면을
       제공하고 `runtime.make_llm_client` 가 `llm.backend`(`ollama` 기본 | `local` 레거시)로 고른다. 워커는 항상

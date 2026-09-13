@@ -250,6 +250,8 @@ class ConsumerConfig(BaseModel):
     auto_continue_max_turns: int = 20
     allowed_turn_chars: list[int] = Field(default_factory=lambda: [2000, 3000, 5000])
     default_turn_chars: int = 3000
+    # 할루시네이션 강도 슬라이더(0~1)의 초깃값. 0.35 는 옛 '균형' 단계와 같은 온도라 기존 실측이 그대로 유효하다.
+    default_creativity: float = 0.35
     min_target_chars: int = 10000
     default_target_chars: int = 30000
     max_target_chars: int = 50000

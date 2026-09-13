@@ -350,6 +350,11 @@ def _completion_rule(total_chars: int, overall_target: int, section_target: int,
 
 
 def _creativity_temperature(config: AppConfig) -> float:
+    """할루시네이션 강도 0~1 을 샘플링 온도로 옮긴다.
+
+    0.35(옛 '균형')가 기본 온도(llm.novel_temperature)에 정확히 놓이고, 양끝은 기본 온도 ±(0.35·0.6 / 0.65·0.6)
+    — 기본 0.75 에서 0 → 0.54, 1 → 1.14 → 상한 1.1. 옛 세 단계(0.20/0.35/0.50)의 온도는 그대로라 그 실측이 유효하다.
+    """
     base = float(config.llm.novel_temperature)
     target = max(0.0, min(1.0, float(config.generation.hallucination_target)))
     return max(0.3, min(1.1, base + (target - CREATIVITY_ANCHOR) * 0.6))

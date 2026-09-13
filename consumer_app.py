@@ -74,7 +74,6 @@ from src.utils.timefmt import local_now, relative_time
 st.set_page_config(page_title="이야기 공방", page_icon="✦", layout="wide", initial_sidebar_state="expanded")
 
 _SESSION_COOKIE = "novel_jepa_session"
-CREATIVITY_LABELS = {"안정": "stable", "균형": "balanced", "대담": "bold"}
 STATUS_LABELS = {
     JOB_QUEUED: "대기 중",
     JOB_RUNNING: "집필 중",
@@ -503,7 +502,7 @@ def _start_story(config: AppConfig, store: ConsumerStore, user: dict[str, Any], 
     instruction = "첫 장면을 시작해 줘." + (f" 참고: {first_wish[:300]}" if first_wish else "")
     try:
         store.enqueue_job(str(user["id"]), story["id"], instruction=instruction,
-                          creativity_profile="balanced", requested_chars=config.consumer.default_turn_chars)
+                          creativity=config.consumer.default_creativity, requested_chars=config.consumer.default_turn_chars)
     except ConsumerStoreError as exc:
         # 작품은 만들어졌고 첫 턴만 못 넣은 것 (예: 점검 중). 집필 화면에서 다시 요청하면 된다.
         _flash(f"'{story['title']}' 을 만들었지만 첫 장 요청은 넣지 못했어: {exc}")
@@ -856,10 +855,10 @@ def _rerun_live() -> None:
         st.rerun()
 
 
-def _enqueue_auto_turn(store: ConsumerStore, user_id: str, story_id: str, creativity: str, turn_chars: int) -> bool:
+def _enqueue_auto_turn(store: ConsumerStore, user_id: str, story_id: str, creativity: float, turn_chars: int) -> bool:
     """AI 가 전개를 정하는 턴 하나를 큐에 넣는다. 지시는 워커가 집을 때 채운다."""
     try:
-        store.enqueue_job(user_id, story_id, instruction=AUTO_PLACEHOLDER, creativity_profile=creativity,
+        store.enqueue_job(user_id, story_id, instruction=AUTO_PLACEHOLDER, creativity=creativity,
                           requested_chars=turn_chars, origin=JOB_ORIGIN_AUTO)
     except (ValueError, ConsumerStoreError) as exc:
         st.error(str(exc))
@@ -868,7 +867,7 @@ def _enqueue_auto_turn(store: ConsumerStore, user_id: str, story_id: str, creati
 
 
 def _auto_controls(config: AppConfig, store: ConsumerStore, user_id: str, story: dict[str, Any], *,
-                   outstanding: dict[str, Any] | None, completed: bool, blocked: str, creativity: str,
+                   outstanding: dict[str, Any] | None, completed: bool, blocked: str, creativity: float,
                    turn_chars: int) -> None:
     """자동 이어쓰기: 켜 두면 워커가 턴이 끝날 때마다 AI 가 정한 전개로 다음 턴을 넣는다 (완결까지)."""
     story_id = str(story["id"])
@@ -965,8 +964,13 @@ def _story_live(config: AppConfig, store: ConsumerStore, client: Any, user_id: s
     st.divider()
     control_a, control_b = st.columns([1.3, 1])
     with control_a:
-        creativity_label = st.segmented_control("창의성", options=list(CREATIVITY_LABELS), default="균형",
-                                                selection_mode="single", key="consumer_creativity")
+        # 할루시네이션 강도. 프롬프트 문구가 아니라 샘플링 온도로 이어진다 (longform._creativity_temperature).
+        creativity = st.slider(
+            "할루시네이션 강도", min_value=0.0, max_value=1.0, step=0.05,
+            value=float(config.consumer.default_creativity), format="%.2f", key="consumer_creativity",
+            help="0 은 정해진 설정에 붙어 쓰고, 1 은 마음껏 지어내. 지어낸 것이 앞 설정과 어긋나면 개연성 장치가 잡아.",
+        )
+        st.caption("0 설정 충실 · 0.35 균형 · 1 자유 창작")
     with control_b:
         turn_chars = st.selectbox("이번에 생성할 글자 수", options=config.consumer.allowed_turn_chars,
                                   index=config.consumer.allowed_turn_chars.index(config.consumer.default_turn_chars),
@@ -989,15 +993,14 @@ def _story_live(config: AppConfig, store: ConsumerStore, client: Any, user_id: s
         st.caption("목표 분량에 도달했어. 다음 요청에서 결말 장면까지 완성할게.")
 
     _auto_controls(config, store, user_id, story, outstanding=outstanding, completed=completed,
-                   blocked=blocked_reason, creativity=CREATIVITY_LABELS.get(str(creativity_label), "balanced"),
+                   blocked=blocked_reason, creativity=float(creativity),
                    turn_chars=int(turn_chars))
 
     prompt = st.chat_input("다음 전개를 말해줘 (예: 박 노인이 20년 전 일을 털어놓게 해줘)",
                            disabled=bool(blocked_reason), key="consumer_chat_input")
     if prompt:
         try:
-            store.enqueue_job(user_id, story_id, instruction=prompt,
-                              creativity_profile=CREATIVITY_LABELS.get(str(creativity_label), "balanced"),
+            store.enqueue_job(user_id, story_id, instruction=prompt, creativity=float(creativity),
                               requested_chars=int(turn_chars))
             _rerun_live()
         except (ValueError, ConsumerStoreError) as exc:

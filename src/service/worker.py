@@ -34,11 +34,11 @@ from src.service.auto_continue import (
     propose_next_direction,
 )
 from src.service.consumer_store import (
-    CREATIVITY_LEVELS,
     JOB_ORIGIN_AUTO,
     MAINTENANCE_ACTIVE,
     ConsumerStore,
     ConsumerStoreError,
+    job_creativity,
 )
 from src.service.job_lock import ServiceBusyError, acquire_lock_file, acquire_project_job
 from src.service.runtime import make_llm_client
@@ -262,7 +262,7 @@ class ConsumerWorker:
         )
         remaining = max(1000, int(story["target_chars"]) - before_chars)
         turn_chars = min(int(job["requested_chars"]), remaining)
-        creativity = CREATIVITY_LEVELS[str(job["creativity_profile"])]
+        creativity = job_creativity(job)
         run_config, workspace = configure_story_run(
             self.config,
             story_id,
@@ -322,7 +322,7 @@ class ConsumerWorker:
                 story_id=story_id,
                 job_id=job_id,
                 model_version=str(manifest["version"]),
-                creativity_profile=str(job["creativity_profile"]),
+                creativity=creativity,
                 values=rows,
             )
             job_metrics = {
@@ -398,7 +398,7 @@ class ConsumerWorker:
         try:
             self.store.enqueue_job(
                 str(story["owner_id"]), story_id, instruction=AUTO_PLACEHOLDER,
-                creativity_profile=str(job["creativity_profile"]), requested_chars=int(job["requested_chars"]),
+                creativity=job_creativity(job), requested_chars=int(job["requested_chars"]),
                 origin=JOB_ORIGIN_AUTO,
             )
         except (ConsumerStoreError, ValueError) as exc:
