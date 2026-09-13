@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>캡스톤디자인II 프로젝트 중간 점검 보고</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm; }
+  body { font-family: "맑은 고딕", "Malgun Gothic", system-ui, sans-serif;
+         font-size: 10.2pt; line-height: 1.58; color: #14171a; margin: 0; }
+  h1 { font-size: 16.5pt; margin: 0 0 3px; letter-spacing: -0.5px; }
+  h2 { font-size: 12.3pt; margin: 20px 0 7px; padding-bottom: 4px;
+       border-bottom: 2px solid #14171a; }
+  h3 { font-size: 10.6pt; margin: 13px 0 4px; color: #26323c; }
+  p { margin: 5px 0 8px; }
+  .sub { color: #55616a; font-size: 9.5pt; margin: 0 0 14px; }
+  .meta { background: #f5f7f8; border: 1px solid #dee3e6; padding: 8px 12px;
+          margin-bottom: 16px; font-size: 9.3pt; }
+  .meta div { margin: 1px 0; }
+  .meta b { display: inline-block; min-width: 54px; color: #55616a; font-weight: 400; }
+  .fill { color: #b03030; font-weight: 700; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 12px; font-size: 9.4pt; }
+  th, td { border: 1px solid #d2d8dc; padding: 5px 8px; text-align: left; vertical-align: top; }
+  th { background: #eceff1; font-weight: 600; }
+  td.n, th.n { text-align: right; white-space: nowrap; }
+  td.c, th.c { text-align: center; white-space: nowrap; }
+  .thesis { border: 1.5px solid #14171a; padding: 10px 13px; margin: 9px 0 13px;
+            background: #fbfcfc; }
+  .thesis p { margin: 4px 0; }
+  .score { font-size: 21pt; font-weight: 700; letter-spacing: -1px; margin: 2px 0 4px; }
+  ul { margin: 4px 0 8px; padding-left: 18px; }
+  li { margin-bottom: 3px; }
+  code { background: #eef1f3; padding: 1px 4px; border-radius: 3px;
+         font-family: Consolas, monospace; font-size: 8.7pt; }
+  .note { border-left: 3px solid #7f8d98; background: #f7f9fa;
+          padding: 7px 11px; margin: 8px 0 11px; font-size: 9.3pt; }
+  .note p { margin: 3px 0; }
+  .lead { font-weight: 600; }
+  .goal { background: #eef4ee; border: 1px solid #c7d8c7; padding: 8px 12px;
+          margin: 8px 0 12px; font-size: 9.6pt; }
+  @media print { h2, h3 { page-break-after: avoid; }
+                 table, .note, .thesis, .goal { page-break-inside: avoid; } }
+</style>
+</head>
+<body>
+
+<h1>할루시네이션을 활용한 AI 소설 생성 서비스</h1>
+<p class="sub">캡스톤디자인II 프로젝트 중간 점검 보고 · Novel Studio</p>
+
+<div class="meta">
+  <div><b>팀명</b> <span class="fill">[기입 필요]</span></div>
+  <div><b>팀원</b> <span class="fill">[기입 필요]</span></div>
+  <div><b>제출일</b> 2026년 9월 14일</div>
+  <div><b>보고 범위</b> 2026년 7월 ~ 9월 (캡스톤디자인II 구간)</div>
+  <div><b>저장소</b> <code>https://github.com/gitUserKHS/novel_jepa_kg</code></div>
+</div>
+
+<h2>0. 프로젝트 목표</h2>
+
+<div class="thesis">
+<p class="lead">LLM의 할루시네이션은 제거 대상이 아니라 창작의 재료다.</p>
+<p>
+검색·요약·질의응답에서 모델이 없는 사실을 지어내는 것은 명백한 결함이다. 그러나 소설에서 지어내기는
+결함이 아니라 <strong>일 그 자체</strong>다. 문제는 "어떻게 없앨 것인가"가 아니라
+<strong>"이야기를 무너뜨리지 않으면서 어떻게 쓸 것인가"</strong>이다.
+</p>
+<p>
+이 프로젝트는 할루시네이션을 두 손잡이로 다룬다. <strong>얼마나 지어낼지</strong>를 사용자가 고르고,
+<strong>지어낸 것이 앞서 확정된 설정을 배신하지 않는지</strong>를 시스템이 검사한다.
+전자가 없으면 밋밋하고, 후자가 없으면 이야기가 무너진다.
+</p>
+</div>
+
+<h2>1. 지난 학기 및 방학 동안 진행한 내용과 주요 결과물</h2>
+
+<h3>1.1 구간 구분</h3>
+<p>
+<strong>캡스톤디자인I(~6월)</strong>에서 연구 파이프라인을 완성했다(작업 100건).
+합성 서사 데이터 생성 → 임베딩 → JEPA 예측기 학습 → 평가로, <em>지어낸 전개가 그럴듯한지</em>를
+잠재 공간에서 판정하려는 <strong>가설</strong>이었다. 이번 구간에서 이 가설을 측정했고,
+그 결과 소비자 경로에서 철회했다(1.6).
+</p>
+<p>
+<strong>캡스톤디자인II(7월~)</strong>는 이것을 <strong>사람이 실제로 쓰는 서비스로 만드는 구간</strong>이다.
+7월 19일부터 9월 14일까지 <strong>31회 커밋, 63개 작업</strong>을 수행했다.
+</p>
+
+<h3>1.2 이번 구간에 한 일</h3>
+<table>
+  <tr><th style="width:24px" class="c">#</th><th style="width:150px">작업</th>
+      <th style="width:58px" class="c">시기</th><th>내용과 결과</th></tr>
+  <tr><td class="c">①</td><td><strong>회원가입·계정</strong></td><td class="c">7월<br>8월</td>
+      <td>계정 생성·로그인(scrypt 해시), 서버측 세션, 작품의 계정 소유권 격리.
+          새로고침해도 로그인이 풀리지 않도록 세션 쿠키로 보완</td></tr>
+  <tr><td class="c">②</td><td><strong>프론트엔드</strong></td><td class="c">8월</td>
+      <td>기획 대화 화면, 집필 화면, 원고·템플릿 열람, 작품 설정 조회·수정, 원고 초기화·삭제,
+          생성 중인 글이 한 글자씩 흘러나오는 실시간 출력</td></tr>
+  <tr><td class="c">③</td><td><strong>돌림노래(반복 루프)<br>버그 수정</strong></td><td class="c">8월</td>
+      <td>같은 문장·사건이 되풀이되던 문제. 직전 장 전문을 문맥에서 빼고 요약·상태 원장으로 대체,
+          반복 구간은 <em>장을 다시 쓰지 않고</em> 걷어내는 방식으로 전환</td></tr>
+  <tr><td class="c">④</td><td><strong>결말이 안 나오는<br>문제 수정</strong></td><td class="c">7월</td>
+      <td>목표 분량에 도달해도 갈등이 열린 채 끝나던 문제. 완결 판정을 글자 수가 아니라
+          <strong>결말 장이 실제로 쓰였는지</strong>로 바꾸는 계약 도입</td></tr>
+  <tr><td class="c">⑤</td><td><strong>할루시네이션이<br>일으키는 버그 대응</strong></td><td class="c">8월<br>9월</td>
+      <td>아래 1.4에서 상세히 기술. 이 프로젝트의 핵심 주제이자 최대 난제</td></tr>
+  <tr><td class="c">⑥</td><td>모델 자립·교체</td><td class="c">8월<br>9월</td>
+      <td>외부 API 의존을 끊고 자체 Qwen3.5-4B 서버로 이전(8월) 후,
+          품질 한계를 확인하고 <strong>Gemma4 26B-A4B</strong>로 재교체(9월)</td></tr>
+  <tr><td class="c">⑦</td><td>자동 이어쓰기·원고 수정</td><td class="c">8월</td>
+      <td>사람 개입 없이 최대 20턴 연속 집필, 이미 쓴 장을 고쳐도 이야기 메모리가 어긋나지 않도록 연동</td></tr>
+  <tr><td class="c">⑧</td><td><strong>JEPA 접근<br>검증 및 철회</strong></td><td class="c">8월</td>
+      <td>캡스톤I의 핵심 가설을 측정한 결과 개연성 판정에 유의미하지 않아 소비자 경로에서 제거.
+          아래 1.6 참조</td></tr>
+</table>
+
+<h3>1.3 할루시네이션 강도를 사용자가 고른다</h3>
+<p>
+집필 화면의 <strong>0~1 슬라이더</strong>로 정한다(0 = 정해진 설정에 붙어 쓰기, 1 = 마음껏 지어내기). 처음에는
+안정·균형·대담 세 단계였으나, "할루시네이션을 얼마나 쓸 것인가"가 이 프로젝트의 변수라면 그 변수는 연속값이어야
+한다고 판단해 9월에 슬라이더로 바꿨다. 값은 프롬프트 문구가 아니라 실제 샘플링 온도로 연결되고
+(<code>_creativity_temperature()</code>, 0.35 가 기본 온도), 턴마다 저장돼 자동 이어쓰기가 같은 강도를 물려받는다.
+<strong>지어내기의 양을 작가가 연속적으로 조절한다</strong>는 것이 이 서비스의 첫 번째 축이다.
+</p>
+
+<h3>1.4 할루시네이션이 일으킨 고장과 대응 (작업 ⑤ 상세)</h3>
+<p>
+할루시네이션은 이 프로젝트의 재료인 동시에 버그의 최대 원인이었다. 세 유형으로 나타났다.
+</p>
+<table>
+  <tr><th style="width:128px">고장 유형</th><th style="width:210px">증상</th><th>대응</th></tr>
+  <tr><td><strong>형식 이탈</strong></td>
+      <td>모델이 요구한 형식을 무시해, 내부 관리용 JSON 기록이 소설 본문에 그대로 출력됨</td>
+      <td>모델이 형식을 지킬 것이라 믿지 않는다. 여러 표기 변형을 모두 인식하고,
+          형식이 깨져도 본문에 새지 않도록 최종 차단</td></tr>
+  <tr><td><strong>설정 배신</strong></td>
+      <td>없던 인물·사건을 지어내며 확정된 설정과 충돌 (아래 사례)</td>
+      <td>인과 설계 → 연속성 검토 → 고쳐 쓰기 3단 장치 (1.5)</td></tr>
+  <tr><td><strong>검사기의 오판</strong></td>
+      <td>검사 장치 자체가 정상을 문제로 오인. 로맨스의 역할 호칭("아가씨")을 지어낸 인물명으로 판정해
+          매 장을 불필요하게 다시 씀</td>
+      <td>호칭 판정 규칙을 좁혀, 기존 인물명과 닮은 경우에만 의심하도록 수정</td></tr>
+</table>
+
+<h3>1.5 지어낸 것을 설정에 묶는 개연성 장치 (9월 신규)</h3>
+<p>
+자유롭게 지어내게 두면 이야기가 무너진다. 그래서 <strong>지어내기를 금지하는 대신, 지어낸 것이 기존
+설정과 충돌하는지만 검사</strong>하는 3단 절차를 넣었다. ① 장을 쓰기 <em>전에</em> 목표·장애·전환·결과를
+설계하고, ② 쓴 <em>뒤에</em> 연속성 편집자 역할의 모델이 확정 사실·직전 장면과의 모순을 1~10점으로 검토하며,
+③ 모순이 있거나 7점 미만이면 초안을 넣고 <strong>문제만</strong> 바로잡은 뒤 재검토해 더 나을 때만 채택한다.
+</p>
+
+<div class="note">
+<p><strong>이 장치가 하는 일을 보여 주는 실제 사례.</strong> 모델이 작품에 없던 개 "콩떡"을 지어냈다 —
+분위기를 살리는 <em>좋은</em> 할루시네이션이다. 그런데 본문에서 그 개가
+<strong>"하린아, 또 그거 보고 있어?"라고 말했다</strong> — 설정을 배신하는 <em>나쁜</em> 할루시네이션이다.</p>
+<p>초기 검토는 이를 놓치고 두 장 모두에 10점을 줬다. "동물이 말하면 모순"이라는 일반 지시를 추가해도
+여전히 놓쳤다. 검토 절차에 <strong>모든 대사를 화자에 배정</strong>하게 만들자
+(<code>quote·speaker·can_speak</code>) 즉시 잡아냈다.</p>
+<p>중요한 것은 <strong>고쳐 쓴 결과</strong>다. 게이트는 개를 지우지 않았다. 개는 남고, 개의 대사만 서술로
+바뀌었다. <em>창작은 살리고 모순만 걷어낸다</em> — 이것이 "할루시네이션 활용"의 구체적인 모습이다.</p>
+<p>부수적 교훈: 모델은 자기 글의 오류를 "찾아라"라고 하면 못 찾고, <strong>"열거하라"</strong>고 하면 찾는다.</p>
+</div>
+
+<h3>1.6 JEPA 접근의 검증과 철회 (작업 ⑧ 상세)</h3>
+<p>
+캡스톤I의 핵심 가설은 <strong>"다음 장면의 의미 벡터를 예측해, 실제로 쓰인 장과의 코사인 유사도로
+개연성을 판정한다"</strong>였다. 예측기를 학습해 품질 게이트까지 통과시키고, 임계값을 실제 생성물로
+보정한 뒤 측정했다. 결과는 <strong>가설을 지지하지 않았다.</strong>
+</p>
+<table>
+  <tr><th style="width:150px">표본</th><th class="c" style="width:34px">n</th>
+      <th class="c" style="width:52px">최저</th><th class="c" style="width:52px">평균</th>
+      <th class="c" style="width:52px">최고</th></tr>
+  <tr><td>정상적으로 이어진 장</td><td class="c">6</td><td class="c">0.651</td>
+      <td class="c">0.708</td><td class="c">0.766</td></tr>
+  <tr><td>의도적으로 인과를 끊은 장</td><td class="c">6</td><td class="c">0.502</td>
+      <td class="c">0.596</td><td class="c"><strong>0.637</strong></td></tr>
+</table>
+<p>측정에서 드러난 세 가지 한계다.</p>
+<ul>
+  <li><strong>판정 여유가 없다.</strong> 정상의 최저(0.651)와 파손의 최고(0.637) 사이가
+      <strong>0.014</strong>뿐이다. 표본이 조금만 달라져도 두 분포가 겹친다
+      (실제로 이전 모델에서는 겹쳤다).</li>
+  <li><strong>장르마다 눈금이 달라진다.</strong> 같은 임계값인데 판타지 미스터리의 바닥은 0.732,
+      법정 미스터리는 0.651이었다. 한 장르로 맞춘 값이 다른 장르에서는 멀쩡한 장을 다시 쓰게 만든다.</li>
+  <li><strong>유사도는 인과가 아니다.</strong> 일부러 어긋나게 짝지은 쌍조차 0.497 아래로 내려가지
+      않았다. 임베딩이 값을 압축해, 이 지표는 <em>완전한 딴소리</em>를 걸러낼 뿐 인과를 증명하지 못한다.</li>
+</ul>
+<div class="note">
+<p><strong>왜 구조적으로 어려운가.</strong> 개가 <strong>"하린아"라고 말하는 문장</strong>과 사람이 같은
+말을 하는 문장은 의미 벡터상 거의 구분되지 않는다. 문장 임베딩은 <em>무슨 일이 일어났는가</em>는
+어느 정도 담지만 <em>그 일이 일어날 수 있는가</em>는 담지 않는다. 개연성 판정에 필요한 것은 후자였다.</p>
+<p>그래서 2026년 8월 23일, JEPA·임베딩·검색을 소비자 경로에서 제거했다. 당시 기록:
+<em>"의존성 비용은 치르면서 품질은 얻지 못한다."</em> 대신 도입한 LLM 연속성 검토는
+같은 개 사례를 실제로 잡아냈다(1.5).</p>
+</div>
+<p>
+다만 <strong>버리지는 않았다.</strong> 학습 파이프라인과 평가 지표는 연구용 관리자 도구에 보존해,
+캡스톤I의 산출물과 비교 근거가 남아 있다. 이 검증은 실패가 아니라
+<strong>"측정해서 아니라고 확인한 결과"</strong>이며, 지금의 개연성 장치를 선택한 직접적인 이유다.
+</p>
+
+<h3>1.7 결과물 규모</h3>
+<table>
+  <tr><th style="width:128px">항목</th><th>규모</th></tr>
+  <tr><td>본체 코드</td><td class="n">18,462줄</td></tr>
+  <tr><td>테스트</td><td class="n">30개 파일 · 5,367줄 · <strong>269개 테스트 전부 통과</strong></td></tr>
+  <tr><td>CI</td><td>GitHub Actions — 푸시마다 단위 테스트 + 파이프라인 스모크 테스트</td></tr>
+  <tr><td>실제 생성</td><td>작품 4편, 생성 작업 7건 중 6건 성공, <strong>1편 완결</strong>(11,714자·5장)</td></tr>
+  <tr><td>성능 (RTX 4060 8GB)</td>
+      <td>17GB 모델을 VRAM 4.6 GiB + RAM 분할 적재, 디코드 27~30 tok/s,
+          KV 캐시로 반복 호출 16.4초 → <strong>0.4초</strong></td></tr>
+</table>
+
+<h2>2. 현재 프로젝트 완성도</h2>
+
+<p class="score">90%</p>
+
+<h3>2.1 구간 내 진척 추이</h3>
+<table>
+  <tr><th style="width:96px">시점</th><th class="c" style="width:64px">누적</th><th>도달 상태</th></tr>
+  <tr><td>7월 말</td><td class="c">40%</td>
+      <td>서비스 뼈대 완성 — 계정·큐·워커·작품 격리 저장, 결말 계약 도입</td></tr>
+  <tr><td>8월 말</td><td class="c">75%</td>
+      <td>사용 가능한 제품 — 프론트엔드, 실시간 출력, 반복 루프 수정, 자동 이어쓰기,
+          원고 수정, 자체 모델 서버</td></tr>
+  <tr><td><strong>9월 현재</strong></td><td class="c"><strong>90%</strong></td>
+      <td>주제 구현 완료 — 26B 모델 교체, 개연성 장치 도입, 할루시네이션 3대 고장 유형 대응</td></tr>
+  <tr><td>9월 말 (목표)</td><td class="c">97%</td>
+      <td>검증 완료 — 다이얼 효과 측정, 3만 자 완주, 사람 평가 확보</td></tr>
+</table>
+
+<h3>2.2 영역별 산정</h3>
+<table>
+  <tr><th style="width:180px">영역</th><th class="n" style="width:52px">가중치</th>
+      <th class="n" style="width:52px">완성도</th><th>근거</th></tr>
+  <tr><td>핵심 개념 구현<br>(할루시네이션 활용)</td><td class="n">35%</td><td class="n">95%</td>
+      <td>강도 조절(0~1 슬라이더)과 구속(개연성 장치) 양축이 모두 동작하며 실제 사례로 효과 확인</td></tr>
+  <tr><td>서비스 기능</td><td class="n">25%</td><td class="n">95%</td>
+      <td>회원가입~완결 전 과정 동작. 이번 구간 63개 작업 완료</td></tr>
+  <tr><td>안정성·테스트·문서</td><td class="n">20%</td><td class="n">92%</td>
+      <td>269개 테스트 통과, CI 녹색, 신규 참여자 설치 경로 실제 클론으로 검증</td></tr>
+  <tr><td>실사용 검증</td><td class="n">12%</td><td class="n">80%</td>
+      <td>1편 완결·작업 6/7 성공. 기본 목표인 3만 자 구간은 미완주</td></tr>
+  <tr><td>외부 평가</td><td class="n">8%</td><td class="n">65%</td>
+      <td>자체 지표는 있으나 사람 평가 미실시</td></tr>
+  <tr><th colspan="2">가중 합계</th><th class="n">90%</th><th></th></tr>
+</table>
+
+<p>
+<strong>산정 근거.</strong> 목표로 삼은 "할루시네이션을 활용하는 소설 생성 서비스"는 개념·구현·서비스가
+모두 갖춰져 실제로 소설을 완결까지 생산한다. 남은 10%는 새로 만들 기능이 아니라,
+<strong>만든 것이 더 긴 분량과 사람 독자 앞에서도 통하는지 확인하는 일</strong>이다.
+</p>
+
+<h2>3. 현재 미비하거나 추가 보완이 필요한 부분</h2>
+
+<h3>① 할루시네이션의 "유용성"을 아직 재지 못한다 <span style="color:#b03030">(가장 중요)</span></h3>
+<p>
+현재 장치는 <em>해로운</em> 할루시네이션(설정 모순)만 판정한다. 그러나 목표는 지어내기를 <em>활용</em>하는
+것이므로, "대담"으로 올렸을 때 실제로 더 풍부해지는지를 재는 지표가 필요하다. 연구 구간에서 만든
+<code>useful_hallucination_score</code>·창의적 확장률 지표가 남아 있으나 현재 서비스 경로에 연결돼 있지 않다.
+<strong>다이얼을 돌린 효과를 아직 증명하지 못한 상태</strong>다.
+</p>
+
+<h3>② 품질 평가가 자기 채점에 머묾</h3>
+<p>
+개연성 점수는 같은 모델이 자기 글을 채점한 값이다. 개가 말하는 장면에 10점을 준 사례가 한계를 보여 준다.
+사람이 읽고 평가한 결과나 독립적인 비교 기준이 없다.
+</p>
+
+<h3>③ 목표 분량 완주 미검증</h3>
+<p>
+완결된 작품은 1만 자 목표 1편이다. 기본값은 3만 자, 최대 5만 자인데 이 구간을 끝까지 써 본 기록이 없다.
+길이가 늘수록 앞 내용을 요약으로 압축해 넣는 구조라, <strong>후반부에서 초반 설정이 흐려지는지</strong>가
+확인되지 않았다.
+</p>
+
+<h3>④ 생성 속도와 운영 제약</h3>
+<p>
+3,755자에 276초였으므로 3만 자는 약 35~40분이 필요하다. 또한 워커는 한 번에 한 작업만 처리하며
+다중 사용자 동시 요청은 검증하지 않았다. 개연성 임계값도 미스터리·판타지 위주로 조정돼 있어
+장르별 오탐 가능성이 남아 있다.
+</p>
+
+<h3>⑤ 철회한 접근의 코드가 남아 있다</h3>
+<p>
+검증 후 철회한 JEPA 파이프라인(1.6)과 8월의 Qwen 모델 서버가 연구용 관리자 도구에 보존돼 있다.
+비교 근거로 남긴 것이라 삭제할 계획은 없으나, 현재 서비스와 설치 의존성·CI 시간을 공유하고 있어
+<strong>연구용과 서비스용을 분리</strong>하는 정리가 필요하다.
+</p>
+
+<h2>4. 향후 프로젝트 진행 및 완성 계획</h2>
+
+<div class="goal">
+<strong>9월 말까지 "거의 완료" 상태 도달을 목표로 한다.</strong> 남은 작업은 새 기능 개발이 아니라
+<em>검증</em>이므로, 2주 안에 집중 수행이 가능하다.
+</div>
+
+<table>
+  <tr><th style="width:96px">기간</th><th style="width:150px">목표</th><th>내용</th></tr>
+  <tr><td><strong>9/15~9/21</strong></td><td><strong>다이얼 효과 측정</strong></td>
+      <td>같은 기획으로 안정·균형·대담 3회 생성 후 창의적 확장률·유용한 할루시네이션 점수·모순 발생률을
+          비교. <em>대담이 실제로 더 나은가</em>에 대한 데이터 확보 (프로젝트 목표의 직접 증명)</td></tr>
+  <tr><td><strong>9/15~9/21</strong></td><td><strong>3만 자 완주 검증</strong></td>
+      <td>기본 목표 분량을 끝까지 생성하고 장별 개연성 점수·설정 유지·소요 시간 기록.
+          후반부 붕괴 지점이 있으면 특정해 보완</td></tr>
+  <tr><td><strong>9/22~9/28</strong></td><td><strong>사람 평가 및 보완</strong></td>
+      <td>생성물을 팀원·외부 독자가 블라인드 평가하고 모델 자기 채점과의 상관을 측정.
+          위 두 검증에서 나온 문제를 우선순위대로 수정</td></tr>
+  <tr><td><strong>9/29~9/30</strong></td><td><strong>최종 점검 → 97%</strong></td>
+      <td>전체 회귀 테스트, 문서 갱신, 시연 시나리오 확정</td></tr>
+  <tr><td>10월 이후</td><td>확장 및 대외 활동</td>
+      <td>속도 개선(설계·검토 호출 통합), 다중 사용자 대응, 레거시 코드 분리,
+          캡스톤디자인 경진대회 출품 준비</td></tr>
+</table>
+
+<h3>완성의 기준</h3>
+<p>이 프로젝트가 "완성"되었다고 말하려면 다음을 보여야 한다고 본다.</p>
+<ul>
+  <li><strong>할루시네이션 강도를 올렸을 때 더 풍부해지면서도 모순은 늘지 않는다</strong>는 것을
+      수치로 보일 것 — 프로젝트 목표의 직접적 증명</li>
+  <li>3만 자 장편을 완주하고 후반부에서도 초반 설정이 유지될 것</li>
+  <li>사람 독자의 평가가 확보되고 모델 자기 채점과의 차이가 설명될 것</li>
+</ul>
+
+</body>
+</html>
