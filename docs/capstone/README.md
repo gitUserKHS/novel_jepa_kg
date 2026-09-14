@@ -26,10 +26,21 @@ HTML 의 `[기입 필요]` 두 곳 — **팀명**, **팀원**. 빨간 글씨라 
 
 보고서의 숫자는 추정이 아니라 저장소에서 센 값이다. 다시 확인하려면:
 
-- 커밋 수 (캡스톤II 구간): `git log --since=2026-07-01 --oneline | wc -l`
+- 커밋 수 (캡스톤II 구간, 보고서 커밋 제외): `git log --since=2026-07-01 --oneline -- . ":(exclude)docs/capstone" | wc -l`
 - 작업 수: `TASKS.md` 의 Phase 7~9 체크 항목
 - 테스트 수: `.venv\Scripts\python.exe -m unittest discover -s tests`
+- 슬라이더 온도(1.2·1.3 절): `configs/default.yaml` 의 `llm.novel_temperature`(0.75) 와
+  `src/generation/longform.py` 의 `_creativity_temperature()`. 고정 온도는 `src/memory/story_outline.py`
+  이야기 지도(0.25), `longform.py` 장 설계(0.4)·메모리 기록(0.2)·고쳐 쓰기 상한(0.6),
+  `src/generation/plausibility.py` 검토(0)
+- 창의적 확장률(3 절 ①): `src/evaluation/metrics.py` 의 `hallucination_metrics()` — 직전 장에 없던 단어의 비율
 - JEPA 보정 수치(1.6 절): 커밋 `5650311` 직전 README 의 plausibility calibration 표
 - 성능 실측(1.7 절): `README.md` 의 "속도" 절, `TASKS.md` Phase 9
 
 완성도 90% 와 월별 누적 진척(40/75/90%)은 팀의 판단이 들어간 값이다. 조정하려면 2 절의 표만 바꾸면 된다.
+
+## 고칠 때 함께 바꿀 곳
+
+보고서는 "할루시네이션의 유용성은 점수로 증명하지 않고, 강도별 비교 결과물과 장치가 고친 전·후 원문으로
+보인다"는 방침으로 쓰였다. 이 방침은 0 절(목표), 2 절 표(핵심 개념·독자 검토 행), 3 절 ①·②, 4 절 표,
+"완성의 기준" 에 걸쳐 있으니 하나를 바꾸면 나머지도 맞춘다.
