@@ -151,13 +151,36 @@ def _scenario_consumer() -> None:
         app.run()
         assert len(app.exception) == 0, app.exception
 
-        # 작품 화면: 제목·진행 지표·턴 분량 선택·첫 턴이 큐에 들어가 있다.
+        # 작품 화면: 제목·진행 지표는 보이지만 첫 장은 아직 큐에 없다 — 강도·분량·첫 장면 요청을 정하는 판이 먼저다.
         assert any(title.value == "유리등의 속삭임" for title in app.title)
         metrics = {metric.label: metric.value for metric in app.metric}
         assert metrics["분량"] == "0 / 30,000자"
+        assert not any("대기 순번" in item.value for item in app.markdown), "nothing is generated before the panel is sent"
+        assert len(app.chat_input) == 0, "no next-turn input until the first turn exists"
         turn_selector = next(item for item in app.selectbox if item.label == "이번에 생성할 글자 수")
         assert turn_selector.options == ["약 2,000자", "약 3,000자", "약 5,000자"]
-        assert any("대기 순번" in item.value for item in app.markdown)
+        wish = next(item for item in app.text_area if item.label == "첫 장면 요청")
+        assert wish.value.startswith("첫 장면을 시작해 줘. 참고: 비 오는 도시의 미스터리"), wish.value
+
+        # 판에서 정한 값이 첫 턴에 그대로 들어가고, 집필 화면의 슬라이더·분량 선택도 그 값에서 시작한다.
+        app.slider(key="first_creativity").set_value(0.8)
+        turn_selector.set_value(5000)
+        wish.set_value("폭풍우 치는 밤, 등대에 낯선 배가 닿는다.")
+        _button(app, "✍️ 첫 장 쓰기").click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
+        assert any("대기 순번" in item.value for item in app.markdown), "the first turn is queued only now"
+        assert len(app.chat_input) == 1, "the next-turn input appears once the first turn exists"
+        assert app.slider(key="consumer_creativity").value == 0.8
+        assert next(item for item in app.selectbox if item.label == "이번에 생성할 글자 수").value == 5000
+        from src.service.consumer_store import ConsumerStore
+        from src.utils.config import load_config
+
+        store = ConsumerStore(load_config("configs/default.yaml"))
+        owner = str(store.authenticate_user("reader01", "reader-password")["id"])
+        job = store.list_owned_jobs(owner, str(store.list_owned_stories(owner)[0]["id"]))[0]
+        assert job["instruction"] == "폭풍우 치는 밤, 등대에 낯선 배가 닿는다."
+        assert (float(job["creativity"]), int(job["requested_chars"])) == (0.8, 5000)
 
 
 def _register(app, username: str):  # noqa: ANN001, ANN202
@@ -225,6 +248,12 @@ def _scenario_consumer_manual_template() -> None:
         assert len(app.exception) == 0, app.exception
         assert any(title.value == "등대의 딸" for title in app.title)
         assert any("1인칭, 짧은 문장" in item.value for item in app.markdown), "settings view shows the style guide"
+        # 첫 장은 판에서 보내야 큐에 들어간다. 양식에는 기획 대화가 없으니 요청 칸은 비어 있고, 비운 채 보내면 기본 요청이다.
+        assert not any("대기 순번" in item.value for item in app.markdown), "집필 시작 alone queues nothing"
+        assert next(item for item in app.text_area if item.label == "첫 장면 요청").value == ""
+        _button(app, "✍️ 첫 장 쓰기").click()
+        app.run()
+        assert len(app.exception) == 0, app.exception
         assert any("대기 순번" in item.value for item in app.markdown), "the first turn is queued"
         # 집필 지침은 워커가 쓰는 설정 시트에 들어간다
         from src.service.consumer_store import ConsumerStore
@@ -236,6 +265,9 @@ def _scenario_consumer_manual_template() -> None:
         owner = str(store.authenticate_user("writer03", "reader-password")["id"])
         story = store.list_owned_stories(owner)[0]
         assert story["style_guide"] == "1인칭, 짧은 문장, 매 장 끝에 여운"
+        job = store.list_owned_jobs(owner, str(story["id"]))[0]
+        assert job["instruction"] == "첫 장면을 시작해 줘."
+        assert (float(job["creativity"]), int(job["requested_chars"])) == (0.35, 3000)
         assert style_guide(story) == "1인칭, 짧은 문장, 매 장 끝에 여운"
         assert "집필 지침" not in world_sheet(story)
 

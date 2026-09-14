@@ -1,8 +1,9 @@
 """이야기 공방 — 소비자 앱 (장편 소설 전용).
 
 - 기획: 자유로운 말로 기획 대화 → 작품 카드 확정, 또는 양식 직접 작성(템플릿 저장·불러오기).
-- 집필: 장 단위 연재(SQLite 큐 + 워커). 다음 전개를 말하거나 자동 이어쓰기에 맡긴다. 쓰는 장은 실시간으로 보이고,
-  게이트·개연성 검토가 한 일(걷어내기·다시 쓰기·고쳐 쓰기·점수)이 턴 아래 남는다.
+- 집필: 장 단위 연재(SQLite 큐 + 워커). 첫 장은 강도·분량·첫 장면 요청을 정해 보내야 시작하고, 그 뒤는 다음 전개를
+  말하거나 자동 이어쓰기에 맡긴다. 쓰는 장은 실시간으로 보이고, 게이트·개연성 검토가 한 일(걷어내기·다시 쓰기·
+  고쳐 쓰기·점수)이 턴 아래 남는다.
 - 편집: 장 단위 직접 수정 / AI 퇴고 / 요약 메모리 편집.
 - 모델: src/service/runtime.make_llm_client (기본 Ollama Gemma4 26B-A4B). 일반 채팅은 2026-09-03 에 제거했다.
 """
@@ -109,6 +110,9 @@ CARD_LABELS = {
     "title": "제목", "genre": "장르", "premise": "핵심 소재", "world": "세계관",
     "protagonist": "주인공", "characters": "주요 인물", "target_chars": "목표 분량",
 }
+FIRST_SCENE_CHARS = 500  # 첫 장 준비 판의 '첫 장면 요청' 글자 한도
+FIRST_SCENE_DEFAULT = "첫 장면을 시작해 줘."  # 요청 칸을 비워 두면 이야기 지도의 첫 대목부터 시작한다
+CREATIVITY_HELP = "0 은 정해진 설정에 붙어 쓰고, 1 은 마음껏 지어내. 지어낸 것이 앞 설정과 어긋나면 개연성 장치가 잡아."
 
 
 # ---- 스타일 ----------------------------------------------------------------------------------
@@ -491,7 +495,11 @@ def _plan_turn(config: AppConfig, client: Any, messages: list[dict[str, str]], c
 
 def _start_story(config: AppConfig, store: ConsumerStore, user: dict[str, Any], card: dict[str, Any],
                  *, target: int, consent: bool, first_wish: str = "") -> None:
-    """작품을 만들고 첫 턴을 큐에 넣은 뒤 집필 화면으로. 대화 기획과 직접 작성이 같이 쓴다."""
+    """작품을 만들고 집필 화면으로 간다. 대화 기획과 직접 작성이 같이 쓴다.
+
+    첫 장은 여기서 넣지 않는다 — 집필 화면의 '첫 장을 쓰기 전에' 판에서 할루시네이션 강도·턴 분량·첫 장면 요청을
+    정해 보내야 생성이 시작된다. 기획 대화의 첫 말은 그 판의 요청 칸에 미리 채워 준다.
+    """
     story = store.create_story(
         str(user["id"]),
         title=str(card.get("title", "")), genre=str(card.get("genre", "")),
@@ -499,20 +507,14 @@ def _start_story(config: AppConfig, store: ConsumerStore, user: dict[str, Any], 
         protagonist=str(card.get("protagonist", "")), characters=str(card.get("characters", "") or ""),
         target_chars=int(target), research_consent=bool(consent), style_guide=str(card.get("style_guide", "") or ""),
     )
-    instruction = "첫 장면을 시작해 줘." + (f" 참고: {first_wish[:300]}" if first_wish else "")
-    try:
-        store.enqueue_job(str(user["id"]), story["id"], instruction=instruction,
-                          creativity=config.consumer.default_creativity, requested_chars=config.consumer.default_turn_chars)
-    except ConsumerStoreError as exc:
-        # 작품은 만들어졌고 첫 턴만 못 넣은 것 (예: 점검 중). 집필 화면에서 다시 요청하면 된다.
-        _flash(f"'{story['title']}' 을 만들었지만 첫 장 요청은 넣지 못했어: {exc}")
-    else:
-        _flash(f"'{story['title']}' 의 첫 장을 큐에 넣었어.")
     for key in ("plan_messages", "plan_card"):
         st.session_state.pop(key, None)
     for field, *_rest in MANUAL_FIELDS:
         st.session_state.pop(f"tpl_{field}", None)
+    if first_wish.strip():
+        st.session_state[_first_scene_key(story["id"])] = f"{FIRST_SCENE_DEFAULT} 참고: {first_wish.strip()}"[:FIRST_SCENE_CHARS]
     st.session_state["consumer_story_id"] = story["id"]
+    _flash(f"'{story['title']}' 을 만들었어. 첫 장을 쓰기 전에 강도와 분량을 정해 줘.")
     st.rerun()
 
 
@@ -752,7 +754,7 @@ def _render_job(job: dict[str, Any], sections: list[str], store: ConsumerStore, 
                 except ConsumerStoreError as exc:
                     st.error(str(exc))
                 else:
-                    _rerun_live()
+                    _rerun_after_removal(store, user_id, story_id)
     with st.chat_message("assistant"):
         if status == JOB_SUCCEEDED:
             st.session_state.pop(f"consumer_typed_{job_id}", None)
@@ -855,6 +857,14 @@ def _rerun_live() -> None:
         st.rerun()
 
 
+def _rerun_after_removal(store: ConsumerStore, user_id: str, story_id: str) -> None:
+    """턴을 지운 뒤의 새로고침. 턴이 하나도 안 남았으면 첫 장 준비 판이 나와야 하는데 그 판은 main 에 있으니 전체 새로고침."""
+    if store.list_owned_jobs(user_id, story_id, limit=1):
+        _rerun_live()
+    else:
+        st.rerun()
+
+
 def _enqueue_auto_turn(store: ConsumerStore, user_id: str, story_id: str, creativity: float, turn_chars: int) -> bool:
     """AI 가 전개를 정하는 턴 하나를 큐에 넣는다. 지시는 워커가 집을 때 채운다."""
     try:
@@ -906,6 +916,108 @@ def _auto_controls(config: AppConfig, store: ConsumerStore, user_id: str, story:
             _rerun_live()
 
 
+def _first_scene_key(story_id: str) -> str:
+    return f"first_scene_{story_id}"
+
+
+def _awaiting_first_turn(jobs: list[dict[str, Any]], draft: str, completed: bool) -> bool:
+    """턴이 하나도 없고 원고도 없는 작품 — 막 만들었거나 초기화·대화 전체 삭제로 비운 작품. 첫 장 준비 판이 대신 나온다."""
+    return not jobs and not draft.strip() and not completed
+
+
+def _turn_controls(config: AppConfig, *, key_prefix: str) -> tuple[float, int]:
+    """할루시네이션 강도 슬라이더와 턴 분량 선택. 첫 장 준비 판(main)과 집필 fragment 가 서로 다른 key 로 그린다."""
+    creativity_key, chars_key = f"{key_prefix}_creativity", f"{key_prefix}_turn_chars"
+    options = config.consumer.allowed_turn_chars
+    left, right = st.columns([1.3, 1])
+    with left:
+        # 프롬프트 문구가 아니라 샘플링 온도로 이어진다 (longform._creativity_temperature). 세션에 값이 이미 있으면
+        # (첫 장 준비 판이 물려준 값) 기본값을 주지 않는다 — 둘 다 주면 Streamlit 이 경고를 남긴다.
+        creativity = st.slider(
+            "할루시네이션 강도", min_value=0.0, max_value=1.0, step=0.05,
+            value=None if creativity_key in st.session_state else float(config.consumer.default_creativity),
+            format="%.2f", key=creativity_key, help=CREATIVITY_HELP,
+        )
+        st.caption("0 설정 충실 · 0.35 균형 · 1 자유 창작")
+    with right:
+        turn_chars = st.selectbox("이번에 생성할 글자 수", options=options,
+                                  index=None if chars_key in st.session_state else options.index(config.consumer.default_turn_chars),
+                                  format_func=lambda value: f"약 {value:,}자", key=chars_key)
+    return float(creativity), int(turn_chars)
+
+
+def _first_turn_panel(config: AppConfig, store: ConsumerStore, user_id: str, story: dict[str, Any]) -> bool:
+    """첫 장을 쓰기 전에 강도·분량·첫 장면 요청을 정하는 판. 집필 시작을 눌렀다고 생성하지 않고, 여기서 보내야 큐에 들어간다.
+
+    main() 에서 그린다 — 1초마다 다시 도는 집필 fragment 안에서는 글 적는 칸이 버티지 못한다. 보내면 판을 지우고 True 를
+    돌려주며, 같은 실행에서 집필 화면이 큐에 들어간 첫 턴을 보인다. 보낸 값은 집필 fragment 의 슬라이더·분량 선택에
+    물려줘 다음 턴도 같은 값에서 시작한다.
+    """
+    story_id = str(story["id"])
+    holder = st.empty()
+    with holder.container(border=True):
+        st.markdown("**첫 장을 쓰기 전에**")
+        st.caption("아직 아무것도 생성하지 않았어. 강도와 분량을 정하고 보내면 첫 장이 큐에 들어가. 둘 다 턴마다 다시 고를 수 있어.")
+        with st.form("first_turn_form", border=False):
+            creativity, turn_chars = _turn_controls(config, key_prefix="first")
+            wish = st.text_area(
+                "첫 장면 요청", key=_first_scene_key(story_id), max_chars=FIRST_SCENE_CHARS, height=100,
+                placeholder="예: 폭풍우 치는 밤, 등대에 낯선 배가 닿는다. 비워 두면 이야기 지도의 첫 대목부터 시작해.",
+                help="첫 장면에서 일어날 사건이나 분위기. 세계관·인물은 따로 적지 않아도 매 장 프롬프트에 들어가.",
+            )
+            sent = st.form_submit_button("✍️ 첫 장 쓰기", type="primary", width="stretch")
+    if not sent:
+        return False
+    try:
+        store.enqueue_job(user_id, story_id, instruction=wish.strip() or FIRST_SCENE_DEFAULT,
+                          creativity=creativity, requested_chars=turn_chars)
+    except (ValueError, ConsumerStoreError) as exc:
+        st.error(str(exc))
+        return False
+    holder.empty()
+    # 집필 fragment 의 위젯은 이 실행에서 아직 그려지지 않았으니 값을 미리 넣을 수 있다.
+    st.session_state["consumer_creativity"] = creativity
+    st.session_state["consumer_turn_chars"] = turn_chars
+    st.toast("첫 장을 큐에 넣었어.")
+    return True
+
+
+def _turn_input(config: AppConfig, store: ConsumerStore, user_id: str, story: dict[str, Any], *, draft: str,
+                outstanding: dict[str, Any] | None, completed: bool, worker_fresh: bool, model: dict[str, Any]) -> None:
+    """다음 전개 조작부: 강도·분량, 막힌 이유, 자동 이어쓰기, 전개 입력. 집필 fragment 안에서 그린다."""
+    story_id = str(story["id"])
+    st.divider()
+    creativity, turn_chars = _turn_controls(config, key_prefix="consumer")
+
+    blocked_reason = ""
+    if store.is_maintenance():
+        blocked_reason = "서비스 점검 중이야. 진행 중인 원고는 안전하게 보관돼."
+    elif not model["ready"]:
+        blocked_reason = f"집필 모델을 준비하고 있어. {model['reason']}"
+    elif outstanding:
+        blocked_reason = f"현재 요청이 {STATUS_LABELS.get(str(outstanding['status']), '처리 중')}이야."
+    elif not worker_fresh:
+        blocked_reason = "집필 worker 연결을 확인하고 있어. (run_service.bat 이 실행 중인지 확인해줘)"
+    elif completed:
+        blocked_reason = "결말까지 완성했어. 전체 원고나 이어쓰기 번들을 내려받을 수 있어."
+    if blocked_reason:
+        st.caption(blocked_reason)
+    elif len(draft) >= int(story["target_chars"]):
+        st.caption("목표 분량에 도달했어. 다음 요청에서 결말 장면까지 완성할게.")
+
+    _auto_controls(config, store, user_id, story, outstanding=outstanding, completed=completed,
+                   blocked=blocked_reason, creativity=creativity, turn_chars=turn_chars)
+
+    prompt = st.chat_input("다음 전개를 말해줘 (예: 박 노인이 20년 전 일을 털어놓게 해줘)",
+                           disabled=bool(blocked_reason), key="consumer_chat_input")
+    if prompt:
+        try:
+            store.enqueue_job(user_id, story_id, instruction=prompt, creativity=creativity, requested_chars=turn_chars)
+            _rerun_live()
+        except (ValueError, ConsumerStoreError) as exc:
+            st.error(str(exc))
+
+
 @st.fragment(run_every=1.0)
 def _story_live(config: AppConfig, store: ConsumerStore, client: Any, user_id: str, story_id: str) -> None:
     story = store.get_owned_story(user_id, story_id)
@@ -954,57 +1066,14 @@ def _story_live(config: AppConfig, store: ConsumerStore, client: Any, user_id: s
                 except ConsumerStoreError as exc:
                     st.error(str(exc))
                 else:
-                    _rerun_live()
+                    _rerun_after_removal(store, user_id, story_id)
         for job in jobs:
             _render_job(job, sections, store, user_id, story_id=story_id, live_prose=live_prose, note=live_note)
-    else:
-        with st.chat_message("assistant"):
-            st.markdown("첫 장면에서 일어날 사건이나 원하는 분위기를 말해줘.")
 
-    st.divider()
-    control_a, control_b = st.columns([1.3, 1])
-    with control_a:
-        # 할루시네이션 강도. 프롬프트 문구가 아니라 샘플링 온도로 이어진다 (longform._creativity_temperature).
-        creativity = st.slider(
-            "할루시네이션 강도", min_value=0.0, max_value=1.0, step=0.05,
-            value=float(config.consumer.default_creativity), format="%.2f", key="consumer_creativity",
-            help="0 은 정해진 설정에 붙어 쓰고, 1 은 마음껏 지어내. 지어낸 것이 앞 설정과 어긋나면 개연성 장치가 잡아.",
-        )
-        st.caption("0 설정 충실 · 0.35 균형 · 1 자유 창작")
-    with control_b:
-        turn_chars = st.selectbox("이번에 생성할 글자 수", options=config.consumer.allowed_turn_chars,
-                                  index=config.consumer.allowed_turn_chars.index(config.consumer.default_turn_chars),
-                                  format_func=lambda value: f"약 {value:,}자", key="consumer_turn_chars")
-
-    blocked_reason = ""
-    if store.is_maintenance():
-        blocked_reason = "서비스 점검 중이야. 진행 중인 원고는 안전하게 보관돼."
-    elif not model["ready"]:
-        blocked_reason = f"집필 모델을 준비하고 있어. {model['reason']}"
-    elif outstanding:
-        blocked_reason = f"현재 요청이 {STATUS_LABELS.get(str(outstanding['status']), '처리 중')}이야."
-    elif not worker_fresh:
-        blocked_reason = "집필 worker 연결을 확인하고 있어. (run_service.bat 이 실행 중인지 확인해줘)"
-    elif completed:
-        blocked_reason = "결말까지 완성했어. 전체 원고나 이어쓰기 번들을 내려받을 수 있어."
-    if blocked_reason:
-        st.caption(blocked_reason)
-    elif len(draft) >= int(story["target_chars"]):
-        st.caption("목표 분량에 도달했어. 다음 요청에서 결말 장면까지 완성할게.")
-
-    _auto_controls(config, store, user_id, story, outstanding=outstanding, completed=completed,
-                   blocked=blocked_reason, creativity=float(creativity),
-                   turn_chars=int(turn_chars))
-
-    prompt = st.chat_input("다음 전개를 말해줘 (예: 박 노인이 20년 전 일을 털어놓게 해줘)",
-                           disabled=bool(blocked_reason), key="consumer_chat_input")
-    if prompt:
-        try:
-            store.enqueue_job(user_id, story_id, instruction=prompt, creativity=float(creativity),
-                              requested_chars=int(turn_chars))
-            _rerun_live()
-        except (ValueError, ConsumerStoreError) as exc:
-            st.error(str(exc))
+    # 첫 장은 위의 '첫 장을 쓰기 전에' 판(main)에서 보낸다. 다음 전개 조작부는 첫 턴이 들어온 뒤부터 보인다.
+    if not _awaiting_first_turn(jobs, draft, completed):
+        _turn_input(config, store, user_id, story, draft=draft, outstanding=outstanding, completed=completed,
+                    worker_fresh=worker_fresh, model=model)
 
     if queue["queued"] or queue["running"]:
         st.caption(f"전체 대기 {queue['queued']}건 · 실행 {queue['running']}건")
@@ -1030,7 +1099,7 @@ def _story_live(config: AppConfig, store: ConsumerStore, client: Any, user_id: s
                 except ConsumerStoreError as exc:
                     st.error(str(exc))
                 else:
-                    _rerun_live()
+                    _rerun_after_removal(store, user_id, story_id)
         with delete_column:
             st.markdown("**작품 삭제**")
             st.caption("작품과 원고를 데이터베이스에서 완전히 지우고 목록에서 없애.")
@@ -1267,8 +1336,15 @@ def _story_mode(config: AppConfig, store: ConsumerStore, templates: StoryTemplat
                         st.error(str(exc))
                     else:
                         st.success(f"템플릿 '{saved['name']}' 으로 저장했어.")
-    _section_editor(config, store, client, str(user["id"]), story)
-    _story_live(config, store, client, str(user["id"]), str(story["id"]))
+    user_id, story_id = str(user["id"]), str(story["id"])
+    workspace = StoryWorkspace.for_story(config, story_id, create=True)
+    awaiting = _awaiting_first_turn(store.list_owned_jobs(user_id, story_id), read_draft(workspace.draft),
+                                    bool(story.get("completed_at")))
+    if awaiting:
+        awaiting = not _first_turn_panel(config, store, user_id, story)
+    if not awaiting:
+        _section_editor(config, store, client, user_id, story)
+    _story_live(config, store, client, user_id, story_id)
 
 
 # ---- 메인 --------------------------------------------------------------------------------------
